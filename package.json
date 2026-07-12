@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "check": "node --check server.js && node --check public/app.js",
-    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/smoke.ps1"
+    "test": "node tests/task-metadata.test.js && powershell -NoProfile -ExecutionPolicy Bypass -File tests/smoke.ps1"
   },
   "engines": {
     "node": ">=22"

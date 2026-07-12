@@ -457,6 +457,7 @@ td { overflow-wrap: anywhere; }
 .git-image-preview figcaption { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(260px, 1fr) repeat(5, auto); align-items: end; gap: 9px; }
 .git-commit-control label { margin-top: 0; }
+.git-commit-control small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .git-actions .form-message { grid-column: 1 / -1; }
 
 .conversation-history-wrap { position: relative; flex: 1; min-height: 260px; overflow: hidden; }

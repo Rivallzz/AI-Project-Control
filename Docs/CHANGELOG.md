@@ -22,6 +22,7 @@
 - Added a portfolio overview, attention inbox and derived project states based on repository, run and Graphify signals.
 - Added important/error/all live-feed filters and compact run metadata for calmer daily operation.
 - Replaced the separate live-feed column with a full-width project conversation that shows live provider phases and focused tool events inside the current assistant response.
+- Replaced prompt-fragment task branches with concise semantic branch names and added persistent per-branch commit-message suggestions without an additional LLM call.
 - Removed redundant global/history refresh controls and run-folder/follow-up actions from the normal chat flow.
 - Added clipboard screenshot paste with the same validated local attachment pipeline as file selection.
 - Added a blocking, accessible loading state while project connections are switched and refreshed.

@@ -54,6 +54,9 @@ let graphDidDrag = false;
 let knowledgeSearchTimer = null;
 let gitData = null;
 let selectedGitFile = null;
+let visibleGitDraftKey = null;
+let visibleGitDraftValue = null;
+const gitDraftSaveTimers = new Map();
 let selectedAttachments = [];
 let liveJobs = new Map();
 let jobEventSource = null;
@@ -472,6 +475,15 @@ function renderGitState(data) {
   elements.gitState.className = `status ${data.clean ? 'ok' : 'warn'}`;
   elements.gitState.textContent = data.clean ? 'clean' : `${data.files.length} Änderung(en)`;
   elements.gitSummary.replaceChildren();
+  const draftKey = `${data.projectId}::${data.branch}`;
+  if (draftKey !== visibleGitDraftKey) {
+    visibleGitDraftKey = draftKey;
+    visibleGitDraftValue = data.commitDraft || '';
+    elements.gitCommitMessage.value = visibleGitDraftValue;
+  } else if (document.activeElement !== elements.gitCommitMessage && elements.gitCommitMessage.value === visibleGitDraftValue && (data.commitDraft || '') !== visibleGitDraftValue) {
+    visibleGitDraftValue = data.commitDraft || '';
+    elements.gitCommitMessage.value = visibleGitDraftValue;
+  }
   for (const text of [
     `Arbeitsordner: ${data.worktree}`,
     `Branch: ${data.branch || '—'}`,
@@ -526,6 +538,21 @@ async function loadGitState(worktree = elements.gitTarget.value) {
   catch (error) { elements.gitState.className = 'status fail'; elements.gitState.textContent = 'Fehler'; elements.gitMessage.textContent = error.message; }
 }
 
+function queueCommitDraftSave(delay = 300) {
+  if (!activeProject || !gitData?.worktree || !gitData?.branch) return;
+  const key = `${activeProject.id}::${gitData.branch}`;
+  const payload = { projectId: activeProject.id, worktree: gitData.worktree, message: elements.gitCommitMessage.value };
+  clearTimeout(gitDraftSaveTimers.get(key));
+  gitDraftSaveTimers.set(key, setTimeout(async () => {
+    try {
+      await api('/api/git/commit-draft', { method: 'POST', body: JSON.stringify(payload) });
+      if (key === visibleGitDraftKey) visibleGitDraftValue = payload.message.trim();
+    }
+    catch (error) { elements.gitMessage.textContent = `Commit-Entwurf konnte nicht gespeichert werden: ${error.message}`; }
+    finally { gitDraftSaveTimers.delete(key); }
+  }, delay));
+}
+
 async function loadGitFileDiff(filePath) {
   selectedGitFile = filePath;
   elements.gitFileList.querySelectorAll('.git-file-row').forEach((row) => row.classList.toggle('active', row.querySelector('[data-git-file]')?.dataset.gitFile === filePath));
@@ -551,7 +578,7 @@ async function activateProject(projectId) {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
-    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; runHistory = []; historyFollow = true; historyLatestVersion = null; elements.gitTarget.replaceChildren();
+    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; visibleGitDraftKey = null; visibleGitDraftValue = null; elements.gitCommitMessage.value = ''; runHistory = []; historyFollow = true; historyLatestVersion = null; elements.gitTarget.replaceChildren();
     elements.gitFileList.replaceChildren(); elements.gitDiffFileName.textContent = 'Projekt wird gewechselt'; elements.gitDiff.textContent = 'Der Git-Zustand des neuen Projekts wird geladen.';
     elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src');
     elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitIntegrate.disabled = true; elements.gitPush.disabled = true;
@@ -1082,7 +1109,7 @@ async function commitSelectedGitFiles(pushAfterCommit) {
   let committed = false;
   try {
     const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree, paths, message }) });
-    committed = true; elements.gitCommitMessage.value = '';
+    committed = true; elements.gitCommitMessage.value = ''; visibleGitDraftValue = '';
     if (pushAfterCommit) {
       elements.gitMessage.textContent = 'Commit erstellt, Branch wird gepusht…';
       const pushed = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
@@ -1093,6 +1120,8 @@ async function commitSelectedGitFiles(pushAfterCommit) {
 }
 elements.gitCommit.addEventListener('click', () => commitSelectedGitFiles(false));
 elements.gitCommitPush.addEventListener('click', () => commitSelectedGitFiles(true));
+elements.gitCommitMessage.addEventListener('input', () => queueCommitDraftSave());
+elements.gitCommitMessage.addEventListener('change', () => queueCommitDraftSave(0));
 elements.gitTarget.addEventListener('change', () => { selectedGitFile = null; loadGitState(elements.gitTarget.value); });
 elements.gitIntegrate.addEventListener('click', async () => {
   const canCleanup = gitData?.integration?.canCleanup;

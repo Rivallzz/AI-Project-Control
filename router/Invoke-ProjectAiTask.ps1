@@ -198,6 +198,17 @@ Write-task context policy:
 "@
 }
 
+$deliveryMetadataPolicy = if ($Mode -eq 'Write') {
+@"
+Write-task delivery metadata:
+- Immediately before the final completion sentinel, include exactly one line `Suggested branch name: ai/<concise-outcome-name>`.
+- Immediately before the final completion sentinel, include exactly one line `Suggested commit message: <imperative summary>`.
+- The branch suffix must describe the implemented outcome in 2-5 lowercase kebab-case words, not repeat the user's conversational opening.
+- The commit message must be imperative, concrete, at most 72 characters and match the actual changed files.
+"@
+}
+else { '' }
+
 $prompt = @"
 You are executing a controlled task for the local project "$ProjectName".
 
@@ -215,6 +226,8 @@ Mandatory workflow:
 Execution mode: $Mode
 
 $contextPolicy
+
+$deliveryMetadataPolicy
 
 Task package:
 
@@ -337,6 +350,7 @@ Final response requirements:
 - Answer the goal directly and cite the original repository paths used.
 - State whether Graphify and Serena were used or skipped, with one short reason each.
 - State repository changes, risks and open gates.
+$deliveryMetadataPolicy
 - End the final line with exactly AI_PROJECT_TASK_COMPLETE when all requested items are answered.
 - Otherwise end the final line with AI_PROJECT_TASK_BLOCKED: followed by the concrete reason.
 - Do not offer a menu, ask what to inspect, or stop after a partial summary.
@@ -373,6 +387,17 @@ Final response requirements:
     $blockedMatch = [regex]::Match($completionText, '(?im)^AI_PROJECT_TASK_BLOCKED:\s*(.+)$')
     $blockedConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $blockedMatch.Success
     $blockedReason = if ($blockedConfirmed) { $blockedMatch.Groups[1].Value.Trim() } else { $null }
+    # Codex and Claude may wrap the final response in JSON, so metadata values
+    # stop at either a real line break or an escaped JSON boundary.
+    $suggestedCommitMatch = [regex]::Match($completionText, '(?i)Suggested commit message:\s*`?([^\\\r\n"]{1,200})')
+    $suggestedBranchMatch = [regex]::Match($completionText, '(?i)Suggested branch name:\s*(ai/[a-z0-9][a-z0-9-]{1,63})')
+    $suggestedCommitMessage = $null
+    if ($suggestedCommitMatch.Success) {
+        $commitCandidate = $suggestedCommitMatch.Groups[1].Value.Trim().Trim('`')
+        if ($commitCandidate.Length -gt 200) { $commitCandidate = $commitCandidate.Substring(0, 200) }
+        if ($commitCandidate.Length -gt 0) { $suggestedCommitMessage = $commitCandidate }
+    }
+    $suggestedBranchName = if ($suggestedBranchMatch.Success) { $suggestedBranchMatch.Groups[1].Value.Trim() } else { $null }
 
     $attempt = [pscustomobject]@{
         provider = $candidate
@@ -408,6 +433,8 @@ Final response requirements:
             selected_provider = $candidate
             mode = $Mode
             repository_changed = $repoChanged
+            suggested_commit_message = $suggestedCommitMessage
+            suggested_branch_name = $suggestedBranchName
             attempts = $attempts
             handoffs = $handoffs
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8

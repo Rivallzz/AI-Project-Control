@@ -47,7 +47,7 @@ Serena is global but project-activated. Its caches and project metadata live und
 
 The local Hermes adapter receives the complete bounded execution prompt directly. It does not depend on the local model deciding to open an external prompt file. A 24,000-character guard keeps the invocation below the Windows command-line budget; larger local tasks must be narrowed or use Codex/Claude.
 
-Write tasks receive a unique `ai/*` branch in an automatic worktree based on the project's integration branch. A local `develop` branch is preferred when present; otherwise the repository's default branch is used. The canonical checkout is never used as the write directory.
+Write tasks receive a unique semantic `ai/*` branch in an automatic worktree based on the project's integration branch. Deterministic intent and subject terms replace conversational prompt openings; after successful execution the provider may refine the branch to a concise implemented-outcome name without another LLM call. A local `develop` branch is preferred when present; otherwise the repository's default branch is used. The canonical checkout is never used as the write directory.
 
 ## Dynamic inventory
 
@@ -58,6 +58,8 @@ Catalog entries may also declare workflow role, activation and cost policy. Thes
 ## Git boundary
 
 The Git view is a review and publication surface, not an editor. It discovers every worktree registered with the selected project directly from Git, defaults to the latest changed task worktree and allows the owner to switch explicitly between task worktrees and the integration checkout. Status is compact and a read-only diff is loaded only for the file the owner opens. Checkboxes are reserved for commit selection. Commit and push commands run in the selected worktree, never silently in another checkout.
+
+Each branch owns one local commit-message draft under `%LOCALAPPDATA%\AI Project Control\git-drafts.json`. Write tasks start with a deterministic fallback and successful providers return a more precise suggestion as delivery metadata. User edits are saved by project and branch, survive worktree switching, and are removed after commit or branch cleanup. Drafts never enter project repositories.
 
 Changed PNG, JPEG, WebP and GIF files are previewed through a bounded local-only endpoint after the requested path is verified against the selected worktree's current Git status. The endpoint never exposes arbitrary repository files. Clean `ai/*` worktrees that Git proves are already ancestors of the integration branch are offered as explicit cleanup candidates; dirty or unmerged branches are never included.
 

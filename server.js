@@ -15,6 +15,7 @@ const PUBLIC_ROOT = path.join(__dirname, 'public');
 const DATA_ROOT = process.env.AI_PROJECT_CONTROL_DATA || path.join(process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local'), 'AI Project Control');
 const PROJECTS_PATH = path.join(DATA_ROOT, 'projects.json');
 const SYSTEMS_PATH = path.join(DATA_ROOT, 'systems.json');
+const GIT_DRAFTS_PATH = path.join(DATA_ROOT, 'git-drafts.json');
 const MEMORY_ROOT = path.join(DATA_ROOT, 'memory');
 const ROUTER_ROOT = path.join(__dirname, 'router');
 const STATUS_SCRIPT = path.join(ROUTER_ROOT, 'Get-AiProviderStatus.ps1');
@@ -49,6 +50,7 @@ let statusCacheAt = 0;
 const componentCache = new Map();
 let systemCache = null;
 let systemCacheAt = 0;
+let gitDraftWriteChain = Promise.resolve();
 
 function defaultRegistry() {
   const projects = [];
@@ -196,6 +198,98 @@ async function readJsonFile(filePath) {
 function safeId(value) {
   const base = String(value || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
   return base || 'project';
+}
+
+function taskBranchSlug(task) {
+  const text = String(task || '').toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss');
+  const concepts = [];
+  const addConcept = (name, pattern) => { if (pattern.test(text) && !concepts.includes(name)) concepts.push(name); };
+  addConcept('branch-names', /branch(?:es|e)?[^\n.!?]{0,80}(?:titel|name)|(?:titel|name)[^\n.!?]{0,80}branch/);
+  addConcept('commit-drafts', /commit[^\n.!?]{0,60}(?:nachricht|message|text|entwurf)|(?:nachricht|message|entwurf)[^\n.!?]{0,60}commit/);
+  addConcept('chat-workspace', /chat|gespraech|conversation/);
+  addConcept('live-progress', /live[- ]?feed|fortschritt|progress|stream/);
+  addConcept('git-workflow', /\bgit\b|worktree|merge|push|pull request/);
+  addConcept('knowledge-workspace', /graphify|obsidian|wissen|knowledge/);
+  addConcept('provider-routing', /provider|codex|claude|ollama|hermes/);
+  addConcept('responsive-ui', /responsive|bildschirm|viewport|skalier/);
+  addConcept('image-support', /bild|image|screenshot|asset/);
+  addConcept('documentation', /dokument|documentation|readme|changelog/);
+  addConcept('tests', /\btest|validier|smoke|regression/);
+
+  if (!concepts.length) {
+    const stopWords = new Set([
+      'aber', 'alle', 'alles', 'auch', 'bitte', 'dann', 'dass', 'dies', 'diese', 'diesem', 'dieser', 'eine', 'einen', 'einer',
+      'etwas', 'fuer', 'gerne', 'habe', 'hier', 'ich', 'immer', 'kann', 'kannst', 'machen', 'meine', 'meinen', 'mir', 'moechte',
+      'noch', 'oder', 'sind', 'soll', 'sollen', 'sollte', 'ueber', 'und', 'uns', 'unser', 'von', 'was', 'wenn', 'werden', 'wird',
+      'with', 'this', 'that', 'from', 'into', 'please', 'should', 'would', 'could', 'have', 'will', 'your', 'the', 'and', 'for',
+      'okay', 'gleich', 'direkt', 'zudem', 'ebenfalls', 'wichtig', 'momentan', 'jeweilig', 'jeweilige', 'jeweiligen',
+      'ueberarbeiten', 'ueberarbeite', 'fortfahren', 'weitermachen', 'weiter',
+    ]);
+    const words = text.replace(/[^a-z0-9]+/g, ' ').split(/\s+/)
+      .filter((word) => word.length > 2 && !stopWords.has(word) && !/^\d+$/.test(word));
+    concepts.push(...[...new Set(words)].slice(0, 4));
+  }
+
+  const action = /fehler|bug|kaputt|funktioniert nicht|failed|fix|repair/.test(text) ? 'fix'
+    : /hinzuf|ergaenz|einbau|install|create|add|implement/.test(text) ? 'add'
+      : /pruef|analys|review|audit/.test(text) ? 'review'
+        : /verbesser|ueberarbeit|optimier|anpass|schlecht|nicht aussagend|besser|improve|refactor/.test(text) ? 'improve' : 'update';
+  return safeId([action, ...concepts.slice(0, 2)].join('-')).slice(0, 48);
+}
+
+function defaultCommitMessage(task) {
+  const words = taskBranchSlug(task).split('-');
+  const action = { add: 'Add', fix: 'Fix', improve: 'Improve', review: 'Review', update: 'Update' }[words.shift()] || 'Update';
+  return `${action} ${words.join(' ') || 'project task'}`.slice(0, 72);
+}
+
+function gitDraftKey(projectId, branch) {
+  return `${safeId(projectId)}::${String(branch || '')}`;
+}
+
+async function loadGitDrafts() {
+  if (!fs.existsSync(GIT_DRAFTS_PATH)) return { schemaVersion: 1, drafts: {} };
+  try {
+    const store = await readJsonFile(GIT_DRAFTS_PATH);
+    return store && store.schemaVersion === 1 && store.drafts && typeof store.drafts === 'object' ? store : { schemaVersion: 1, drafts: {} };
+  } catch { return { schemaVersion: 1, drafts: {} }; }
+}
+
+async function saveGitDrafts(store) {
+  await fsp.mkdir(DATA_ROOT, { recursive: true });
+  await fsp.writeFile(GIT_DRAFTS_PATH, JSON.stringify(store, null, 2), 'utf8');
+}
+
+async function setCommitDraft(projectId, branch, message) {
+  const cleanMessage = String(message || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+  if (!branch || !cleanMessage) return null;
+  const operation = gitDraftWriteChain.catch(() => {}).then(async () => {
+    const store = await loadGitDrafts();
+    store.drafts[gitDraftKey(projectId, branch)] = { message: cleanMessage, updatedAt: new Date().toISOString() };
+    await saveGitDrafts(store);
+    return cleanMessage;
+  });
+  gitDraftWriteChain = operation;
+  return operation;
+}
+
+async function getCommitDraft(projectId, branch) {
+  if (!branch) return null;
+  await gitDraftWriteChain.catch(() => {});
+  const store = await loadGitDrafts();
+  return store.drafts[gitDraftKey(projectId, branch)]?.message || null;
+}
+
+async function clearCommitDraft(projectId, branch) {
+  if (!branch) return;
+  const operation = gitDraftWriteChain.catch(() => {}).then(async () => {
+    const store = await loadGitDrafts();
+    delete store.drafts[gitDraftKey(projectId, branch)];
+    await saveGitDrafts(store);
+  });
+  gitDraftWriteChain = operation;
+  return operation;
 }
 
 function taskIntent(task, mode) {
@@ -692,7 +786,7 @@ function snapshotJob(job) {
     id: job.id, kind: job.kind || 'task', phase: job.phase || null,
     projectId: job.projectId, projectName: job.projectName,
     status: job.status, provider: job.provider, mode: job.mode, useSubscriptionTokens: job.useSubscriptionTokens,
-    workingDirectory: job.workingDirectory, taskPreview: job.taskPreview,
+    workingDirectory: job.workingDirectory, branch: job.branch || null, taskPreview: job.taskPreview,
     createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
     exitCode: job.exitCode, runDirectory: job.runDirectory, pid: job.pid,
     stdout: job.stdout, stderr: job.stderr,
@@ -752,13 +846,47 @@ async function registerProjectFromChat(task) {
 }
 
 async function createTaskWorktree(project, task, id) {
-  const branch = `ai/${safeId(task).slice(0, 28)}-${id.slice(0, 8)}`;
+  const baseBranch = `ai/${taskBranchSlug(task)}`;
+  const [localExists, remoteExists] = await Promise.all([
+    execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/heads/${baseBranch}`]),
+    execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${baseBranch}`]),
+  ]);
+  const branch = localExists.exitCode === 0 || remoteExists.exitCode === 0 ? `${baseBranch}-${id.slice(0, 8)}` : baseBranch;
   const integrationBranch = await getIntegrationBranch(project);
   const workingDirectory = path.join(WORKTREE_ROOT, safeId(project.name), `${new Date().toISOString().replace(/[:.]/g, '-')}-${id.slice(0, 8)}`);
   await fsp.mkdir(path.dirname(workingDirectory), { recursive: true });
   const result = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'add', '-b', branch, workingDirectory, integrationBranch], { timeout: 60000 });
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Automatic task worktree creation failed.');
+  await setCommitDraft(project.id, branch, defaultCommitMessage(task));
   return { workingDirectory, branch, integrationBranch };
+}
+
+async function finalizeTaskGitMetadata(project, job, originalBranch, task) {
+  if (!originalBranch || !job.runDirectory || !fs.existsSync(path.join(job.runDirectory, 'routing-result.json'))) return;
+  let result;
+  try { result = await readJsonFile(path.join(job.runDirectory, 'routing-result.json')); } catch { return; }
+  let branch = originalBranch;
+  const suggestedBranch = String(result.suggested_branch_name || '').trim();
+  if (job.status === 'completed' && /^ai\/[a-z0-9][a-z0-9-]{1,63}$/.test(suggestedBranch) && suggestedBranch !== branch) {
+    const current = await execFileAsync('git.exe', ['-C', job.workingDirectory, 'branch', '--show-current']);
+    const upstream = await execFileAsync('git.exe', ['-C', job.workingDirectory, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+    const [localExists, remoteExists] = await Promise.all([
+      execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/heads/${suggestedBranch}`]),
+      execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${suggestedBranch}`]),
+    ]);
+    if (current.exitCode === 0 && current.stdout.trim() === branch && upstream.exitCode !== 0 && localExists.exitCode !== 0 && remoteExists.exitCode !== 0) {
+      const renamed = await execFileAsync('git.exe', ['-C', job.workingDirectory, 'branch', '-m', suggestedBranch]);
+      if (renamed.exitCode === 0) {
+        const previousDraft = await getCommitDraft(project.id, branch);
+        await clearCommitDraft(project.id, branch);
+        branch = suggestedBranch;
+        if (previousDraft) await setCommitDraft(project.id, branch, previousDraft);
+      }
+    }
+  }
+  const message = String(result.suggested_commit_message || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200) || defaultCommitMessage(task);
+  await setCommitDraft(project.id, branch, message);
+  job.branch = branch;
 }
 
 async function startTask(payload) {
@@ -829,7 +957,7 @@ async function startTask(payload) {
   const child = spawn('pwsh.exe', args, { cwd: workingDirectory, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
   const job = {
     id, kind: 'task', phase: 'routing', projectId: project.id, projectName: project.name, status: 'running', provider, mode, useSubscriptionTokens,
-    workingDirectory, taskPreview: task.slice(0, 160), taskPath,
+    workingDirectory, branch: worktree.branch, taskPreview: task.slice(0, 160), taskPath,
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), finishedAt: null,
     exitCode: null, runDirectory: null, pid: child.pid, stdout: '', stderr: '', child,
   };
@@ -840,7 +968,7 @@ async function startTask(payload) {
   child.on('error', (error) => {
     job.status = 'failed'; job.finishedAt = new Date().toISOString(); appendLog(job, 'stderr', error.message); broadcastJob(job);
   });
-  child.on('close', (code) => {
+  child.on('close', async (code) => {
     job.exitCode = code; job.finishedAt = new Date().toISOString();
     const blockedMatch = job.stdout.match(/AI_PROJECT_ROUTER_BLOCKED\s+provider=([^\s]+)\s+run=(.+)/);
     job.status = blockedMatch ? 'blocked' : code === 0 ? 'completed' : job.status === 'stopping' ? 'stopped' : 'failed';
@@ -849,6 +977,10 @@ async function startTask(payload) {
     if (match) { job.provider = match[1]; job.runDirectory = match[2].trim(); }
     const runMatch = job.stdout.match(/AI_RUN_DIRECTORY\s+(.+)/);
     if (!job.runDirectory && runMatch) job.runDirectory = runMatch[1].trim();
+    if (mode === 'Write') {
+      try { await finalizeTaskGitMetadata(project, job, worktree.branch, task); }
+      catch (error) { appendLog(job, 'stderr', `Git-Metadaten konnten nicht aktualisiert werden: ${error.message}\n`); }
+    }
     job.child = null; statusCacheAt = 0; broadcastJob(job);
   });
   return snapshotJob(job);
@@ -1039,7 +1171,10 @@ function friendlyOutput(raw) {
     } catch {}
   }
   const response = messages.length ? messages[messages.length - 1] : text;
-  return response.replace(/\r?\n?AI_PROJECT_TASK_COMPLETE\s*$/m, '').trim().slice(-120000);
+  return response
+    .replace(/^Suggested branch name:\s*ai\/[a-z0-9-]+\s*$/gim, '')
+    .replace(/^Suggested commit message:\s*.+$/gim, '')
+    .replace(/\r?\n?AI_PROJECT_TASK_COMPLETE\s*$/m, '').trim().slice(-120000);
 }
 
 async function runRecord(directory, projectId) {
@@ -1333,6 +1468,7 @@ async function getGitState(project, requestedWorktree = null) {
   const upstream = await execFileAsync('git.exe', ['-C', workingDirectory, 'rev-list', '--left-right', '--count', '@{upstream}...HEAD']);
   const ghAuth = await execFileAsync('gh.exe', ['auth', 'status', '--active']);
   const files = parseGitStatus(status.stdout);
+  const currentBranch = branch.stdout.trim();
   const [behind = 0, ahead = 0] = upstream.exitCode === 0 ? upstream.stdout.trim().split(/\s+/).map(Number) : [0, 0];
   const [hash = '', subject = '', committedAt = ''] = head.stdout.split('\0');
   let alreadyIntegrated = target.branch === integrationBranch;
@@ -1362,7 +1498,7 @@ async function getGitState(project, requestedWorktree = null) {
   return {
     projectId: project.id, projectName: project.name, repository: project.repository,
     worktree: workingDirectory, worktreeKind: target.kind, mainCheckout: target.mainCheckout, targets,
-    branch: branch.stdout.trim(), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
+    branch: currentBranch, commitDraft: await getCommitDraft(project.id, currentBranch), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
     githubAuthenticated: ghAuth.exitCode === 0, clean: files.length === 0, files,
     ahead, behind, hasUpstream: upstream.exitCode === 0,
     lastCommit: hash ? { hash, subject, committedAt } : null, cleanupCandidates,
@@ -1392,7 +1528,18 @@ async function removeIntegratedTaskWorktree(project, state) {
   if (removeWorktree.exitCode !== 0) throw new Error(`Removing task worktree ${state.worktree} failed: ${removeWorktree.stderr.trim() || removeWorktree.stdout.trim()}`);
   const deleteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '-d', state.branch]);
   if (deleteBranch.exitCode !== 0) throw new Error(`Deleting local task branch ${state.branch} failed: ${deleteBranch.stderr.trim() || deleteBranch.stdout.trim()}`);
+  await clearCommitDraft(project.id, state.branch);
   return { branch: state.branch, remoteDeleted: remoteBranch.exitCode === 0 };
+}
+
+async function updateCommitDraft(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const state = await getGitState(project, payload.worktree);
+  const message = String(payload.message || '').replace(/[\r\n]+/g, ' ').trim();
+  if (message.length > 200) throw new Error('Commit draft must not exceed 200 characters.');
+  if (message) await setCommitDraft(project.id, state.branch, message);
+  else await clearCommitDraft(project.id, state.branch);
+  return { branch: state.branch, message: message || null };
 }
 
 async function integrateGitWorktree(payload) {
@@ -1495,6 +1642,7 @@ async function commitGitChanges(payload) {
   if (add.exitCode !== 0) throw new Error(add.stderr.trim() || 'Git add failed.');
   const commit = await execFileAsync('git.exe', ['-C', state.worktree, 'commit', '-m', message], { timeout: 120000 });
   if (commit.exitCode !== 0) throw new Error(commit.stderr.trim() || commit.stdout.trim() || 'Git commit failed.');
+  await clearCommitDraft(project.id, state.branch);
   componentCache.delete(project.id);
   return { ok: true, output: commit.stdout.trim(), state: await getGitState(project, state.worktree) };
 }
@@ -1577,6 +1725,7 @@ const server = http.createServer(async (request, response) => {
       const { project } = await getProject(projectId); return serveGitFileImage(project, url.searchParams.get('path'), url.searchParams.get('worktree'), response);
     }
     if (request.method === 'POST' && url.pathname === '/api/git/commit') return sendJson(response, 200, await commitGitChanges(await readJsonBody(request)));
+    if (request.method === 'POST' && url.pathname === '/api/git/commit-draft') return sendJson(response, 200, await updateCommitDraft(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/push') return sendJson(response, 200, await pushGitBranch(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/integrate') return sendJson(response, 200, await integrateGitWorktree(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/cleanup-merged') return sendJson(response, 200, await cleanupMergedGitWorktrees(await readJsonBody(request)));
@@ -1603,16 +1752,19 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, HOST, async () => {
-  await fsp.mkdir(RUN_ROOT, { recursive: true });
-  await loadProjects();
-  process.stdout.write(`AI_PROJECT_CONTROL_READY http://${HOST}:${PORT}\n`);
-});
-
 function shutdown() {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 3000).unref();
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+if (require.main === module) {
+  server.listen(PORT, HOST, async () => {
+    await fsp.mkdir(RUN_ROOT, { recursive: true });
+    await loadProjects();
+    process.stdout.write(`AI_PROJECT_CONTROL_READY http://${HOST}:${PORT}\n`);
+  });
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+module.exports = { defaultCommitMessage, taskBranchSlug };

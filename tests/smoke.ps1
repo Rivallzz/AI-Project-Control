@@ -93,6 +93,7 @@ try {
     if ($indexSource -notmatch 'id="historyJumpLatest"' -or $appSource -notmatch 'historyFollow' -or $appSource -notmatch 'function jobConversationElement') { throw 'User-controlled chat following or inline task progress is missing.' }
     if ($indexSource -match 'live-feed-panel' -or $appSource -notmatch 'technical-activity' -or $appSource -notmatch 'function renderMessageText') { throw 'Chat-centric activity details or readable response formatting are missing.' }
     if ($appSource -notmatch 'abgeschlossen · prüfen' -or $appSource -notmatch 'acknowledgedActivityJobs') { throw 'Cross-project completion tracking is not actionable.' }
+    if ($appSource -notmatch 'queueCommitDraftSave' -or $indexSource -notmatch 'Wird automatisch für diesen Branch gespeichert') { throw 'Branch-specific commit draft UX is missing.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
@@ -115,6 +116,12 @@ try {
 
     $gitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
     if ($gitState.branch -ne 'main' -or -not $gitState.clean) { throw 'Git review endpoint did not report the clean test repository.' }
+    $draftBody = @{ projectId = $project.id; worktree = $testRepository; message = 'Improve semantic branch drafts' } | ConvertTo-Json
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/commit-draft" -ContentType 'application/json' -Body $draftBody -TimeoutSec 10 | Out-Null
+    $draftState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
+    if ($draftState.commitDraft -ne 'Improve semantic branch drafts') { throw 'Commit draft did not persist for the selected branch.' }
+    $clearDraftBody = @{ projectId = $project.id; worktree = $testRepository; message = '' } | ConvertTo-Json
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/commit-draft" -ContentType 'application/json' -Body $clearDraftBody -TimeoutSec 10 | Out-Null
     Set-Content -LiteralPath (Join-Path $testRepository 'review-me.txt') -Value 'review only' -Encoding utf8
     Set-Content -LiteralPath (Join-Path $testRepository 'other.txt') -Value 'must not appear' -Encoding utf8
     $previewPng = Join-Path $testRepository 'preview.png'
@@ -189,6 +196,8 @@ try {
     if ($LASTEXITCODE -eq 0) { throw 'Second bulk-cleaned branch still exists.' }
     if ($serverSource -notmatch "'push', 'origin', '--delete', state.branch") { throw 'Integrated remote task branch cleanup is missing.' }
     if ($serverSource -notmatch "state = 'Aufgabe abgeschlossen'" -or $serverSource -notmatch 'canCleanup') { throw 'Completed-task feedback or already-integrated branch cleanup is missing.' }
+    if ($serverSource -notmatch 'function taskBranchSlug' -or $serverSource -match 'safeId\(task\)\.slice') { throw 'Task branches still copy the conversational prompt instead of using semantic names.' }
+    if ($serverSource -notmatch 'GIT_DRAFTS_PATH' -or $serverSource -notmatch '/api/git/commit-draft') { throw 'Local branch draft persistence is missing.' }
     if ($serverSource -notmatch "controlledBlocked \? 'BLOCKED'") { throw 'Historical controlled-blocked runs are not normalized in the dashboard.' }
     if ($appSource -notmatch "addEventListener\('wheel'" -or $appSource -notmatch "addEventListener\('pointermove'") { throw 'Graph mouse zoom or pan controls are missing.' }
 
@@ -204,6 +213,7 @@ try {
     Set-Content -LiteralPath $testTask -Value "# Goal`n`nPrüfe UTF-8: äöü ß → Dry-run routing validation." -Encoding utf8
     $router = Join-Path $root 'router\Invoke-ProjectAiTask.ps1'
     $routerSource = Get-Content -Raw -LiteralPath $router
+    if ($routerSource -notmatch 'Suggested branch name:' -or $routerSource -notmatch 'Suggested commit message:') { throw 'Write-task delivery metadata is not requested from providers.' }
     if ($routerSource -notmatch 'StandardInputEncoding.*\$utf8') { throw 'Router does not explicitly enforce UTF-8 stdin when the runtime supports it.' }
     if ($routerSource -notmatch '\[Console\]::OutputEncoding\s*=\s*\$consoleUtf8') { throw 'Router does not explicitly enforce UTF-8 console output.' }
     if ($routerSource -notmatch 'Read-only context policy') { throw 'Router does not define the lightweight advisory context policy.' }

@@ -16,6 +16,8 @@ Read-only questions use a lightweight advisory context policy: `AGENTS.md` remai
 
 Provider completion markers are interpreted explicitly. `AI_PROJECT_TASK_COMPLETE` is successful, `AI_PROJECT_TASK_BLOCKED: <reason>` is a controlled non-success result whose reason is retained, and output containing neither marker is incomplete or malformed.
 
+Successful write-task responses also provide one concise branch name and one imperative commit message before the completion marker. These fields are local workflow metadata, not an instruction to commit or push. They reuse the executing provider and never trigger a second prompt-optimization call.
+
 ## Billing guard
 
 The router refuses to start a cloud provider when `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` would create an API-billing path. Numeric Claude subscription credits are not exposed by Claude Code, so the dashboard reports availability and known backoff rather than inventing a balance.
