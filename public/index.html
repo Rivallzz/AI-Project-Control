@@ -32,6 +32,15 @@
 
   <main class="layout">
     <aside class="sidebar">
+      <section class="panel global-tracker" aria-labelledby="globalTrackerHeading">
+        <div class="section-heading">
+          <div><h2 id="globalTrackerHeading">Globaler Tracker</h2><p>Aktive Aufgaben in allen Projekten</p></div>
+          <span id="globalTrackerCount" class="status info">0 aktiv</span>
+        </div>
+        <div id="globalTrackerList" class="global-tracker-list" aria-live="polite">
+          <p class="empty">Keine Aufgabe läuft.</p>
+        </div>
+      </section>
       <section class="panel" aria-labelledby="systemHeading">
         <div class="section-heading workflow-heading">
           <div><h2 id="systemHeading">Workflowstatus</h2><p id="workflowContext">Aktueller Projektablauf</p></div>

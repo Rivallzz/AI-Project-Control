@@ -5,6 +5,7 @@ const elements = {
   backgroundActivity: document.getElementById('backgroundActivity'),
   projectSelect: document.getElementById('projectSelect'), addProject: document.getElementById('addProjectButton'),
   providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'), workflowContext: document.getElementById('workflowContext'),
+  globalTrackerList: document.getElementById('globalTrackerList'), globalTrackerCount: document.getElementById('globalTrackerCount'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
   attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
   attachmentPreview: document.getElementById('attachmentPreview'),
@@ -175,6 +176,30 @@ function renderJobActivity() {
   elements.backgroundActivity.title = visible.map((job) => `${job.projectName}: ${job.taskPreview}`).join('\n');
 }
 
+function renderGlobalTracker() {
+  const running = Array.from(liveJobs.values())
+    .filter((job) => job.kind === 'task' && job.status === 'running' && job.projectId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  elements.globalTrackerCount.textContent = `${running.length} aktiv`;
+  elements.globalTrackerCount.className = `status ${running.length ? 'ok' : 'info'}`;
+  elements.globalTrackerList.replaceChildren();
+  if (!running.length) {
+    const empty = document.createElement('p'); empty.className = 'empty'; empty.textContent = 'Keine Aufgabe läuft.';
+    elements.globalTrackerList.append(empty); return;
+  }
+  for (const job of running) {
+    const button = document.createElement('button'); button.className = 'global-tracker-item'; button.type = 'button';
+    button.dataset.trackerProject = job.projectId;
+    button.setAttribute('aria-label', `${job.projectName}: laufende Aufgabe öffnen`);
+    if (job.projectId === activeProject?.id) button.setAttribute('aria-current', 'true');
+    const marker = document.createElement('span'); marker.className = 'tracker-marker'; marker.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span'); text.className = 'tracker-text';
+    const name = document.createElement('strong'); name.textContent = job.projectName || 'Projekt';
+    const detail = document.createElement('span'); detail.textContent = `${job.provider} · ${job.phase || 'gestartet'}`;
+    text.append(name, detail); button.append(marker, text); elements.globalTrackerList.append(button);
+  }
+}
+
 function formatTime(value) {
   if (!value) return '—';
   return new Intl.DateTimeFormat('de-DE', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(value));
@@ -256,6 +281,7 @@ function scheduleLiveJobRender() {
     jobRenderPending = false;
     renderJobs(visibleLiveJobs());
     renderJobActivity();
+    renderGlobalTracker();
     if (componentStatus) renderComponents(componentStatus);
   });
 }
@@ -732,6 +758,7 @@ async function refreshJobs() {
   for (const row of rows) liveJobs.set(row.id, row);
   renderJobs(visibleLiveJobs());
   renderJobActivity();
+  renderGlobalTracker();
   if (componentStatus) renderComponents(componentStatus);
   const latestTask = rows.find((job) => job.kind === 'task');
   if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzter Job fehlgeschlagen. Details stehen im Live-Feed und Verlauf.';
@@ -772,6 +799,12 @@ document.querySelector('.view-tabs').addEventListener('click', (event) => {
 elements.systemsRefresh.addEventListener('click', () => loadSystems(true));
 elements.addProject.addEventListener('click', () => { showView('projects'); elements.provisionName.focus(); });
 elements.projectSelect.addEventListener('change', () => activateProject(elements.projectSelect.value));
+elements.globalTrackerList.addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-tracker-project]');
+  if (!button) return;
+  if (button.dataset.trackerProject !== activeProject?.id) await activateProject(button.dataset.trackerProject);
+  showView('tasks');
+});
 elements.provider.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
 elements.mode.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
 elements.useSubscriptionTokens.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });

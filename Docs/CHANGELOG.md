@@ -2,6 +2,7 @@
 
 ## 2026-07-12
 
+- Added an always-visible global sidebar tracker for running tasks across projects, with accessible project shortcuts backed by the existing event stream.
 - Extracted AI Project Control from the Polis-specific runtime.
 - Moved mutable dashboard state outside the source tree.
 - Combined task composition and feedback into a larger chat-like workspace.

@@ -18,7 +18,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Buttons exist only for distinct commands. Conversation continuation uses the composer, not a separate follow-up action.
 - Image attachments support file selection and clipboard paste with the same validation limits.
 - Install actions use a server-side allowlist and require explicit confirmation.
-- Portfolio describes only the active project; the global dropdown is the only project switcher.
+- Portfolio describes only the active project. The global dropdown remains the primary project switcher; the sidebar tracker is a contextual shortcut shown only for running tasks.
 - Knowledge search updates Graphify and Obsidian together; source badges keep discovery, working context and authority distinct.
 - Git checkboxes select commit scope; opening a row controls only the inspected file diff.
 - The graph uses direct manipulation: wheel zooms around the pointer and pointer drag pans the view.

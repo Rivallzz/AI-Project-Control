@@ -83,6 +83,7 @@ try {
     if ($appSource -notmatch "addEventListener\('paste'" -or $appSource -match 'data-open-run') { throw 'Chat paste support or simplified conversation actions are incorrect.' }
     if ($indexSource -notmatch 'class="provider-overview"' -or $indexSource -notmatch 'id="backgroundActivity"') { throw 'Compact provider header or background task activity is missing.' }
     if ($indexSource -notmatch 'id="workflowContext"' -or $appSource -notmatch 'function renderJobActivity' -or $appSource -notmatch 'needsCodeTools') { throw 'Project-specific workflow filtering is missing.' }
+    if ($indexSource -notmatch 'id="globalTrackerList"' -or $appSource -notmatch 'function renderGlobalTracker' -or $appSource -notmatch 'data-tracker-project') { throw 'Global cross-project task tracker is missing.' }
     if ($appSource -match "componentRow\('ECC'" -or $appSource -match "componentRow\('Hermes'" ) { throw 'Workflow sidebar still renders unrelated global inventory rows.' }
     if ($indexSource -notmatch 'id="gitTargetSelect"' -or $appSource -notmatch 'worktree=\$\{encodeURIComponent\(gitData\.worktree\)\}') { throw 'Git review is not connected to selectable task worktrees.' }
     if ($indexSource -notmatch 'id="gitIntegrateButton"' -or $indexSource -notmatch 'id="gitBranchFlow"' -or $appSource -notmatch '/api/git/integrate') { throw 'Task-to-integration-branch promotion controls are missing.' }

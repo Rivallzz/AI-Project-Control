@@ -62,3 +62,5 @@ Promotion follows one visible path: task branch → integration branch → `main
 ## Active project overview
 
 The Portfolio view derives one overview for the project selected in the global dropdown. It combines the current repository task, latest run, Git state, Graphify freshness, Obsidian note count, blockers and one recommended next action. It does not duplicate project switching or maintain a second project list.
+
+The sidebar global tracker derives its compact list from the existing dashboard job event stream. It shows running tasks across registered projects and switches to a task's project on activation; it stores no additional state and does not duplicate the project registry.

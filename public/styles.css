@@ -125,7 +125,22 @@ h3 { margin-bottom: 4px; font-size: 14px; }
   border-right: 1px solid var(--border);
   background: #181b1c;
 }
-.sidebar .panel { position: sticky; top: 16px; }
+.sidebar .panel { margin-bottom: 14px; }
+.sidebar .panel:last-child { position: sticky; top: 16px; }
+.global-tracker-list { display: grid; gap: 6px; }
+.global-tracker-list .empty { margin: 0; }
+.global-tracker-item {
+  width: 100%; min-height: 48px; border: 1px solid var(--border); border-radius: 5px; padding: 8px;
+  background: var(--surface-2); color: var(--text); cursor: pointer; text-align: left;
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px;
+}
+.global-tracker-item:hover { border-color: #68706d; }
+.global-tracker-item[aria-current="true"] { border-color: #3d7656; background: #1b2a22; }
+.tracker-marker { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.tracker-text { min-width: 0; display: grid; gap: 2px; }
+.tracker-text strong, .tracker-text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tracker-text strong { font-size: 13px; }
+.tracker-text span { color: var(--muted); font-size: 11px; }
 .workflow-heading { margin-bottom: 8px; }
 .workflow-scope-note { margin: 13px 0 0; color: var(--muted); font-size: 11px; }
 
@@ -176,7 +191,6 @@ h3 { margin-bottom: 4px; font-size: 14px; }
   padding: 15px;
 }
 
-.sidebar .panel { margin-bottom: 14px; }
 .section-heading { margin-bottom: 13px; }
 .policy { color: var(--green); font-size: 11px; text-transform: uppercase; }
 
@@ -562,7 +576,8 @@ td { overflow-wrap: anywhere; }
   .layout { grid-template-columns: 1fr; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border); padding: 12px 16px; }
   .sidebar .panel { margin: 0; }
-  .sidebar .panel { position: static; }
+  .sidebar .panel:last-child { position: static; }
+  .sidebar { display: grid; grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr); gap: 12px; }
   .component-list { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
   .component-list .row-detail { display: none; }
   .component-row { border-top: 0; border-left: 1px solid #303536; padding: 0 0 0 9px; }
