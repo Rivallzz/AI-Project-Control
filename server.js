@@ -1368,8 +1368,29 @@ async function integrateGitWorktree(payload) {
   }
   const merge = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'merge', '--ff-only', state.branch], { timeout: 120000 });
   if (merge.exitCode !== 0) throw new Error(merge.stderr.trim() || merge.stdout.trim() || `Fast-forward into ${state.integration.branch} failed.`);
+  const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${state.branch}`]);
+  if (remoteBranch.exitCode === 0) {
+    const remoteDelete = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'push', 'origin', '--delete', state.branch], { timeout: 180000 });
+    if (remoteDelete.exitCode !== 0) {
+      throw new Error(`Fast-forward succeeded, but deleting remote task branch ${state.branch} failed: ${remoteDelete.stderr.trim() || remoteDelete.stdout.trim()}`);
+    }
+  }
+  const removeWorktree = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'remove', state.worktree], { timeout: 120000 });
+  if (removeWorktree.exitCode !== 0) {
+    throw new Error(`Fast-forward succeeded, but removing task worktree ${state.worktree} failed: ${removeWorktree.stderr.trim() || removeWorktree.stdout.trim()}`);
+  }
+  const deleteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '-d', state.branch]);
+  if (deleteBranch.exitCode !== 0) {
+    throw new Error(`Fast-forward succeeded, but deleting local task branch ${state.branch} failed: ${deleteBranch.stderr.trim() || deleteBranch.stdout.trim()}`);
+  }
   componentCache.delete(project.id);
-  return { ok: true, output: (merge.stdout || merge.stderr).trim(), state: await getGitState(project, state.integration.worktree) };
+  return {
+    ok: true,
+    output: (merge.stdout || merge.stderr).trim(),
+    deletedBranch: state.branch,
+    deletedRemoteBranch: remoteBranch.exitCode === 0,
+    state: await getGitState(project, state.integration.worktree),
+  };
 }
 
 async function getGitFileDiff(project, requestedPath, requestedWorktree = null) {

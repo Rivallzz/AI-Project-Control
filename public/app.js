@@ -942,12 +942,13 @@ elements.gitCommitPush.addEventListener('click', () => commitSelectedGitFiles(tr
 elements.gitTarget.addEventListener('change', () => { selectedGitFile = null; loadGitState(elements.gitTarget.value); });
 elements.gitIntegrate.addEventListener('click', async () => {
   if (!gitData?.integration?.canFastForward) { elements.gitMessage.textContent = gitData?.integration?.reason || 'Dieser Aufgabenstand kann nicht automatisch integriert werden.'; return; }
-  if (!window.confirm(`Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen? main bleibt unverändert.`)) return;
+  if (!window.confirm(`Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen und anschließend den Aufgaben-Worktree sowie den lokalen und gegebenenfalls den Remote-Branch löschen? main bleibt unverändert.`)) return;
   elements.gitIntegrate.disabled = true; elements.gitMessage.textContent = `${gitData.integration.branch} wird aktualisiert…`;
   try {
     const result = await api('/api/git/integrate', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
     selectedGitFile = null; renderGitState(result.state);
-    elements.gitMessage.textContent = `Aufgabenstand wurde lokal in ${result.state.integration.branch} übernommen. Prüfe und pushe jetzt nur diesen Integrationsbranch; main bleibt unverändert.`;
+    const remoteCleanup = result.deletedRemoteBranch ? ' und auf origin' : '';
+    elements.gitMessage.textContent = `Aufgabenstand wurde lokal in ${result.state.integration.branch} übernommen; ${result.deletedBranch} wurde lokal${remoteCleanup} gelöscht. Prüfe und pushe jetzt nur den Integrationsbranch; main bleibt unverändert.`;
   } catch (error) { elements.gitMessage.textContent = error.message; }
   finally { elements.gitIntegrate.disabled = !gitData?.integration?.canFastForward; }
 });

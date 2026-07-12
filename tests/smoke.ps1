@@ -86,6 +86,7 @@ try {
     if ($appSource -match "componentRow\('ECC'" -or $appSource -match "componentRow\('Hermes'" ) { throw 'Workflow sidebar still renders unrelated global inventory rows.' }
     if ($indexSource -notmatch 'id="gitTargetSelect"' -or $appSource -notmatch 'worktree=\$\{encodeURIComponent\(gitData\.worktree\)\}') { throw 'Git review is not connected to selectable task worktrees.' }
     if ($indexSource -notmatch 'id="gitIntegrateButton"' -or $indexSource -notmatch 'id="gitBranchFlow"' -or $appSource -notmatch '/api/git/integrate') { throw 'Task-to-integration-branch promotion controls are missing.' }
+    if ($appSource -notmatch 'Remote-Branch löschen') { throw 'Task integration does not disclose remote branch cleanup.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
@@ -137,6 +138,11 @@ try {
     $integrateBody = @{ projectId = $project.id; worktree = $reviewWorktree } | ConvertTo-Json
     $integrated = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/integrate" -ContentType 'application/json' -Body $integrateBody -TimeoutSec 15
     if ($integrated.state.branch -ne 'main' -or $integrated.state.lastCommit.subject -ne 'Add task worktree change') { throw 'Task branch was not fast-forwarded into the integration branch.' }
+    if ($integrated.deletedBranch -ne 'ai/dashboard-review-test' -or $integrated.deletedRemoteBranch) { throw 'Integrated local task branch cleanup was not reported correctly.' }
+    if (Test-Path -LiteralPath $reviewWorktree) { throw 'Integrated task worktree was not removed.' }
+    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/dashboard-review-test
+    if ($LASTEXITCODE -eq 0) { throw 'Integrated local task branch was not deleted.' }
+    if ($serverSource -notmatch "'push', 'origin', '--delete', state.branch") { throw 'Integrated remote task branch cleanup is missing.' }
     if ($appSource -notmatch "addEventListener\('wheel'" -or $appSource -notmatch "addEventListener\('pointermove'") { throw 'Graph mouse zoom or pan controls are missing.' }
 
     $invalidInstallerBody = @{ projectId = $project.id; installKey = 'not-approved' } | ConvertTo-Json

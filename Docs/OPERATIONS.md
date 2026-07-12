@@ -22,7 +22,7 @@ Read-only mode uses the registered repository. Write mode automatically creates 
 
 ## Review And Publish
 
-Open `Prüfen & Git`. The left-aligned `Arbeitsstand` selector defaults to the latest changed task worktree. Click a file name to inspect only that file; its checkbox independently controls whether it belongs to the next commit. Commit the intended files locally. When the task branch is clean, based directly on the integration branch and not yet integrated, `In <branch> übernehmen` performs a conflict-free fast-forward into the clean integration checkout. If either side diverged or contains local changes, the dashboard stops without modifying the integration checkout.
+Open `Prüfen & Git`. The left-aligned `Arbeitsstand` selector defaults to the latest changed task worktree. Click a file name to inspect only that file; its checkbox independently controls whether it belongs to the next commit. Commit the intended files locally. When the task branch is clean, based directly on the integration branch and not yet integrated, `In <branch> übernehmen` performs a conflict-free fast-forward into the clean integration checkout. After that succeeds, the dashboard removes the task worktree and safely deletes the integrated local branch; when the branch was pushed to `origin`, it deletes that remote branch too. If either side diverged or contains local changes, the dashboard stops without modifying the integration checkout.
 
 Push the integration branch separately after review. Only the integration branch should be proposed to `main`; task branches must never target `main` directly. Existing staged files outside the selection remain a hard block and push never uses force.
 
