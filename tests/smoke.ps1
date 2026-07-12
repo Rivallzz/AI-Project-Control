@@ -87,6 +87,8 @@ try {
     if ($indexSource -notmatch 'id="gitTargetSelect"' -or $appSource -notmatch 'worktree=\$\{encodeURIComponent\(gitData\.worktree\)\}') { throw 'Git review is not connected to selectable task worktrees.' }
     if ($indexSource -notmatch 'id="gitIntegrateButton"' -or $indexSource -notmatch 'id="gitBranchFlow"' -or $appSource -notmatch '/api/git/integrate') { throw 'Task-to-integration-branch promotion controls are missing.' }
     if ($appSource -notmatch 'Remote-Branch löschen') { throw 'Task integration does not disclose remote branch cleanup.' }
+    if ($appSource -notmatch 'Aufgabenbranch aufräumen' -or $appSource -notmatch 'kein separater Integrationsbranch' -or $appSource -notmatch "data.integration.branch === 'main' \? 'Aufgabe → main'") { throw 'Main fallback or already-integrated task cleanup is not clearly disclosed.' }
+    if ($appSource -notmatch "visibleView === 'git'.*loadGitState" -or $appSource -notmatch 'Der Git-Zustand des neuen Projekts wird geladen') { throw 'Project switching can leave stale Git data visible.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
@@ -126,6 +128,7 @@ try {
     $worktreeGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
     if ($worktreeGitState.branch -ne 'ai/dashboard-review-test' -or $worktreeGitState.mainCheckout -or $worktreeGitState.worktree -ne $reviewWorktree) { throw 'Git review did not prioritize the changed task worktree.' }
     if ($worktreeGitState.targets.Count -lt 2 -or -not ($worktreeGitState.files | Where-Object { $_.path -eq 'task-change.txt' })) { throw 'Git review did not expose all worktrees or the task change.' }
+    if ($worktreeGitState.integration.reason -notmatch 'Committe zuerst') { throw 'Dirty task worktree was incorrectly described as already integrated.' }
     $encodedWorktree = [uri]::EscapeDataString($reviewWorktree)
     $worktreeDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&worktree=$encodedWorktree&path=task-change.txt" -TimeoutSec 10
     if ($worktreeDiff.diff -notmatch 'task worktree change') { throw 'Git worktree file diff did not use the selected task worktree.' }
@@ -142,7 +145,21 @@ try {
     if (Test-Path -LiteralPath $reviewWorktree) { throw 'Integrated task worktree was not removed.' }
     & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/dashboard-review-test
     if ($LASTEXITCODE -eq 0) { throw 'Integrated local task branch was not deleted.' }
+    $cleanupWorktree = Join-Path $dataRoot 'cleanup-worktree'
+    & git.exe -C $testRepository worktree add -b ai/already-integrated-test $cleanupWorktree main | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the already-integrated cleanup worktree.' }
+    $encodedCleanupWorktree = [uri]::EscapeDataString($cleanupWorktree)
+    $cleanupReady = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedCleanupWorktree" -TimeoutSec 10
+    if (-not $cleanupReady.integration.alreadyIntegrated -or -not $cleanupReady.integration.canCleanup -or $cleanupReady.integration.canFastForward) { throw 'Already-integrated task branch was not offered as cleanup-only.' }
+    $cleanupBody = @{ projectId = $project.id; worktree = $cleanupWorktree } | ConvertTo-Json
+    $cleaned = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/integrate" -ContentType 'application/json' -Body $cleanupBody -TimeoutSec 15
+    if (-not $cleaned.alreadyIntegrated -or $cleaned.deletedBranch -ne 'ai/already-integrated-test') { throw 'Already-integrated task branch cleanup was not reported correctly.' }
+    if (Test-Path -LiteralPath $cleanupWorktree) { throw 'Already-integrated task worktree was not removed.' }
+    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/already-integrated-test
+    if ($LASTEXITCODE -eq 0) { throw 'Already-integrated local task branch was not deleted.' }
     if ($serverSource -notmatch "'push', 'origin', '--delete', state.branch") { throw 'Integrated remote task branch cleanup is missing.' }
+    if ($serverSource -notmatch "state = 'Aufgabe abgeschlossen'" -or $serverSource -notmatch 'canCleanup') { throw 'Completed-task feedback or already-integrated branch cleanup is missing.' }
+    if ($serverSource -notmatch "controlledBlocked \? 'BLOCKED'") { throw 'Historical controlled-blocked runs are not normalized in the dashboard.' }
     if ($appSource -notmatch "addEventListener\('wheel'" -or $appSource -notmatch "addEventListener\('pointermove'") { throw 'Graph mouse zoom or pan controls are missing.' }
 
     $invalidInstallerBody = @{ projectId = $project.id; installKey = 'not-approved' } | ConvertTo-Json
@@ -165,6 +182,7 @@ try {
     if ($routerSource -notmatch 'Execute this controlled \$Mode task now') { throw 'Hermes does not receive the compact controlled goal prompt.' }
     if ($routerSource -notmatch 'safe Windows command-line budget') { throw 'Hermes prompt size is not guarded for Windows.' }
     if ($routerSource -notmatch 'mcp__serena__initial_instructions') { throw 'Hermes does not receive the native Serena MCP tool name.' }
+    if ($routerSource -notmatch 'AI_PROJECT_ROUTER_BLOCKED' -or $routerSource -notmatch 'blocked_sentinel') { throw 'Router does not distinguish a controlled blocked result from a missing completion marker.' }
     if ($routerSource -notmatch 'worktree add --detach' -or $routerSource -notmatch 'local-hermes-write-not-approved') { throw 'Local Hermes read-only isolation or write-task block is missing.' }
     if ($routerSource -notmatch "'chat', '-q'" -or $routerSource -match "@\('-z'") { throw 'Hermes still hides live tool progress in one-shot mode.' }
     if ($routerSource -match "'--ephemeral'" -or $routerSource -match "'--no-session-persistence'") { throw 'Provider sessions are still disabled, so cli-continues cannot hand work off.' }

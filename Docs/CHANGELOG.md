@@ -59,3 +59,8 @@
 - Connected `Prüfen & Git` to every Git-registered project worktree, defaulting to the latest changed task worktree and keeping per-file review, commit and push operations bound to the selected task branch.
 - Simplified Git promotion to task branch → integration branch → `main`, based new write worktrees on `develop` when present, added a guarded fast-forward into the clean integration checkout and moved the worktree selector to the left of the review surface.
 - Cleaned up a successfully integrated task by removing its worktree and deleting its local branch plus its `origin` branch when present.
+- Made `main` the explicit safe fast-forward target when no separate integration branch exists, added cleanup for already-integrated task branches and labelled completed work more clearly in the portfolio.
+- Distinguished controlled `AI_PROJECT_TASK_BLOCKED` results from malformed or incomplete provider output in run artifacts, live status, historical runs and portfolio guidance.
+- Reloaded the active Portfolio, Knowledge, Git or Systems view after project switching and disabled stale Git actions while the new repository state is loading.
+- Rendered the no-`develop` publication path as `Aufgabe → main` instead of duplicating `main` in the Git review header.
+- Prioritized uncommitted task changes over commit ancestry so a dirty branch is never described as already integrated.

@@ -370,12 +370,16 @@ Final response requirements:
         $completionText = if ($finalPanel -ge 0) { $result.Stdout.Substring($finalPanel) } else { '' }
     }
     $completionConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $completionText -match 'AI_PROJECT_TASK_COMPLETE'
+    $blockedMatch = [regex]::Match($completionText, '(?im)^AI_PROJECT_TASK_BLOCKED:\s*(.+)$')
+    $blockedConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $blockedMatch.Success
+    $blockedReason = if ($blockedConfirmed) { $blockedMatch.Groups[1].Value.Trim() } else { $null }
 
     $attempt = [pscustomobject]@{
         provider = $candidate
         exit_code = $result.ExitCode
         success = $completionConfirmed
         completion_sentinel = $completionConfirmed
+        blocked_sentinel = $blockedConfirmed
         usage_limit_detected = $limited
         started_at = $started.ToString('o')
         finished_at = $finished.ToString('o')
@@ -409,6 +413,20 @@ Final response requirements:
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         Write-Output "AI_PROJECT_ROUTER_OK provider=$candidate run=$runDir"
         exit 0
+    }
+
+    if ($blockedConfirmed) {
+        [pscustomobject]@{
+            status = 'BLOCKED'
+            reason = $blockedReason
+            selected_provider = $candidate
+            mode = $Mode
+            repository_changed = $repoChanged
+            attempts = $attempts
+            handoffs = $handoffs
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
+        Write-Output "AI_PROJECT_ROUTER_BLOCKED provider=$candidate run=$runDir"
+        exit 2
     }
 
     if ($Mode -eq 'ReadOnly' -and $repoChanged) {

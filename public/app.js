@@ -199,8 +199,9 @@ function renderJobs(jobs) {
     const meta = document.createElement('div'); meta.className = 'job-meta'; meta.textContent = `${formatTime(job.startedAt)} · ${job.workingDirectory}`;
     title.append(heading, meta);
     const state = document.createElement('span');
-    const stateClass = job.status === 'completed' ? 'ok' : job.status === 'failed' ? 'fail' : job.status === 'stopped' ? 'warn' : 'info';
-    state.className = `status ${stateClass}`; state.textContent = job.status; head.append(title, state);
+    const stateClass = job.status === 'completed' ? 'ok' : job.status === 'failed' ? 'fail' : ['stopped', 'blocked'].includes(job.status) ? 'warn' : 'info';
+    const stateLabel = job.status === 'blocked' ? 'blockiert' : job.status;
+    state.className = `status ${stateClass}`; state.textContent = stateLabel; head.append(title, state);
     const task = document.createElement('div'); task.className = 'job-task'; task.textContent = `${job.phase || job.mode} · ${job.taskPreview}`;
     container.append(head, task);
     if (job.status === 'running') {
@@ -210,7 +211,7 @@ function renderJobs(jobs) {
     const feed = document.createElement('div'); feed.className = 'feed-log';
     const stdoutLines = String(job.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => ({
       line,
-      kind: /AI_EVENT|AI_RUN_DIRECTORY|AI_PROJECT_ROUTER_OK/.test(line) || /^\[\d{4}-/.test(line) ? 'event' : '',
+      kind: /AI_EVENT|AI_RUN_DIRECTORY|AI_PROJECT_ROUTER_(?:OK|BLOCKED)/.test(line) || /^\[\d{4}-/.test(line) ? 'event' : '',
     }));
     const stderrLines = String(job.stderr || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: 'error' }));
     const allLines = [...stdoutLines, ...stderrLines];
@@ -223,8 +224,8 @@ function renderJobs(jobs) {
       if (!stream) return false;
       return /\bpreparing\b|\bread\s+[^\s]|\bsearch(?:ed|ing)?\b|\$\s+|API call failed|Non-retryable|completion sentinel|read-only/i.test(stream[1]);
     }).slice(feedFilter === 'all' ? -80 : -30);
-    if (feedFilter === 'important' && job.status === 'failed' && !lines.some((entry) => entry.kind === 'error')) {
-      lines.push({ line: 'Lauf fehlgeschlagen. Technische Details stehen unter Fehler oder Alles.', kind: 'error' });
+    if (feedFilter === 'important' && ['failed', 'blocked'].includes(job.status) && !lines.some((entry) => entry.kind === 'error')) {
+      lines.push({ line: job.status === 'blocked' ? 'Lauf blockiert. Die konkrete Begründung steht im Verlauf.' : 'Lauf fehlgeschlagen. Technische Details stehen unter Fehler oder Alles.', kind: 'error' });
     }
     if (!lines.length) {
       const waiting = document.createElement('div'); waiting.className = 'feed-line';
@@ -273,6 +274,8 @@ function connectJobEvents() {
 }
 
 function summarizeFeedLine(line) {
+  const blocked = line.match(/AI_PROJECT_ROUTER_BLOCKED\s+provider=([^\s]+)/i);
+  if (blocked) return `${blocked[1]} · Aufgabe kontrolliert blockiert; Begründung im Verlauf.`;
   const incomplete = line.match(/Provider\s+(\w+)\s+exited without the required completion sentinel/i);
   if (incomplete) return `${incomplete[1]} · Aufgabe unvollständig: erforderliche Abschlussmarke fehlt.`;
   const readOnlyViolation = line.match(/Provider\s+(\w+)\s+changed the worktree during a read-only task/i);
@@ -419,7 +422,7 @@ function renderGitState(data) {
   gitData = data;
   if (!data.files.some((file) => file.path === selectedGitFile)) selectedGitFile = null;
   elements.gitProjectName.textContent = `${data.projectName} · ${data.worktreeKind}`;
-  elements.gitBranchFlow.textContent = `Aufgabe → ${data.integration.branch} → main`;
+  elements.gitBranchFlow.textContent = data.integration.branch === 'main' ? 'Aufgabe → main' : `Aufgabe → ${data.integration.branch} → main`;
   elements.gitTarget.replaceChildren();
   for (const target of data.targets) {
     const option = document.createElement('option'); option.value = target.path;
@@ -462,12 +465,13 @@ function renderGitState(data) {
   }
   elements.gitCommit.disabled = data.clean;
   elements.gitCommitPush.disabled = data.clean || !data.remote;
-  elements.gitIntegrate.disabled = !data.integration.canFastForward;
-  elements.gitIntegrate.classList.toggle('hidden', !data.integration.canFastForward);
-  elements.gitIntegrate.textContent = `In ${data.integration.branch} übernehmen`;
+  const canFinalizeTask = data.integration.canFastForward || data.integration.canCleanup;
+  elements.gitIntegrate.disabled = !canFinalizeTask;
+  elements.gitIntegrate.classList.toggle('hidden', !canFinalizeTask);
+  elements.gitIntegrate.textContent = data.integration.canCleanup ? 'Aufgabenbranch aufräumen' : `In ${data.integration.branch} übernehmen`;
   elements.gitPush.disabled = !data.remote || !data.clean || (data.hasUpstream && data.ahead === 0);
   elements.gitPush.classList.toggle('hidden', elements.gitPush.disabled);
-  elements.gitMessage.textContent = !data.integration.selectedIsIntegration && data.integration.alreadyIntegrated
+  elements.gitMessage.textContent = data.clean && !data.integration.selectedIsIntegration && data.integration.alreadyIntegrated && !data.integration.canCleanup
     ? `Dieser Aufgabenstand ist bereits in ${data.integration.branch} enthalten.` : '';
 }
 
@@ -493,14 +497,21 @@ async function loadGitFileDiff(filePath) {
 
 async function activateProject(projectId) {
   const target = registry.projects.find((project) => project.id === projectId);
+  const visibleView = document.querySelector('[data-view-panel]:not(.hidden)')?.dataset.viewPanel || 'tasks';
   setBusy(true, 'Projekt wird gewechselt', `${target?.name || 'Projekt'} und seine lokalen Verbindungen werden geprüft.`);
   try {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
     graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; elements.gitTarget.replaceChildren();
+    elements.gitFileList.replaceChildren(); elements.gitDiffFileName.textContent = 'Projekt wird gewechselt'; elements.gitDiff.textContent = 'Der Git-Zustand des neuen Projekts wird geladen.';
+    elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitIntegrate.disabled = true; elements.gitPush.disabled = true;
     renderProjectSelector(); resetKnowledge();
     await refreshAll(true);
+    if (visibleView === 'portfolio') await loadPortfolio();
+    else if (visibleView === 'knowledge') await loadActiveKnowledge();
+    else if (visibleView === 'git') await loadGitState();
+    else if (visibleView === 'systems') await loadSystems(true);
   } finally { setBusy(false); }
 }
 
@@ -735,6 +746,7 @@ async function refreshJobs() {
   if (componentStatus) renderComponents(componentStatus);
   const latestTask = rows.find((job) => job.kind === 'task');
   if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzter Job fehlgeschlagen. Details stehen im Live-Feed und Verlauf.';
+  else if (latestTask?.status === 'blocked') elements.formMessage.textContent = 'Letzter Job wurde kontrolliert blockiert. Die Begründung steht im Verlauf.';
   else if (latestTask?.status === 'completed') elements.formMessage.textContent = 'Letzter Job abgeschlossen.';
   else if (latestTask?.status === 'stopped') elements.formMessage.textContent = 'Letzter Job wurde gestoppt.';
   if (rows.some((job) => job.status === 'completed' && job.projectId && !registry.projects.some((project) => project.id === job.projectId))) {
@@ -941,16 +953,23 @@ elements.gitCommit.addEventListener('click', () => commitSelectedGitFiles(false)
 elements.gitCommitPush.addEventListener('click', () => commitSelectedGitFiles(true));
 elements.gitTarget.addEventListener('change', () => { selectedGitFile = null; loadGitState(elements.gitTarget.value); });
 elements.gitIntegrate.addEventListener('click', async () => {
-  if (!gitData?.integration?.canFastForward) { elements.gitMessage.textContent = gitData?.integration?.reason || 'Dieser Aufgabenstand kann nicht automatisch integriert werden.'; return; }
-  if (!window.confirm(`Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen und anschließend den Aufgaben-Worktree sowie den lokalen und gegebenenfalls den Remote-Branch löschen? main bleibt unverändert.`)) return;
+  const canCleanup = gitData?.integration?.canCleanup;
+  if (!gitData?.integration?.canFastForward && !canCleanup) { elements.gitMessage.textContent = gitData?.integration?.reason || 'Dieser Aufgabenstand kann nicht automatisch abgeschlossen werden.'; return; }
+  const targetNote = gitData.integration.branch === 'main' ? 'Da kein separater Integrationsbranch vorhanden ist, wird main aktualisiert.' : 'main bleibt unverändert.';
+  const action = canCleanup
+    ? `Branch ${gitData.branch} ist bereits in ${gitData.integration.branch} enthalten. Aufgaben-Worktree sowie lokalen und gegebenenfalls Remote-Branch jetzt löschen?`
+    : `Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen und anschließend den Aufgaben-Worktree sowie den lokalen und gegebenenfalls den Remote-Branch löschen? ${targetNote}`;
+  if (!window.confirm(action)) return;
   elements.gitIntegrate.disabled = true; elements.gitMessage.textContent = `${gitData.integration.branch} wird aktualisiert…`;
   try {
     const result = await api('/api/git/integrate', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
     selectedGitFile = null; renderGitState(result.state);
     const remoteCleanup = result.deletedRemoteBranch ? ' und auf origin' : '';
-    elements.gitMessage.textContent = `Aufgabenstand wurde lokal in ${result.state.integration.branch} übernommen; ${result.deletedBranch} wurde lokal${remoteCleanup} gelöscht. Prüfe und pushe jetzt nur den Integrationsbranch; main bleibt unverändert.`;
+    const completion = result.alreadyIntegrated ? 'Aufgabenstand war bereits übernommen' : `Aufgabenstand wurde in ${result.state.integration.branch} übernommen`;
+    const nextStep = result.state.integration.branch === 'main' ? 'Prüfe und pushe jetzt main.' : `Prüfe und pushe jetzt nur ${result.state.integration.branch}; main bleibt unverändert.`;
+    elements.gitMessage.textContent = `${completion}; ${result.deletedBranch} wurde lokal${remoteCleanup} gelöscht. ${nextStep}`;
   } catch (error) { elements.gitMessage.textContent = error.message; }
-  finally { elements.gitIntegrate.disabled = !gitData?.integration?.canFastForward; }
+  finally { elements.gitIntegrate.disabled = !(gitData?.integration?.canFastForward || gitData?.integration?.canCleanup); }
 });
 elements.gitPush.addEventListener('click', async () => {
   if (!gitData?.remote) { elements.gitMessage.textContent = 'Kein origin-Remote konfiguriert.'; return; }

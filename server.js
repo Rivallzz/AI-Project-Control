@@ -810,7 +810,10 @@ async function startTask(payload) {
     ? `\nAttachment-ID: ${id}\n\n## Attachments\n\n${attachments.map((attachment) => `- ${attachment.name} (${attachment.type}): ${attachment.path}`).join('\n')}\n`
     : '';
   const strategy = deterministicTaskStrategy(task, mode, project);
-  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nIntegration branch: ${worktree.integrationBranch}\nPromotion rule: task branch -> ${worktree.integrationBranch} -> main; never task branch -> main\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
+  const promotionRule = worktree.integrationBranch === 'main'
+    ? 'task branch -> main (only because no separate integration branch is available)'
+    : `task branch -> ${worktree.integrationBranch} -> main; never task branch -> main`;
+  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nIntegration branch: ${worktree.integrationBranch}\nPromotion rule: ${promotionRule}\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
   await fsp.writeFile(taskPath, taskPackage, 'utf8');
 
   const args = [
@@ -835,8 +838,10 @@ async function startTask(payload) {
   });
   child.on('close', (code) => {
     job.exitCode = code; job.finishedAt = new Date().toISOString();
-    job.status = code === 0 ? 'completed' : job.status === 'stopping' ? 'stopped' : 'failed';
-    const match = job.stdout.match(/AI_PROJECT_ROUTER_OK\s+provider=([^\s]+)\s+run=(.+)/);
+    const blockedMatch = job.stdout.match(/AI_PROJECT_ROUTER_BLOCKED\s+provider=([^\s]+)\s+run=(.+)/);
+    job.status = blockedMatch ? 'blocked' : code === 0 ? 'completed' : job.status === 'stopping' ? 'stopped' : 'failed';
+    job.phase = blockedMatch ? 'blocked' : job.phase;
+    const match = job.stdout.match(/AI_PROJECT_ROUTER_(?:OK|BLOCKED)\s+provider=([^\s]+)\s+run=(.+)/);
     if (match) { job.provider = match[1]; job.runDirectory = match[2].trim(); }
     const runMatch = job.stdout.match(/AI_RUN_DIRECTORY\s+(.+)/);
     if (!job.runDirectory && runMatch) job.runDirectory = runMatch[1].trim();
@@ -1068,7 +1073,8 @@ async function runRecord(directory, projectId) {
     }
   }
   if (!responseText && errorText) responseText = errorText;
-  const status = result ? result.status : errorText ? 'FAIL' : 'external';
+  const controlledBlocked = /^AI_PROJECT_TASK_BLOCKED:\s*.+$/im.test(responseText);
+  const status = controlledBlocked ? 'BLOCKED' : result ? result.status : errorText ? 'FAIL' : 'external';
   const summary = runSummary(responseText, result, status);
   return {
     name: path.basename(directory), path: directory, modifiedAt: stat.mtime.toISOString(),
@@ -1112,12 +1118,13 @@ async function portfolioProject(project) {
     } catch { graphStatus = 'fehlerhaft'; }
   }
   let state = 'Wartet'; let stateClass = 'attention'; let nextAction = 'Neue Aufgabe definieren';
-  if (!components.repository.ok || latest?.status === 'FAIL') {
+  if (!components.repository.ok || latest?.status === 'FAIL' || latest?.status === 'BLOCKED') {
     state = 'Blockiert'; stateClass = 'blocked'; nextAction = latest?.status === 'FAIL' ? 'Fehlgeschlagenen Lauf prüfen' : 'Repository-Verbindung prüfen';
+    if (latest?.status === 'BLOCKED') nextAction = 'Gemeldete Blockade prüfen';
   } else if (running) {
     state = 'Aktiv'; stateClass = 'active'; nextAction = 'Lauf im Live-Feed beobachten';
   } else if (latest?.status === 'PASS') {
-    state = 'Bereit zur Prüfung'; stateClass = 'ready'; nextAction = 'Ergebnis prüfen und nächste Entscheidung treffen';
+    state = 'Aufgabe abgeschlossen'; stateClass = 'ready'; nextAction = 'Ergebnis und Änderungen im Aufgabenbranch prüfen';
   } else if (latest) {
     state = 'Wartet'; stateClass = 'attention'; nextAction = 'Letzten Lauf prüfen';
   }
@@ -1337,6 +1344,10 @@ async function getGitState(project, requestedWorktree = null) {
     && target.branch !== integrationBranch && files.length === 0 && integrationTarget.clean
     && integrationIsAncestor && !alreadyIntegrated
   );
+  const canCleanup = Boolean(
+    integrationTarget && !target.mainCheckout && target.branch && target.branch !== 'detached HEAD'
+    && target.branch !== integrationBranch && files.length === 0 && alreadyIntegrated
+  );
   return {
     projectId: project.id, projectName: project.name, repository: project.repository,
     worktree: workingDirectory, worktreeKind: target.kind, mainCheckout: target.mainCheckout, targets,
@@ -1347,11 +1358,11 @@ async function getGitState(project, requestedWorktree = null) {
     integration: {
       branch: integrationBranch, worktree: integrationTarget?.path || null,
       selectedIsIntegration: target.branch === integrationBranch,
-      alreadyIntegrated, canFastForward,
-      reason: canFastForward ? null
+      alreadyIntegrated, canFastForward, canCleanup,
+      reason: canFastForward || canCleanup ? null
         : target.branch === integrationBranch ? 'Der Integrationsbranch ist bereits ausgewählt.'
-          : alreadyIntegrated ? `Dieser Aufgabenstand ist bereits in ${integrationBranch} enthalten.`
-            : files.length ? 'Committe zuerst die ausgewählten Änderungen.'
+          : files.length ? 'Committe zuerst die ausgewählten Änderungen.'
+            : alreadyIntegrated ? `Dieser Aufgabenstand ist bereits in ${integrationBranch} enthalten.`
               : !integrationTarget ? `Für ${integrationBranch} ist kein verfügbarer Worktree geöffnet.`
                 : !integrationTarget.clean ? `${integrationBranch} enthält lokale Änderungen.`
                   : !integrationIsAncestor ? `Der Aufgabenbranch basiert nicht mehr direkt auf ${integrationBranch}.`
@@ -1363,10 +1374,12 @@ async function getGitState(project, requestedWorktree = null) {
 async function integrateGitWorktree(payload) {
   const { project } = await getProject(String(payload.projectId || ''));
   const state = await getGitState(project, payload.worktree);
-  if (!state.integration.canFastForward || !state.integration.worktree) {
+  if ((!state.integration.canFastForward && !state.integration.canCleanup) || !state.integration.worktree) {
     throw new Error(state.integration.reason || 'The selected task branch cannot be integrated safely.');
   }
-  const merge = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'merge', '--ff-only', state.branch], { timeout: 120000 });
+  const merge = state.integration.canFastForward
+    ? await execFileAsync('git.exe', ['-C', state.integration.worktree, 'merge', '--ff-only', state.branch], { timeout: 120000 })
+    : { exitCode: 0, stdout: `Branch ${state.branch} is already contained in ${state.integration.branch}.`, stderr: '' };
   if (merge.exitCode !== 0) throw new Error(merge.stderr.trim() || merge.stdout.trim() || `Fast-forward into ${state.integration.branch} failed.`);
   const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${state.branch}`]);
   if (remoteBranch.exitCode === 0) {
@@ -1389,6 +1402,7 @@ async function integrateGitWorktree(payload) {
     output: (merge.stdout || merge.stderr).trim(),
     deletedBranch: state.branch,
     deletedRemoteBranch: remoteBranch.exitCode === 0,
+    alreadyIntegrated: state.integration.alreadyIntegrated,
     state: await getGitState(project, state.integration.worktree),
   };
 }

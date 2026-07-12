@@ -2,6 +2,8 @@
 
 AI Project Control separates durable project state from local operator state.
 
+Provider runs have three explicit terminal outcomes: completed, controlled blocked and failed. A valid `AI_PROJECT_TASK_BLOCKED` response remains non-successful, but its reason is preserved instead of being misreported as a missing completion marker.
+
 ```text
 Browser UI
   -> local Node server
@@ -57,7 +59,7 @@ Catalog entries may also declare workflow role, activation and cost policy. Thes
 
 The Git view is a review and publication surface, not an editor. It discovers every worktree registered with the selected project directly from Git, defaults to the latest changed task worktree and allows the owner to switch explicitly between task worktrees and the integration checkout. Status is compact and a read-only diff is loaded only for the file the owner opens. Checkboxes are reserved for commit selection. Commit and push commands run in the selected worktree, never silently in another checkout.
 
-Promotion follows one visible path: task branch → integration branch → `main`. After a task branch is clean and committed, the dashboard may fast-forward it into the clean integration checkout. It refuses divergent history and never starts a conflict-producing merge. Pushing the integration branch remains a separate owner action; promotion from the integration branch to `main` remains a reviewed pull request outside automatic task execution. Existing staged files outside the selection block the operation. Push never uses force.
+Promotion follows one visible path: task branch → integration branch → `main`. When no separate integration branch exists, `main` is the explicit integration target. After a task branch is clean and committed, the dashboard may fast-forward it into the clean target checkout. It refuses divergent history and never starts a conflict-producing merge. Pushing the target branch remains a separate owner action; with a separate integration branch, promotion from there to `main` remains a reviewed pull request outside automatic task execution. Existing staged files outside the selection block the operation. Push never uses force. A clean task branch already contained in the target can be finalized without merging again, removing its worktree and local branch plus its remote branch when present.
 
 ## Active project overview
 
