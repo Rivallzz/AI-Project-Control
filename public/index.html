@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Project Control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block">
+      <h1>AI Project Control</h1>
+      <p>Lokale Projektsteuerung</p>
+    </div>
+    <div class="project-switcher">
+      <label for="projectSelect">Projekt</label>
+      <select id="projectSelect" aria-label="Aktives Projekt"></select>
+      <button id="addProjectButton" class="button secondary" type="button">Projekt hinzufügen</button>
+    </div>
+    <div class="topbar-actions">
+      <span id="connectionState" class="connection pending">Verbindung wird geprüft</span>
+      <button id="refreshButton" class="button secondary" type="button">Aktualisieren</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel" aria-labelledby="providerHeading">
+        <div class="section-heading">
+          <h2 id="providerHeading">Provider</h2>
+          <span class="policy">Subscription-only</span>
+        </div>
+        <div id="providerList" class="provider-list" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="systemHeading">
+        <div class="section-heading"><h2 id="systemHeading">Workflowstatus</h2></div>
+        <div id="componentList" class="component-list" aria-live="polite"></div>
+      </section>
+    </aside>
+
+    <div class="workspace">
+      <nav class="view-tabs" aria-label="Dashboard-Bereiche">
+        <button class="tab-button active" type="button" data-view="tasks">Arbeitsbereich</button>
+        <button class="tab-button" type="button" data-view="knowledge">Wissen</button>
+        <button class="tab-button" type="button" data-view="systems">Systeme</button>
+        <button class="tab-button" type="button" data-view="projects">Projekte</button>
+      </nav>
+
+      <div class="content">
+        <div id="tasksView" class="view" data-view-panel="tasks">
+          <div class="activity-grid">
+            <section class="panel chat-panel" aria-labelledby="historyHeading">
+              <div class="section-heading">
+                <div><h2 id="historyHeading">Aufgabe und Rückmeldung</h2><p id="taskHeading">Projektgespräch</p></div>
+                <button id="historyRefreshButton" class="button secondary" type="button">Aktualisieren</button>
+              </div>
+              <div id="conversationHistory" class="conversation-history" aria-live="polite"></div>
+
+              <form id="taskForm" class="chat-composer">
+                <label for="taskText">Nachricht oder Auftrag</label>
+                <textarea id="taskText" name="task" rows="7" maxlength="200000" required placeholder="Beschreibe eine Aufgabe oder schreibe z. B. 'Projekt C:\Repos\MeinProjekt hinzufügen'."></textarea>
+
+                <div class="composer-options">
+                  <div>
+                    <label for="providerSelect">Provider</label>
+                    <select id="providerSelect" name="provider">
+                      <option value="Auto">Auto: Codex → Claude → Ollama</option>
+                      <option value="Codex">Codex</option>
+                      <option value="Claude">Claude Code</option>
+                      <option value="Ollama">Ollama</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div class="label-row">
+                      <label for="modeSelect">Modus</label>
+                      <details class="info-popover">
+                        <summary aria-label="Information zum Modus">i</summary>
+                        <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt automatisch einen getrennten Git-Worktree und lässt das Haupt-Repository unberührt.</div>
+                      </details>
+                    </div>
+                    <select id="modeSelect" name="mode">
+                      <option value="ReadOnly">Nur lesen</option>
+                      <option value="Write">Änderungen erlauben</option>
+                    </select>
+                  </div>
+                  <label class="token-toggle" for="useSubscriptionTokens">
+                    <input id="useSubscriptionTokens" type="checkbox" checked>
+                    <span><strong>Codex-/Claude-Kontingent verwenden</strong><small>Aus: nur lokales Ollama, keine Abo-Tokens.</small></span>
+                  </label>
+                </div>
+
+                <div class="form-actions">
+                  <button id="startButton" class="button primary" type="submit">Senden</button>
+                  <span id="formMessage" class="form-message" role="status"></span>
+                </div>
+              </form>
+
+              <details class="learning-panel">
+                <summary>Lernnotiz für künftige Aufgaben</summary>
+                <form id="memoryForm">
+                  <label for="memoryText">Bestätigte Erfahrung oder Präferenz</label>
+                  <textarea id="memoryText" rows="3" maxlength="4000" placeholder="Nur bestätigte Erkenntnisse speichern; Repository-Regeln bleiben maßgeblich."></textarea>
+                  <div class="form-actions">
+                    <button class="button secondary" type="submit">Lernnotiz speichern</button>
+                    <span id="memoryMessage" class="form-message" role="status"></span>
+                  </div>
+                </form>
+              </details>
+            </section>
+
+            <section class="panel live-feed-panel" aria-labelledby="jobsHeading">
+              <div class="section-heading">
+                <div><h2 id="jobsHeading">Live-Feed</h2><p>Provider, Übergaben, Tools und Subagent-Ausgabe</p></div>
+              </div>
+              <div id="jobList" class="job-list" aria-live="polite"></div>
+            </section>
+          </div>
+        </div>
+
+        <div id="knowledgeView" class="view hidden" data-view-panel="knowledge">
+          <section class="panel knowledge-panel" aria-labelledby="knowledgeHeading">
+            <div class="section-heading">
+              <div><h2 id="knowledgeHeading">Projektwissen</h2><p id="knowledgeProjectName"></p></div>
+              <div class="segmented" role="group" aria-label="Wissensquelle">
+                <button class="segment active" type="button" data-knowledge="graphify">Graphify</button>
+                <button class="segment" type="button" data-knowledge="obsidian">Obsidian</button>
+              </div>
+            </div>
+
+            <div id="graphifyPanel" data-knowledge-panel="graphify">
+              <div class="knowledge-toolbar">
+                <input id="graphSearch" type="search" placeholder="Knoten, Datei oder Community suchen" aria-label="Graphify durchsuchen">
+                <button id="graphRefreshButton" class="button secondary" type="button">Graph laden</button>
+              </div>
+              <div id="graphStats" class="knowledge-stats"></div>
+              <div class="graph-layout">
+                <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Graphify-Beziehungsübersicht"></canvas>
+                <aside id="graphDetails" class="knowledge-details"><p class="empty">Wähle einen Knoten im Graphen.</p></aside>
+              </div>
+            </div>
+
+            <div id="obsidianPanel" class="hidden" data-knowledge-panel="obsidian">
+              <div class="knowledge-toolbar">
+                <input id="obsidianSearch" type="search" placeholder="Notizen durchsuchen" aria-label="Obsidian durchsuchen">
+                <button id="obsidianRefreshButton" class="button secondary" type="button">Notizen laden</button>
+              </div>
+              <div id="obsidianStats" class="knowledge-stats"></div>
+              <div class="notes-layout">
+                <div id="noteList" class="note-list" aria-label="Obsidian-Notizen"></div>
+                <article class="note-reader"><h3 id="noteTitle">Keine Notiz ausgewählt</h3><pre id="noteContent">Wähle links eine Notiz aus.</pre></article>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div id="systemsView" class="view hidden" data-view-panel="systems">
+          <section class="panel" aria-labelledby="systemsHeading">
+            <div class="section-heading">
+              <div><h2 id="systemsHeading">Systeminventar</h2><p>Globale und projektspezifische KI-Werkzeuge</p></div>
+              <button id="systemsRefreshButton" class="button secondary" type="button">Neu prüfen</button>
+            </div>
+            <h3 class="subheading">Für dieses Projekt</h3>
+            <div id="projectSystems" class="system-grid"></div>
+            <h3 class="subheading">Auf diesem PC</h3>
+            <div id="globalSystems" class="system-grid"></div>
+          </section>
+
+          <section class="panel" aria-labelledby="registerSystemHeading">
+            <div class="section-heading"><div><h2 id="registerSystemHeading">System registrieren</h2><p>Lokales Werkzeug oder Erweiterung ergänzen</p></div></div>
+            <form id="systemForm" class="system-form">
+              <div class="form-grid">
+                <div><label for="systemName">Name</label><input id="systemName" required maxlength="100"></div>
+                <div><label for="systemType">Typ</label><input id="systemType" required placeholder="z. B. Bildgenerierung"></div>
+              </div>
+              <label for="systemPath">Lokaler Pfad</label>
+              <input id="systemPath" required spellcheck="false">
+              <div class="form-grid">
+                <div><label for="systemScope">Gültigkeit</label><select id="systemScope"><option value="global">Alle Projekte</option><option value="project">Aktuelles Projekt</option></select></div>
+                <div><label for="systemNote">Notiz</label><input id="systemNote" maxlength="500"></div>
+              </div>
+              <div class="form-actions"><button class="button primary" type="submit">System registrieren</button><span id="systemMessage" class="form-message" role="status"></span></div>
+            </form>
+          </section>
+        </div>
+
+        <div id="projectsView" class="view hidden" data-view-panel="projects">
+          <section class="panel" aria-labelledby="createProjectHeading">
+            <div class="section-heading"><div><h2 id="createProjectHeading">Neues Projekt erstellen</h2><p>Git, Graphify und Obsidian werden automatisch vorbereitet</p></div></div>
+            <form id="provisionForm" class="project-form">
+              <div class="form-grid">
+                <div><label for="provisionName">Projektname</label><input id="provisionName" required maxlength="80"></div>
+                <div><label for="provisionSlug">Ordner- und Repositoryname</label><input id="provisionSlug" placeholder="wird aus dem Namen erzeugt"></div>
+              </div>
+              <label for="provisionParent">Übergeordneter Ordner</label>
+              <input id="provisionParent" required spellcheck="false">
+              <label for="provisionDescription">Beschreibung</label>
+              <input id="provisionDescription" maxlength="300">
+              <div class="form-grid">
+                <label class="check-row" for="provisionGitHub"><input id="provisionGitHub" type="checkbox"> GitHub-Repository erstellen</label>
+                <div><label for="provisionVisibility">GitHub-Sichtbarkeit</label><select id="provisionVisibility"><option value="private">Privat</option><option value="public">Öffentlich</option></select></div>
+              </div>
+              <p class="warning">Das Erstellen auf GitHub und der initiale Commit erfolgen nur nach deiner Bestätigung beim Absenden.</p>
+              <div class="form-actions"><button class="button primary" type="submit">Projekt erstellen</button><span id="provisionMessage" class="form-message" role="status"></span></div>
+            </form>
+          </section>
+
+          <section class="panel" aria-labelledby="projectsHeading">
+            <div class="section-heading"><div><h2 id="projectsHeading">Verbundene Projekte</h2><p>Ein vorhandenes Repository kannst du im Arbeitsbereich per Nachricht hinzufügen.</p></div></div>
+            <p class="chat-hint">Beispiel: <code>Projekt "C:\Repos\MeinProjekt" hinzufügen</code>. Graphify und Obsidian werden aus den Standardpfaden erkannt.</p>
+            <span id="projectMessage" class="form-message" role="status"></span>
+            <div id="projectList" class="project-list"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

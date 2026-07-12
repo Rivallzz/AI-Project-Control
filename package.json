@@ -1,0 +1,16 @@
+{
+  "name": "ai-project-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local multi-project control plane for Codex, Claude Code, Ollama, Hermes, Graphify and Obsidian.",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check public/app.js",
+    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/smoke.ps1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
+
