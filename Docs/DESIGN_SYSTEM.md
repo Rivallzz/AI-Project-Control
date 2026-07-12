@@ -18,9 +18,10 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Buttons exist only for distinct commands. Conversation continuation uses the composer, not a separate follow-up action.
 - Image attachments support file selection and clipboard paste with the same validation limits.
 - Install actions use a server-side allowlist and require explicit confirmation.
-- Portfolio states that imply review open the Git review surface instead of a generic workspace.
+- Portfolio describes only the active project; the global dropdown is the only project switcher.
 - Knowledge search updates Graphify and Obsidian together; source badges keep discovery, working context and authority distinct.
-- Commit and push are separate actions with separate confirmations.
+- Git checkboxes select commit scope; opening a row controls only the inspected file diff.
+- The graph uses direct manipulation: wheel zooms around the pointer and pointer drag pans the view.
 
 ## Responsive Rules
 
@@ -36,7 +37,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - `prefers-reduced-motion` disables nonessential transitions and spinner motion.
 - No cloud fonts, decorative images, large UI frameworks or client-side telemetry.
 - Background refresh is automatic and cached; manual refresh controls are reserved for explicit diagnostic views.
-- Graph zoom uses compact familiar controls and preserves the canvas dimensions so the layout does not shift.
+- Knowledge uses the page as its only scroll container. Note lists and note content do not introduce nested scrollbars.
 
 ## Avoid
 

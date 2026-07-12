@@ -8,9 +8,9 @@ With subscription usage enabled, `Auto` routes in this order:
 2. Claude Code through a Claude subscription.
 3. Hermes using local Ollama.
 
-When a recognized quota limit interrupts a task, the router records output, Git status and the working-tree diff, then gives the same worktree and a handoff package to the next provider.
+When a recognized quota limit interrupts a task, the router records output, Git status and the working-tree diff, then gives the same worktree and a handoff package to the next provider. If cli-continues can identify the exact local session by provider, working directory and run time, a minimal session extract is attached. The router never selects an unrelated latest session.
 
-With subscription usage disabled, only Ollama is allowed. Selecting Codex or Claude while that switch is off is rejected.
+With subscription usage disabled, only Hermes with local Ollama is allowed. Selecting Codex or Claude while that switch is off is rejected.
 
 Read-only questions use a lightweight advisory context policy: `AGENTS.md` remains mandatory, Graphify narrows discovery, and only the minimum relevant original files are read. Full documentation scans and test suites are reserved for explicit audits or write tasks.
 

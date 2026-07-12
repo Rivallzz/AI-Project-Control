@@ -22,7 +22,7 @@ Read-only mode uses the registered repository. Write mode automatically creates 
 
 ## Review And Publish
 
-Open `Prüfen & Git` or choose `Prüfen` in the portfolio. Review the changed-file list and read-only diff. Select the intended files, enter a concise commit message and confirm the local commit. Push is deliberately separate and requires a second confirmation. The operation refuses to hide already staged files outside the selection and never force-pushes.
+Open `Prüfen & Git`. Click a file name to inspect only that file; its checkbox independently controls whether it belongs to the next commit. Select the intended files, enter a concise message and choose either a local commit or `Committen & pushen`. Existing local commits can be pushed separately when the branch is ahead. The operation refuses to hide already staged files outside the selection and never force-pushes.
 
 ## System inventory
 

@@ -1,3 +1,3 @@
 # Current Task
 
-Validate the dynamic machine inventory, repository capability mapping, unified Graphify/Obsidian knowledge view and controlled Git review workflow. Confirm responsive behavior, automatic note loading, safe commit/push gates and the authority boundary between repository, Graphify and Obsidian.
+Improve or replace the local Hermes model/tool-calling profile until a two-file read-only task follows every instruction and reaches the required completion sentinel. Keep local Hermes write tasks disabled and read-only runs isolated in disposable worktrees until that gate passes. Serena, cli-continues, Flux detection and the real-time dashboard event stream are operational.

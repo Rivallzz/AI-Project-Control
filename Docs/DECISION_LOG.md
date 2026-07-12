@@ -27,3 +27,11 @@ System definitions and reviewed installers live in `config/systems.json`, not ap
 ## 2026-07-12 - Review before publication
 
 The portfolio review state opens a dedicated Git surface. Reading status and diff is automatic; commit and push remain separate, explicit owner actions. The dashboard does not provide a repository text editor, automatic merge or force-push.
+
+## 2026-07-12 - One active project overview
+
+The global project dropdown is the only project switcher. Portfolio shows the selected project's current task, latest run, repository and knowledge health, blockers and next action instead of duplicating a cross-project list.
+
+## 2026-07-12 - Selective ecosystem adoption
+
+Stars are discovery signals, not installation criteria. New tools must add a measured capability without duplicating Hermes, Graphify, Obsidian, ECC or the dashboard. Serena and cli-continues may receive isolated pilots; skill and spec repositories are reference sources first.

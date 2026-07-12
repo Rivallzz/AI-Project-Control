@@ -45,21 +45,28 @@
         <button class="tab-button" type="button" data-view="git">Prüfen & Git</button>
         <button class="tab-button" type="button" data-view="knowledge">Wissen</button>
         <button class="tab-button" type="button" data-view="systems">Systeme</button>
-        <button class="tab-button" type="button" data-view="projects">Projekte</button>
       </nav>
 
       <div class="content">
         <div id="portfolioView" class="view hidden" data-view-panel="portfolio">
-          <section class="panel portfolio-panel" aria-labelledby="attentionHeading">
+          <section class="panel portfolio-panel" aria-labelledby="portfolioHeading">
             <div class="section-heading">
-              <div><h2 id="attentionHeading">Aufmerksamkeit erforderlich</h2><p>Nur Abweichungen, Blockaden und wartende Entscheidungen</p></div>
+              <div><h2 id="portfolioHeading">Projektüberblick</h2><p id="portfolioProjectName">Aktives Projekt</p></div>
+              <span id="portfolioState" class="project-state attention">wird geprüft</span>
+            </div>
+            <div class="portfolio-next-action"><span>Nächster Schritt</span><strong id="portfolioNextAction">Projektzustand wird geladen…</strong></div>
+            <div class="portfolio-overview-grid">
+              <article><span>Aktueller Auftrag</span><strong id="portfolioCurrentTask">—</strong></article>
+              <article><span>Letzter Lauf</span><strong id="portfolioLastRun">—</strong></article>
+              <article><span>Repository</span><strong id="portfolioRepository">—</strong></article>
+              <article><span>Projektwissen</span><strong id="portfolioKnowledge">—</strong></article>
             </div>
             <div id="attentionList" class="attention-list" aria-live="polite"></div>
-          </section>
-
-          <section class="panel portfolio-panel" aria-labelledby="portfolioHeading">
-            <div class="section-heading"><div><h2 id="portfolioHeading">Projektportfolio</h2><p>Ein ruhiger Überblick über alle verbundenen Projekte</p></div></div>
-            <div id="portfolioList" class="portfolio-list" aria-live="polite"></div>
+            <div class="portfolio-actions">
+              <button class="button primary" type="button" data-portfolio-target="tasks">Aufgabe öffnen</button>
+              <button class="button secondary" type="button" data-portfolio-target="git">Änderungen prüfen</button>
+              <button class="button secondary" type="button" data-portfolio-target="knowledge">Wissen öffnen</button>
+            </div>
           </section>
         </div>
 
@@ -81,10 +88,10 @@
                   <div>
                     <label for="providerSelect">Provider</label>
                     <select id="providerSelect" name="provider">
-                      <option value="Auto">Auto: Codex → Claude → Ollama</option>
+                      <option value="Auto">Auto: Codex → Claude → Hermes + Ollama (experimentell)</option>
                       <option value="Codex">Codex</option>
                       <option value="Claude">Claude Code</option>
-                      <option value="Ollama">Ollama</option>
+                      <option value="Ollama">Hermes lokal (Read-only, experimentell)</option>
                     </select>
                   </div>
                   <div>
@@ -102,7 +109,7 @@
                   </div>
                   <label class="token-toggle" for="useSubscriptionTokens">
                     <input id="useSubscriptionTokens" type="checkbox" checked>
-                    <span><strong>Codex-/Claude-Kontingent verwenden</strong><small>Aus: nur lokales Ollama, keine Abo-Tokens.</small></span>
+                    <span><strong>Codex-/Claude-Kontingent verwenden</strong><small>Aus: nur Hermes mit lokalem Ollama, keine Abo-Tokens.</small></span>
                   </label>
                 </div>
 
@@ -154,14 +161,15 @@
                 <div id="gitFileList" class="git-file-list"></div>
               </section>
               <section class="git-diff" aria-labelledby="gitDiffHeading">
-                <div class="source-heading"><div><span class="source-badge authority">Repository</span><h3 id="gitDiffHeading">Schreibgeschützter Diff</h3></div></div>
-                <pre id="gitDiffContent">Keine Änderungen geladen.</pre>
+                <div class="source-heading"><div><span class="source-badge authority">Repository</span><h3 id="gitDiffHeading">Dateiänderungen</h3></div><span id="gitDiffFileName" class="git-diff-file">Keine Datei ausgewählt</span></div>
+                <pre id="gitDiffContent">Klicke auf eine Dateizeile, um ausschließlich deren Änderungen zu sehen.</pre>
               </section>
             </div>
             <div class="git-actions">
               <div class="git-commit-control"><label for="gitCommitMessage">Commit-Nachricht</label><input id="gitCommitMessage" maxlength="200" placeholder="Kurze, konkrete Zusammenfassung"></div>
-              <button id="gitCommitButton" class="button primary" type="button">Auswahl committen</button>
-              <button id="gitPushButton" class="button secondary" type="button">Aktuellen Branch pushen</button>
+              <button id="gitCommitButton" class="button secondary" type="button">Nur committen</button>
+              <button id="gitCommitPushButton" class="button primary" type="button">Committen & pushen</button>
+              <button id="gitPushButton" class="button secondary hidden" type="button">Ausstehende Commits pushen</button>
               <span id="gitMessage" class="form-message" role="status"></span>
             </div>
           </section>
@@ -181,15 +189,10 @@
               <section class="knowledge-source graph-source" aria-labelledby="graphSourceHeading">
                 <div class="source-heading">
                   <div><span class="source-badge discovery">Graphify</span><h3 id="graphSourceHeading">Zusammenhänge</h3></div>
-                  <div class="graph-controls" role="group" aria-label="Graph-Zoom">
-                    <button id="graphZoomOut" class="icon-button" type="button" title="Verkleinern" aria-label="Graph verkleinern">−</button>
-                    <button id="graphZoomFit" class="icon-button fit-button" type="button" title="Einpassen" aria-label="Graph einpassen">Fit</button>
-                    <button id="graphZoomIn" class="icon-button" type="button" title="Vergrößern" aria-label="Graph vergrößern">+</button>
-                  </div>
                 </div>
                 <div id="graphStats" class="knowledge-stats"></div>
                 <div class="graph-layout">
-                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Graphify-Beziehungsübersicht"></canvas>
+                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Graphify-Beziehungsübersicht; mit Mausrad zoomen und durch Ziehen verschieben" title="Mausrad: zoomen · Ziehen: Ansicht verschieben"></canvas>
                   <aside id="graphDetails" class="knowledge-details"><p class="empty">Wähle einen Knoten im Graphen.</p></aside>
                 </div>
               </section>
@@ -257,12 +260,6 @@
             </form>
           </section>
 
-          <section class="panel" aria-labelledby="projectsHeading">
-            <div class="section-heading"><div><h2 id="projectsHeading">Verbundene Projekte</h2><p>Ein vorhandenes Repository kannst du im Arbeitsbereich per Nachricht hinzufügen.</p></div></div>
-            <p class="chat-hint">Beispiel: <code>Projekt "C:\Repos\MeinProjekt" hinzufügen</code>. Graphify und Obsidian werden aus den Standardpfaden erkannt.</p>
-            <span id="projectMessage" class="form-message" role="status"></span>
-            <div id="projectList" class="project-list"></div>
-          </section>
         </div>
       </div>
     </div>

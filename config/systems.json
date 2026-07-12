@@ -115,6 +115,30 @@
       "detect": { "type": "mcp" }
     },
     {
+      "id": "serena",
+      "name": "Serena",
+      "category": "Code-Kontext",
+      "tier": "recommended",
+      "reason": "Symbolbasierte Code-Navigation und Referenzsuche, ohne komplette Dateien in den Modellkontext zu laden.",
+      "workflowRole": "Semantische Code-Navigation nach der projektweiten Graphify-Eingrenzung.",
+      "activation": "Nur bei Codeanalyse, Refactoring und symbolbezogenen Änderungen; aktiviert das aktuelle Arbeitsverzeichnis.",
+      "costPolicy": "Lokal und Open Source; nutzt das bereits gewählte LLM und erzeugt kein eigenes Abo.",
+      "detect": { "type": "command", "command": "serena.exe", "args": ["--version"] },
+      "install": { "name": "Serena", "command": "uv.exe", "args": ["tool", "install", "-p", "3.13", "serena-agent"] }
+    },
+    {
+      "id": "cli-continues",
+      "name": "cli-continues",
+      "category": "Provider-Übergabe",
+      "tier": "recommended",
+      "reason": "Liest lokale Codex- und Claude-Sitzungen read-only und ergänzt Übergaben bei einem echten Kontingentwechsel.",
+      "workflowRole": "Kompaktes Sitzungsartefakt zusätzlich zu Task-Paket, Logs und Git-Diff.",
+      "activation": "Nur nach einem erkannten Codex- oder Claude-Kontingentlimit; niemals als stiller Sitzungswähler.",
+      "costPolicy": "Lokal und Open Source; startet keinen kostenpflichtigen Provider selbstständig.",
+      "detect": { "type": "pathOrCommand", "paths": ["{APPDATA}\\npm\\continues.cmd"], "command": "continues.cmd", "args": ["--version"] },
+      "install": { "name": "cli-continues", "command": "npm.cmd", "args": ["install", "--global", "continues"] }
+    },
+    {
       "id": "github-cli",
       "name": "GitHub CLI",
       "category": "Entwicklung",
@@ -173,8 +197,14 @@
       "category": "Bildmodell",
       "tier": "project",
       "capabilities": ["image-generation"],
-      "reason": "Lokales Bildmodell für Projekte mit Assetpipeline.",
-      "detect": { "type": "flux" }
+      "reason": "Lokales Bildmodell für Projekte mit Assetpipeline; Polis nutzt den vorhandenen Flux-Schnell-Checkpoint über ComfyUI.",
+      "detect": {
+        "type": "flux",
+        "roots": [
+          "C:\\Repos\\ComfyUI\\models",
+          "{LOCALAPPDATA}\\Programs\\Comfy Desktop\\resources\\ComfyUI\\models"
+        ]
+      }
     },
     {
       "id": "ffmpeg",

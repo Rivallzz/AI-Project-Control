@@ -31,6 +31,28 @@
 - Moved system definitions, capability mappings and reviewed installers from `server.js` into the versioned `config/systems.json` catalog.
 - Added dynamic repository capability detection and visible `Verwendet von` project assignments for project-dependent tools.
 - Added catalog-driven discovery for portable tools outside `PATH`, including local Godot downloads.
+- Replaced the combined repository diff with validated, on-demand per-file Git diffs while preserving independent commit selection.
+- Added a combined commit-and-push path plus a separate push action for already-ahead branches.
+- Replaced graph zoom buttons with pointer-centered wheel zoom and drag-to-pan interaction.
+- Removed nested knowledge scroll areas and placed Graphify and Obsidian in one page-scroll flow.
+- Replaced the duplicated attention/project portfolio with one active-project overview and removed the redundant Projects tab.
+- Documented a no-install ecosystem review and shortlisted Serena, cli-continues, selected Agent Skills and Spec Kit concepts for controlled pilots.
 - Added a dedicated Git review surface with changed-file selection, read-only diff, guarded local commits and separate non-force pushes.
 - Combined Graphify relationships and Obsidian working notes into one automatically loaded knowledge view with shared search and graph zoom.
 - Expanded each Obsidian project area with lightweight indexes for notes, research, drafts, reviews, prompts, lessons and AI runs.
+- Installed Serena 1.5.3 through its official uv package and connected it globally to Codex and Claude Code for project-activated symbol navigation.
+- Moved Serena project metadata outside Git repositories and kept its optional browser dashboard closed by default.
+- Installed cli-continues 4.1.1 and added exact-project, minimal session extracts to verified Codex/Claude quota handoffs without replacing task packages or Git state.
+- Added a reusable integration contract so future repositories, agents and tools require a role, activation rule, cost boundary, validation and rollback instead of being merely installed.
+- Corrected Flux detection to include the canonical `C:\Repos\ComfyUI\models` installation already used by the Polis asset pipeline.
+- Clarified the local provider in the UI as `Hermes + Ollama` and documented how to start controlled Hermes orchestration.
+- Fixed the Hermes one-shot adapter so its intentionally empty standard input no longer fails PowerShell parameter binding before the local run starts.
+- Made redirected UTF-8 process encoding conditional so the router remains compatible with both PowerShell 7 and Windows PowerShell 5.1.
+- Passed bounded local tasks directly to Hermes instead of asking the local model to discover an external prompt file, with an explicit Windows command-line size guard.
+- Added a final local execution directive and labelled Hermes/Ollama as a controlled pilot until the local model consistently completes multi-step tool workflows.
+- Validated Serena startup and external cache placement inside Hermes, but kept the local orchestrator in pilot status after `polis-coder` repeatedly stopped after its first exploration step; the router failed closed and the repository remained unchanged.
+- Validated cli-continues by exporting a 3.4 KB `minimal` handoff from an exact Codex session match without launching another provider.
+- Replaced polling-only job updates with a local server-sent-event feed and preserved per-job scroll positions during live rendering.
+- Switched Hermes from final-output-only one-shot execution to visible non-interactive chat progress and corrected Serena MCP names to the native `mcp__serena__*` form.
+- Disabled unsupported native thinking for the local `polis-coder` Hermes profile and prevented echoed prompt sentinels or visible provider errors from producing false PASS results.
+- Isolated local Hermes read-only runs in disposable detached worktrees, removed write-capable file tools from that mode and blocked all local Hermes write tasks after instruction-adherence violations.

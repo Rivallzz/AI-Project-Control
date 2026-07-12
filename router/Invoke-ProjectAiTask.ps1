@@ -27,7 +27,7 @@ function Invoke-CapturedProcess {
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$InputText,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$InputText,
         [Parameter(Mandatory)][string]$Cwd,
         [Parameter(Mandatory)][string]$ProviderName
     )
@@ -41,9 +41,9 @@ function Invoke-CapturedProcess {
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
     $utf8 = [System.Text.UTF8Encoding]::new($false)
-    $start.StandardInputEncoding = $utf8
-    $start.StandardOutputEncoding = $utf8
-    $start.StandardErrorEncoding = $utf8
+    if ($start.PSObject.Properties.Name -contains 'StandardInputEncoding') { $start.StandardInputEncoding = $utf8 }
+    if ($start.PSObject.Properties.Name -contains 'StandardOutputEncoding') { $start.StandardOutputEncoding = $utf8 }
+    if ($start.PSObject.Properties.Name -contains 'StandardErrorEncoding') { $start.StandardErrorEncoding = $utf8 }
     foreach ($argument in $Arguments) {
         [void]$start.ArgumentList.Add($argument)
     }
@@ -55,11 +55,15 @@ function Invoke-CapturedProcess {
     $process.StandardInput.Write($InputText)
     $process.StandardInput.Close()
     $stdout = [System.Text.StringBuilder]::new()
+    $emitStreamLine = $ProviderName -ne 'ollama'
     while (-not $process.StandardOutput.EndOfStream) {
         $line = $process.StandardOutput.ReadLine()
         [void]$stdout.AppendLine($line)
-        [Console]::Out.WriteLine("AI_STREAM provider=$ProviderName $line")
-        [Console]::Out.Flush()
+        if (-not $emitStreamLine -and $line -match 'Initializing agent') { $emitStreamLine = $true }
+        if ($emitStreamLine) {
+            [Console]::Out.WriteLine("AI_STREAM provider=$ProviderName $line")
+            [Console]::Out.Flush()
+        }
     }
     $process.WaitForExit()
 
@@ -76,6 +80,58 @@ function Test-UsageLimitFailure {
     return $Text -match '(?is)(usage|rate|quota).{0,120}(limit|exhaust|reset)' -or
         $Text -match '(?is)(limit).{0,120}(reached|exceeded|reset)' -or
         $Text -match '(?i)insufficient_quota|too many requests|http\s*429'
+}
+
+function New-ContinuesHandoffArtifact {
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$SourceProvider,
+        [Parameter(Mandatory)][string]$Cwd,
+        [Parameter(Mandatory)][DateTimeOffset]$StartedAt,
+        [Parameter(Mandatory)][DateTimeOffset]$FinishedAt,
+        [Parameter(Mandatory)][string]$OutputDirectory
+    )
+
+    $continuesCommand = Get-Command continues -ErrorAction SilentlyContinue
+    if ($null -eq $continuesCommand) {
+        [Console]::Out.WriteLine('AI_EVENT provider=continues state=skipped reason=command-not-found')
+        return $null
+    }
+
+    try {
+        & $continuesCommand.Source scan --rebuild | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'session index rebuild failed' }
+        $sessionJson = (& $continuesCommand.Source list --source $SourceProvider --json -n 40 | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw 'session listing failed' }
+        $expectedPath = [System.IO.Path]::GetFullPath($Cwd).TrimEnd('\')
+        $windowStart = $StartedAt.AddMinutes(-2)
+        $windowEnd = $FinishedAt.AddMinutes(2)
+        $sessions = @($sessionJson | ConvertFrom-Json)
+        $session = $sessions | Where-Object {
+            if (-not $_.cwd -or -not $_.updatedAt) { return $false }
+            try {
+                $sessionPath = [System.IO.Path]::GetFullPath([string]$_.cwd).TrimEnd('\')
+                $updatedAt = [DateTimeOffset]::Parse([string]$_.updatedAt)
+                return $sessionPath -eq $expectedPath -and $updatedAt -ge $windowStart -and $updatedAt -le $windowEnd
+            }
+            catch { return $false }
+        } | Sort-Object { [DateTimeOffset]::Parse([string]$_.updatedAt) } -Descending | Select-Object -First 1
+
+        if ($null -eq $session) {
+            [Console]::Out.WriteLine("AI_EVENT provider=continues state=skipped reason=no-exact-$SourceProvider-session")
+            return $null
+        }
+
+        $artifactPath = Join-Path $OutputDirectory 'continues-handoff.md'
+        & $continuesCommand.Source inspect ([string]$session.id) --preset minimal --write-md $artifactPath | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $artifactPath)) { throw 'session export failed' }
+        [Console]::Out.WriteLine("AI_EVENT provider=continues state=created source=$SourceProvider path=$artifactPath")
+        return $artifactPath
+    }
+    catch {
+        $reason = ($_.Exception.Message -replace '[\r\n]+', ' ' -replace '\s+', '-').Trim('-')
+        [Console]::Out.WriteLine("AI_EVENT provider=continues state=skipped reason=$reason")
+        return $null
+    }
 }
 
 function Write-ClaudeBackoffState {
@@ -102,6 +158,9 @@ if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
 
 $taskPath = (Resolve-Path -LiteralPath $TaskFile).Path
 $workingPath = (Resolve-Path -LiteralPath $WorkingDirectory).Path
+$taskPackageRaw = Get-Content -LiteralPath $taskPath -Raw
+$goalMatch = [regex]::Match($taskPackageRaw, '(?s)## Goal\s*(.+)$')
+$taskGoal = if ($goalMatch.Success) { $goalMatch.Groups[1].Value.Trim() } else { $taskPackageRaw.Trim() }
 $statusScript = Join-Path $PSScriptRoot 'Get-AiProviderStatus.ps1'
 $status = (& $statusScript -Json | Out-String) | ConvertFrom-Json
 
@@ -123,6 +182,7 @@ $contextPolicy = if ($Mode -eq 'ReadOnly') {
 Read-only context policy:
 - Treat ordinary questions and ideation requests as concise advisory work.
 - Read AGENTS.md, then use Graphify for focused discovery when available.
+- Use Serena only when symbol-level code relationships would reduce broad file reads; activate the current worktree first.
 - Read only the minimum original files required to answer; do not scan the complete repository or documentation tree by default.
 - Do not run the full test suite for an advisory answer unless the task explicitly requests validation or a repository-wide audit.
 - Broaden context only when the task explicitly requires cross-project, architecture-wide, consistency, security or release analysis.
@@ -133,6 +193,7 @@ else {
 Write-task context policy:
 - Follow the complete project workflow and read every owner document required by AGENTS.md.
 - Use Graphify to focus discovery, then verify every changed or decision-owning file directly.
+- Activate the current worktree with Serena for symbol-level code discovery and edits when available.
 - Run the validation required for the affected systems.
 "@
 }
@@ -144,11 +205,12 @@ Mandatory workflow:
 1. Read AGENTS.md before any project analysis or change when it exists. For Polis, AGENTS.md is mandatory.
 2. Treat Git and current repository files as authoritative.
 3. Use Graphify for focused discovery when graphify-out/graph.json exists, then read every relevant original file directly.
-4. Treat an associated Obsidian area as working context, never as a competing source of truth.
-5. Do not commit, push, create a pull request, merge, or approve lifecycle promotion.
-6. Do not change unrelated files. Stop when a permanent design decision needs owner approval.
-7. Run the task's required validation and finish with changed files, tests, risks, and open gates.
-8. End the final response with exactly AI_PROJECT_TASK_COMPLETE only when the task is complete. Otherwise end with AI_PROJECT_TASK_BLOCKED: followed by the reason.
+4. For code work, use Serena's `initial_instructions` and symbol tools when available. Clients started with `--project-from-cwd` are already activated; call `activate_project` only when that tool exists.
+5. Treat an associated Obsidian area as working context, never as a competing source of truth.
+6. Do not commit, push, create a pull request, merge, or approve lifecycle promotion.
+7. Do not change unrelated files. Stop when a permanent design decision needs owner approval.
+8. Run the task's required validation and finish with changed files, tests, risks, and open gates.
+9. End the final response with exactly AI_PROJECT_TASK_COMPLETE only when the task is complete. Otherwise end with AI_PROJECT_TASK_BLOCKED: followed by the reason.
 
 Execution mode: $Mode
 
@@ -156,7 +218,7 @@ $contextPolicy
 
 Task package:
 
-$(Get-Content -LiteralPath $taskPath -Raw)
+$taskPackageRaw
 "@
 $executionPromptPath = Join-Path $runDir 'execution-prompt.md'
 $prompt | Set-Content -LiteralPath $executionPromptPath -Encoding utf8
@@ -201,6 +263,28 @@ $handoffPath = $null
 foreach ($candidate in $candidates) {
     $attemptDir = Join-Path $runDir ("attempt-{0}-{1}" -f ($attempts.Count + 1), $candidate)
     New-Item -ItemType Directory -Force -Path $attemptDir | Out-Null
+    if ($candidate -eq 'ollama' -and $Mode -eq 'Write') {
+        [Console]::Out.WriteLine('AI_EVENT provider=ollama state=blocked reason=local-hermes-write-not-approved')
+        throw 'Local Hermes/Ollama write tasks are disabled until the read-only instruction-adherence gate passes.'
+    }
+    $providerWorkingPath = $workingPath
+    $localReadOnlyWorktree = $null
+
+    if ($candidate -eq 'ollama' -and $Mode -eq 'ReadOnly') {
+        $localReadOnlyWorktree = Join-Path $attemptDir 'readonly-worktree'
+        & git -C $workingPath worktree add --detach $localReadOnlyWorktree HEAD | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the isolated local read-only worktree.' }
+        $sourceGraph = Join-Path $workingPath 'graphify-out\graph.json'
+        if (Test-Path -LiteralPath $sourceGraph) {
+            $sandboxGraphDir = Join-Path $localReadOnlyWorktree 'graphify-out'
+            New-Item -ItemType Directory -Force -Path $sandboxGraphDir | Out-Null
+            Copy-Item -LiteralPath $sourceGraph -Destination (Join-Path $sandboxGraphDir 'graph.json')
+        }
+        $providerWorkingPath = $localReadOnlyWorktree
+        [Console]::Out.WriteLine("AI_EVENT provider=ollama state=sandbox-ready path=$localReadOnlyWorktree")
+        [Console]::Out.Flush()
+    }
+    $providerGitBefore = (& git -C $providerWorkingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
 
     $attemptPrompt = $prompt
     if ($null -ne $handoffPath) {
@@ -223,7 +307,7 @@ Provider handoff:
             throw 'OPENAI_API_KEY is set. Subscription-only routing refuses to risk API billing.'
         }
         $command = (Get-Command codex).Source
-        $arguments = @('exec', '--json', '--color', 'never', '--ephemeral', '-C', $workingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-')
+        $arguments = @('exec', '--json', '--color', 'never', '-C', $workingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-')
         $processInput = $attemptPrompt
     }
     elseif ($candidate -eq 'claude') {
@@ -231,25 +315,61 @@ Provider handoff:
             throw 'Anthropic API configuration is present. Subscription-only routing refuses to risk API billing.'
         }
         $command = (Get-Command claude).Source
-        $arguments = @('-p', '--output-format', 'json', '--no-session-persistence', '--model', $ClaudeModel, '--effort', 'high', '--permission-mode', $claudePermission)
+        $arguments = @('-p', '--output-format', 'json', '--model', $ClaudeModel, '--effort', 'high', '--permission-mode', $claudePermission)
         $processInput = $attemptPrompt
     }
     else {
         $command = (Get-Command hermes).Source
-        $hermesPrompt = "Read and execute the complete controlled instructions at $attemptPromptPath. End with AI_PROJECT_TASK_COMPLETE only if complete; otherwise end with AI_PROJECT_TASK_BLOCKED: reason."
-        $arguments = @('-z', $hermesPrompt, '--usage-file', (Join-Path $attemptDir 'usage.json'), '--provider', 'ollama-launch', '-m', $OllamaModel)
+        $hermesPrompt = @"
+Execute this controlled $Mode task now in the current repository.
+
+Goal:
+$taskGoal
+
+Required workflow:
+1. Read AGENTS.md first and obey it.
+2. Use Graphify only for focused discovery, then verify claims in original repository files.
+3. Use Serena only when symbol-level code inspection is necessary. Start with `mcp__serena__initial_instructions`; all exact Serena names start with `mcp__serena__`. Never invent shorter names.
+4. Do not change files in ReadOnly mode. Never commit, push, merge or start follow-up work.
+5. Continue until every requested output item is answered or a concrete blocker is found.
+
+Final response requirements:
+- Answer the goal directly and cite the original repository paths used.
+- State whether Graphify and Serena were used or skipped, with one short reason each.
+- State repository changes, risks and open gates.
+- End the final line with exactly AI_PROJECT_TASK_COMPLETE when all requested items are answered.
+- Otherwise end the final line with AI_PROJECT_TASK_BLOCKED: followed by the concrete reason.
+- Do not offer a menu, ask what to inspect, or stop after a partial summary.
+"@
+        if ($hermesPrompt.Length -gt 24000) {
+            throw 'The local Hermes prompt exceeds the safe Windows command-line budget. Narrow the task package or use Codex/Claude.'
+        }
+        $hermesPrompt | Set-Content -LiteralPath $attemptPromptPath -Encoding utf8
+        # `-z` deliberately hides tool previews. The non-interactive chat query keeps
+        # progress visible on stdout so the dashboard can stream it in real time.
+        $hermesToolsets = if ($Mode -eq 'ReadOnly') { 'terminal,serena' } else { 'terminal,file,skills,todo,serena' }
+        $arguments = @('chat', '-q', $hermesPrompt, '--provider', 'ollama-launch', '-m', $OllamaModel, '--source', 'tool', '--max-turns', '60', '--toolsets', $hermesToolsets)
         if ($ProjectName -eq 'Polis') { $arguments += @('--skills', 'polis-controlled-development') }
+        else { $arguments += @('--skills', 'controlled-project-development') }
         $processInput = ''
     }
 
     $started = [DateTimeOffset]::Now
-    $result = Invoke-CapturedProcess -FilePath $command -Arguments $arguments -InputText $processInput -Cwd $workingPath -ProviderName $candidate
+    $result = Invoke-CapturedProcess -FilePath $command -Arguments $arguments -InputText $processInput -Cwd $providerWorkingPath -ProviderName $candidate
     $finished = [DateTimeOffset]::Now
     $result.Stdout | Set-Content -LiteralPath (Join-Path $attemptDir 'stdout.log') -Encoding utf8
     $result.Stderr | Set-Content -LiteralPath (Join-Path $attemptDir 'stderr.log') -Encoding utf8
     $combined = $result.Stdout + "`n" + $result.Stderr
     $limited = $result.ExitCode -ne 0 -and (Test-UsageLimitFailure -Text $combined)
-    $completionConfirmed = $result.ExitCode -eq 0 -and $result.Stdout -match 'AI_PROJECT_TASK_COMPLETE'
+    $providerReportedFailure = $combined -match '(?im)(API call failed|Non-retryable (?:client )?error|HTTP [45][0-9]{2}:|Traceback \(most recent call last\)|Fatal error)'
+    $completionText = $result.Stdout
+    if ($candidate -eq 'ollama') {
+        # `hermes chat -q` echoes the submitted query, which itself documents the
+        # sentinel. Only the rendered final Hermes panel may confirm completion.
+        $finalPanel = $result.Stdout.LastIndexOf([char]0x2695 + ' Hermes')
+        $completionText = if ($finalPanel -ge 0) { $result.Stdout.Substring($finalPanel) } else { '' }
+    }
+    $completionConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $completionText -match 'AI_PROJECT_TASK_COMPLETE'
 
     $attempt = [pscustomobject]@{
         provider = $candidate
@@ -265,8 +385,16 @@ Provider handoff:
     [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=finished exit=$($result.ExitCode) complete=$completionConfirmed quota=$limited")
     [Console]::Out.Flush()
 
-    $gitAfter = (& git -C $workingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
-    $repoChanged = $gitAfter -ne $gitBefore
+    $gitAfter = (& git -C $providerWorkingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
+    $repoChanged = $gitAfter -ne $providerGitBefore
+    if ($repoChanged) {
+        (& git -C $providerWorkingPath diff --no-ext-diff | Out-String) | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.diff') -Encoding utf8
+        $gitAfter | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.status') -Encoding utf8
+    }
+    if ($null -ne $localReadOnlyWorktree) {
+        & git -C $workingPath worktree remove --force $localReadOnlyWorktree | Out-Null
+        & git -C $workingPath worktree prune | Out-Null
+    }
     if ($completionConfirmed) {
         if ($Mode -eq 'ReadOnly' -and $repoChanged) {
             throw "Provider $candidate changed the worktree during a read-only task. Inspect $attemptDir."
@@ -309,6 +437,10 @@ Provider handoff:
         throw "Provider $candidate failed for a non-quota reason. Automatic fallback stopped; inspect $attemptDir."
     }
 
+    $continuesHandoffPath = if ($candidate -in @('codex', 'claude')) {
+        New-ContinuesHandoffArtifact -SourceProvider $candidate -Cwd $workingPath -StartedAt $started -FinishedAt $finished -OutputDirectory $attemptDir
+    }
+    else { $null }
     $priorHandoffPath = $handoffPath
     $handoffPath = Join-Path $runDir ("handoff-{0}-to-next.md" -f $candidate)
     $diffPath = Join-Path $attemptDir 'working-tree.diff'
@@ -333,6 +465,7 @@ git status and diff. Preserve correct completed work, finish incomplete work, re
 - Previous stdout: $(Join-Path $attemptDir 'stdout.log')
 - Previous stderr: $(Join-Path $attemptDir 'stderr.log')
 - Working-tree diff: $diffPath
+- Minimal cli-continues session extract: $(if ($null -ne $continuesHandoffPath) { $continuesHandoffPath } else { 'not available; use the task package and process logs' })
 - Prior handoff: $(if ($null -ne $priorHandoffPath) { $priorHandoffPath } else { 'none' })
 
 ## Git status
@@ -345,6 +478,7 @@ $gitAfter
     $handoffs.Add([pscustomobject]@{
         from_provider = $candidate
         handoff_path = $handoffPath
+        continues_handoff_path = $continuesHandoffPath
         worktree_changed = $repoChanged
         created_at = [DateTimeOffset]::Now.ToString('o')
     })

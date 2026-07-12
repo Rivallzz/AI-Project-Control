@@ -1,18 +1,19 @@
 # AI Project Control
 
-AI Project Control is a local, multi-project workspace for running controlled tasks through Codex, Claude Code and Ollama while keeping project knowledge connected through Graphify and Obsidian.
+AI Project Control is a local, multi-project workspace for running controlled tasks through Codex, Claude Code and Hermes with Ollama while keeping project knowledge connected through Graphify, Serena and Obsidian.
 
 ## What it provides
 
 - One chat-like task and feedback timeline per project.
-- Provider routing: Codex, then Claude Code, then local Ollama.
-- A visible switch that disables subscription-token use and forces local Ollama.
+- Provider routing: Codex, then Claude Code, then Hermes with local Ollama.
+- A visible switch that disables subscription-token use and forces the local Hermes/Ollama path.
 - Automatic isolated Git worktrees for write tasks.
 - Live provider, handoff and tool output.
 - Unified Graphify relationship explorer and automatically loaded Obsidian working notes.
-- Controlled Git review, selected-file commits and explicit branch pushes without a repository editor.
+- On-demand per-file Git review, selected-file commits and explicit branch pushes without a repository editor.
 - Automatic local project provisioning with Git, documentation, Graphify and Obsidian.
 - Machine and project integration inventory, including Hermes, ECC and MCP.
+- Symbol-level code navigation through Serena and compact quota handoffs through cli-continues.
 - Dynamic machine inventory, project capability mapping and reviewed installers for missing local foundations.
 
 ## Cost boundary
@@ -39,3 +40,6 @@ Runtime state is stored under `%LOCALAPPDATA%\AI Project Control`; task runs und
 - `Docs/OPERATIONS.md`
 - `Docs/CONTEXT_BUDGET.md`
 - `Docs/DESIGN_SYSTEM.md`
+- `Docs/ECOSYSTEM_REVIEW.md`
+- `Docs/INTEGRATION_LIFECYCLE.md`
+- `Docs/HERMES_ORCHESTRATION.md`

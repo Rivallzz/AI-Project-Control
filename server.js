@@ -39,6 +39,7 @@ const IMAGE_EXTENSIONS = new Map([
   ['image/png', '.png'], ['image/jpeg', '.jpg'], ['image/webp', '.webp'], ['image/gif', '.gif'],
 ]);
 const jobs = new Map();
+const liveClients = new Set();
 let statusCache = null;
 let statusCacheAt = 0;
 const componentCache = new Map();
@@ -202,7 +203,11 @@ function taskIntent(task, mode) {
 
 function deterministicTaskStrategy(task, mode, project) {
   const intent = taskIntent(task, mode);
-  return `Intent: ${intent}\nContext budget: focused\nRetrieval order: AGENTS.md -> Graphify discovery (${project.graphPath}) -> relevant repository originals -> Obsidian working context only when needed\nPrompt policy: preserve the owner's request; do not use a second LLM to rewrite it\nScope policy: avoid broad repository scans when targeted retrieval answers the task`;
+  const codeSignals = /code|implement|refactor|symbol|class|function|method|bug|test|script|server|router|api|godot|gdscript|javascript|typescript|python|powershell/i.test(task);
+  const serenaStep = codeSignals || mode === 'Write'
+    ? ' -> Serena symbol discovery for code relationships'
+    : '';
+  return `Intent: ${intent}\nContext budget: focused\nRetrieval order: AGENTS.md -> Graphify discovery (${project.graphPath})${serenaStep} -> relevant repository originals -> Obsidian working context only when needed\nPrompt policy: preserve the owner's request; do not use a second LLM to rewrite it\nScope policy: avoid broad repository scans when targeted retrieval answers the task\nHandoff policy: task package and Git state are authoritative; cli-continues may add a minimal local session extract only after a verified provider quota failure`;
 }
 
 function relevantMemoryText(notes, task) {
@@ -577,11 +582,17 @@ async function detectSystem(definition) {
     } catch { return { ok: false, text: 'Comfy-Konfiguration ist nicht lesbar' }; }
   }
   if (detection.type === 'flux') {
-    if (!fs.existsSync(COMFY_SETTINGS)) return { ok: false, text: 'Keine Comfy-Modellordner konfiguriert' };
-    let settings;
-    try { settings = JSON.parse(await fsp.readFile(COMFY_SETTINGS, 'utf8')); } catch { return { ok: false, text: 'Comfy-Konfiguration ist nicht lesbar' }; }
     const matches = [];
-    for (const root of Array.isArray(settings.modelsDirs) ? settings.modelsDirs : []) await findMatchingFiles(root, /flux|schnell|flux1|flux2/i, matches);
+    const roots = (detection.roots || []).map(expandSystemPath);
+    if (fs.existsSync(COMFY_SETTINGS)) {
+      try {
+        const settings = JSON.parse(await fsp.readFile(COMFY_SETTINGS, 'utf8'));
+        roots.push(...(Array.isArray(settings.modelsDirs) ? settings.modelsDirs : []));
+      } catch {
+        // Explicit catalog roots remain valid even when optional Comfy Desktop settings are unreadable.
+      }
+    }
+    for (const root of [...new Set(roots)]) await findMatchingFiles(root, /flux|schnell|flux1|flux2/i, matches);
     return { ok: matches.length > 0, text: matches.length ? matches.join(', ') : 'Keine Flux-Modelldatei gefunden', path: matches[0] || null };
   }
   return { ok: false, text: `Unbekannte Erkennung: ${detection.type}` };
@@ -608,6 +619,8 @@ function catalogSystemRow(definition, detection, usedByProjects, activeProjectId
     ok: Boolean(detection.ok), status: detection.ok ? 'vorhanden' : 'fehlt', detail: detection.text,
     path: detection.path || null, scope: 'global', autoDetected: true, tier: definition.tier,
     installKey: definition.install ? definition.id : null, reason: definition.reason || null,
+    workflowRole: definition.workflowRole || null, activation: definition.activation || null,
+    costPolicy: definition.costPolicy || null,
     capabilities: definition.capabilities || [], usedByProjects,
     relevantToCurrentProject: usedByProjects.some((item) => item.id === activeProjectId),
   };
@@ -664,6 +677,31 @@ function snapshotJob(job) {
   };
 }
 
+function broadcastJob(job) {
+  const payload = `event: job\ndata: ${JSON.stringify(snapshotJob(job))}\n\n`;
+  for (const client of liveClients) {
+    try { client.write(payload); }
+    catch { liveClients.delete(client); }
+  }
+}
+
+function serveLiveEvents(request, response) {
+  response.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  response.write('retry: 1000\n\n');
+  liveClients.add(response);
+  for (const job of jobs.values()) response.write(`event: job\ndata: ${JSON.stringify(snapshotJob(job))}\n\n`);
+  const keepAlive = setInterval(() => {
+    try { response.write(`: keep-alive ${Date.now()}\n\n`); }
+    catch { clearInterval(keepAlive); liveClients.delete(response); }
+  }, 15000);
+  request.on('close', () => { clearInterval(keepAlive); liveClients.delete(response); });
+}
+
 function appendLog(job, key, chunk) {
   const text = stripAnsi(chunk.toString('utf8'));
   job[key] = (job[key] + text).slice(-MAX_JOB_LOG_CHARS);
@@ -674,6 +712,7 @@ function appendLog(job, key, chunk) {
     const latest = events[events.length - 1];
     job.phase = `${latest[1]} · ${latest[2]}`;
   }
+  broadcastJob(job);
 }
 
 function projectPathFromChat(task) {
@@ -708,6 +747,7 @@ async function startTask(payload) {
   if (!task || task.length > 200000) throw new Error('Task text must contain between 1 and 200,000 characters.');
   if (!['Auto', 'Codex', 'Claude', 'Ollama'].includes(provider)) throw new Error('Unknown provider selection.');
   if (!['ReadOnly', 'Write'].includes(mode)) throw new Error('Unknown execution mode.');
+  if (provider === 'Ollama' && mode === 'Write') throw new Error('Hermes lokal ist derzeit nur für isolierte Read-only-Experimente freigegeben. Verwende Codex oder Claude für Schreibaufgaben.');
 
   const registeredProject = await registerProjectFromChat(task);
   if (registeredProject) {
@@ -768,10 +808,11 @@ async function startTask(payload) {
     exitCode: null, runDirectory: null, pid: child.pid, stdout: '', stderr: '', child,
   };
   jobs.set(id, job);
+  broadcastJob(job);
   child.stdout.on('data', (chunk) => appendLog(job, 'stdout', chunk));
   child.stderr.on('data', (chunk) => appendLog(job, 'stderr', chunk));
   child.on('error', (error) => {
-    job.status = 'failed'; job.finishedAt = new Date().toISOString(); appendLog(job, 'stderr', error.message);
+    job.status = 'failed'; job.finishedAt = new Date().toISOString(); appendLog(job, 'stderr', error.message); broadcastJob(job);
   });
   child.on('close', (code) => {
     job.exitCode = code; job.finishedAt = new Date().toISOString();
@@ -780,7 +821,7 @@ async function startTask(payload) {
     if (match) { job.provider = match[1]; job.runDirectory = match[2].trim(); }
     const runMatch = job.stdout.match(/AI_RUN_DIRECTORY\s+(.+)/);
     if (!job.runDirectory && runMatch) job.runDirectory = runMatch[1].trim();
-    job.child = null; statusCacheAt = 0;
+    job.child = null; statusCacheAt = 0; broadcastJob(job);
   });
   return snapshotJob(job);
 }
@@ -793,7 +834,8 @@ function emitJob(job, phase, message) {
 function runStreamingCommand(job, command, args, cwd, label) {
   return new Promise((resolve, reject) => {
     emitJob(job, label, `${label} gestartet`);
-    const child = spawn(command, args, { cwd, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    const needsWindowsCommandShell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
+    const child = spawn(command, args, { cwd, windowsHide: true, shell: needsWindowsCommandShell, stdio: ['ignore', 'pipe', 'pipe'] });
     job.pid = child.pid; job.child = child;
     child.stdout.on('data', (chunk) => appendLog(job, 'stdout', `[${label}] ${chunk.toString('utf8')}`));
     child.stderr.on('data', (chunk) => appendLog(job, 'stderr', `[${label}] ${chunk.toString('utf8')}`));
@@ -861,7 +903,7 @@ async function provisionProject(payload) {
       emitJob(job, 'filesystem', `Projektordner wird erstellt: ${repository}`);
       await fsp.mkdir(path.join(repository, 'Docs'), { recursive: true });
       const readme = `# ${name}\n\n${description || 'Project initialized by AI Project Control.'}\n`;
-      const agents = `# Agent Instructions\n\n1. Read README.md and Docs/CURRENT_TASK.md before project work.\n2. Treat Git and repository files as the source of truth.\n3. Use Graphify for discovery, then read relevant original files.\n4. Use Obsidian as working memory, not as competing official documentation.\n5. Keep code modular and document architectural changes.\n6. Do not add paid services or API-key billing without explicit owner approval.\n7. Do not commit, push or merge unless the owner explicitly requests it.\n`;
+      const agents = `# Agent Instructions\n\n1. Read README.md and Docs/CURRENT_TASK.md before project work.\n2. Treat Git and repository files as the source of truth.\n3. Use Graphify for repository discovery, then read relevant original files.\n4. Use Serena for symbol-level code navigation when it reduces file reads; activate the current worktree first.\n5. Use Obsidian as working memory, not as competing official documentation.\n6. Keep code modular and document architectural changes.\n7. New AI tools, repositories and integrations require a defined role, activation rule, cost boundary, validation and rollback; installation alone is not integration.\n8. Use cli-continues only for an explicit provider handoff after a verified interruption.\n9. Do not add paid services or API-key billing without explicit owner approval.\n10. Do not commit, push or merge unless the owner explicitly requests it.\n`;
       const gitignore = `graphify-out/\n.env\n.env.*\nnode_modules/\n__pycache__/\n`;
       await Promise.all([
         fsp.writeFile(path.join(repository, 'README.md'), readme, 'utf8'),
@@ -1032,6 +1074,16 @@ async function portfolioProject(project) {
   ]);
   const latest = runs[0] || null;
   const running = Array.from(jobs.values()).find((job) => job.projectId === project.id && job.status === 'running');
+  const currentTaskPath = path.join(project.repository, 'Docs', 'CURRENT_TASK.md');
+  let currentTask = null;
+  if (fs.existsSync(currentTaskPath)) {
+    const text = await readBounded(currentTaskPath, 64 * 1024);
+    currentTask = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#') && !line.startsWith('>')).slice(0, 3).join(' ').slice(0, 600) || null;
+  }
+  let obsidianNotes = 0;
+  if (fs.existsSync(project.obsidianPath)) {
+    try { obsidianNotes = (await walkMarkdown(project.obsidianPath)).length; } catch { obsidianNotes = 0; }
+  }
   let graphStatus = components.graphify.ok ? 'aktuell' : 'fehlt';
   if (components.graphify.ok && head.ok) {
     try {
@@ -1052,24 +1104,26 @@ async function portfolioProject(project) {
   }
   return {
     id: project.id, name: project.name, state, stateClass,
+    currentTask,
     lastTask: latest ? `${latest.provider || latest.status} · ${String(latest.task || 'Lauf ohne gespeicherten Auftrag').slice(0, 150)}` : null,
     latestStatus: latest?.status || null, provider: running?.provider || latest?.provider || null,
-    repository: components.repository, graph: { status: graphStatus, ok: graphStatus === 'aktuell' }, nextAction,
+    running: running ? { provider: running.provider, phase: running.phase, startedAt: running.startedAt } : null,
+    repository: components.repository, graph: { status: graphStatus, ok: graphStatus === 'aktuell' },
+    obsidian: { ok: components.obsidian.ok, notes: obsidianNotes }, nextAction,
   };
 }
 
 async function getPortfolio() {
   const registry = await loadProjects();
-  const projects = await Promise.all(registry.projects.map(portfolioProject));
+  const selected = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
+  const project = await portfolioProject(selected);
   const attention = [];
-  for (const project of projects) {
-    if (!project.repository.ok) attention.push({ projectId: project.id, projectName: project.name, severity: 'error', message: 'Repository ist nicht erreichbar.' });
-    if (project.latestStatus === 'FAIL') attention.push({ projectId: project.id, projectName: project.name, severity: 'error', message: 'Der letzte Task ist fehlgeschlagen.' });
-    if (project.repository.ok && !project.repository.clean) attention.push({ projectId: project.id, projectName: project.name, severity: 'warning', message: 'Das Repository enthält noch nicht eingeordnete Änderungen.' });
-    if (project.graph.status === 'fehlt' || project.graph.status === 'fehlerhaft') attention.push({ projectId: project.id, projectName: project.name, severity: 'warning', message: 'Der Graphify-Index fehlt oder ist nicht lesbar.' });
-    if (project.graph.status === 'veraltet') attention.push({ projectId: project.id, projectName: project.name, severity: 'warning', message: 'Der Graphify-Index basiert nicht auf dem aktuellen Commit.' });
-  }
-  return { generatedAt: new Date().toISOString(), activeProjectId: registry.activeProjectId, attention, projects };
+  if (!project.repository.ok) attention.push({ severity: 'error', message: 'Repository ist nicht erreichbar.', target: 'git' });
+  if (project.latestStatus === 'FAIL') attention.push({ severity: 'error', message: 'Der letzte Task ist fehlgeschlagen.', target: 'tasks' });
+  if (project.repository.ok && !project.repository.clean) attention.push({ severity: 'warning', message: 'Das Repository enthält noch nicht eingeordnete Änderungen.', target: 'git' });
+  if (project.graph.status === 'fehlt' || project.graph.status === 'fehlerhaft') attention.push({ severity: 'warning', message: 'Der Graphify-Index fehlt oder ist nicht lesbar.', target: 'knowledge' });
+  if (project.graph.status === 'veraltet') attention.push({ severity: 'warning', message: 'Der Graphify-Index basiert nicht auf dem aktuellen Commit.', target: 'knowledge' });
+  return { generatedAt: new Date().toISOString(), activeProjectId: registry.activeProjectId, attention, project };
 }
 
 function endpointId(value) {
@@ -1183,20 +1237,39 @@ async function getGitState(project) {
   const head = await execFileAsync('git.exe', ['-C', project.repository, 'log', '-1', '--pretty=format:%h%x00%s%x00%aI']);
   const upstream = await execFileAsync('git.exe', ['-C', project.repository, 'rev-list', '--left-right', '--count', '@{upstream}...HEAD']);
   const ghAuth = await execFileAsync('gh.exe', ['auth', 'status', '--active']);
-  const diff = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--no-ext-diff', '--unified=3']);
-  const cachedDiff = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--cached', '--no-ext-diff', '--unified=3']);
   const files = parseGitStatus(status.stdout);
   const [behind = 0, ahead = 0] = upstream.exitCode === 0 ? upstream.stdout.trim().split(/\s+/).map(Number) : [0, 0];
   const [hash = '', subject = '', committedAt = ''] = head.stdout.split('\0');
-  const diffText = [cachedDiff.stdout && '# Bereits gestaged\n' + cachedDiff.stdout, diff.stdout && '# Arbeitsverzeichnis\n' + diff.stdout].filter(Boolean).join('\n');
   return {
     projectId: project.id, projectName: project.name, repository: project.repository,
     branch: branch.stdout.trim(), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
     githubAuthenticated: ghAuth.exitCode === 0, clean: files.length === 0, files,
     ahead, behind, hasUpstream: upstream.exitCode === 0,
     lastCommit: hash ? { hash, subject, committedAt } : null,
-    diff: diffText.slice(0, 400000), diffTruncated: diffText.length > 400000,
   };
+}
+
+async function getGitFileDiff(project, requestedPath) {
+  const filePath = String(requestedPath || '');
+  const state = await getGitState(project);
+  const file = state.files.find((candidate) => candidate.path === filePath);
+  if (!file || path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) throw new Error('Requested file is no longer part of the current Git status.');
+  const limit = 400000;
+  let text = '';
+  if (file.untracked) {
+    const absolute = path.join(project.repository, filePath);
+    const stat = await fsp.stat(absolute);
+    if (stat.size > limit) return { path: filePath, diff: `Neue Datei · ${stat.size} Bytes\n\nVorschau wegen Dateigröße nicht geladen.`, truncated: true, binary: false };
+    const buffer = await fsp.readFile(absolute);
+    if (buffer.includes(0)) return { path: filePath, diff: `Neue Binärdatei · ${stat.size} Bytes`, truncated: false, binary: true };
+    text = `--- /dev/null\n+++ b/${filePath.replace(/\\/g, '/')}\n@@ Neue Datei @@\n` + buffer.toString('utf8').split(/\r?\n/).map((line) => `+${line}`).join('\n');
+  } else {
+    const cached = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--cached', '--no-ext-diff', '--unified=3', '--', filePath]);
+    const working = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--no-ext-diff', '--unified=3', '--', filePath]);
+    text = [cached.stdout && '# Bereits gestaged\n' + cached.stdout, working.stdout && '# Arbeitsverzeichnis\n' + working.stdout].filter(Boolean).join('\n');
+    if (!text && file.originalPath) text = `Umbenannt: ${file.originalPath} -> ${filePath}`;
+  }
+  return { path: filePath, diff: text.slice(0, limit) || 'Für diese Datei ist kein Text-Diff verfügbar.', truncated: text.length > limit, binary: false };
 }
 
 async function commitGitChanges(payload) {
@@ -1258,6 +1331,7 @@ const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${HOST}:${PORT}`);
     if (request.method === 'GET' && url.pathname === '/api/health') return sendJson(response, 200, { status: 'ok', pid: process.pid, host: HOST, port: PORT });
+    if (request.method === 'GET' && url.pathname === '/api/events') return serveLiveEvents(request, response);
     if (request.method === 'GET' && url.pathname === '/api/projects') return sendJson(response, 200, await loadProjects());
     if (request.method === 'GET' && url.pathname === '/api/portfolio') return sendJson(response, 200, await getPortfolio());
     if (request.method === 'POST' && url.pathname === '/api/projects') return sendJson(response, 201, await addProject(await readJsonBody(request)));
@@ -1291,6 +1365,9 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/git') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getGitState(project));
+    }
+    if (request.method === 'GET' && url.pathname === '/api/git/diff') {
+      const { project } = await getProject(projectId); return sendJson(response, 200, await getGitFileDiff(project, url.searchParams.get('path')));
     }
     if (request.method === 'POST' && url.pathname === '/api/git/commit') return sendJson(response, 200, await commitGitChanges(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/push') return sendJson(response, 200, await pushGitBranch(await readJsonBody(request)));

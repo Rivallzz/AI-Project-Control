@@ -52,7 +52,7 @@ try {
     if ($obsidianNotes.Count -lt 8) { throw 'Obsidian working area was not initialized with useful indexes.' }
 
     $portfolio = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/portfolio" -TimeoutSec 20
-    if (-not ($portfolio.projects | Where-Object { $_.id -eq $project.id })) { throw 'Portfolio did not include the registered project.' }
+    if ($portfolio.project.id -ne $project.id -or $null -eq $portfolio.project.obsidian) { throw 'Portfolio did not focus the active project.' }
 
     $badAttachmentBody = @{
         projectId = $project.id
@@ -74,6 +74,7 @@ try {
     $appSource = Get-Content -Raw -LiteralPath (Join-Path $root 'public\app.js')
     if ($indexSource -notmatch 'attachmentInput' -or $indexSource -notmatch 'data-view="portfolio"' -or $indexSource -notmatch 'busyOverlay') { throw 'Responsive chat, portfolio or loading controls are missing.' }
     if ($indexSource -notmatch 'data-view="git"' -or $indexSource -notmatch 'knowledgeSearch' -or $indexSource -match 'Notizen laden') { throw 'Git review or automatic unified knowledge controls are missing.' }
+    if ($indexSource -match 'data-view="projects"' -or $indexSource -match 'graphZoomIn') { throw 'Redundant project navigation or graph zoom buttons are still present.' }
     if ($appSource -notmatch '\[\.\.\.runs\]\.reverse\(\)') { throw 'Conversation history is not rendered oldest-first.' }
     if ($appSource -notmatch "addEventListener\('paste'" -or $appSource -match 'data-open-run') { throw 'Chat paste support or simplified conversation actions are incorrect.' }
 
@@ -88,14 +89,23 @@ try {
     if ($serverSource -match 'SYSTEM_METADATA|INSTALL_CATALOG') { throw 'System definitions are still hardcoded in server.js.' }
     $catalog = Get-Content -Raw -LiteralPath (Join-Path $root 'config\systems.json') | ConvertFrom-Json
     if ($catalog.schemaVersion -ne 1 -or $catalog.systems.Count -lt 10) { throw 'Versioned system catalog is invalid.' }
+    $serenaSystem = $catalog.systems | Where-Object { $_.id -eq 'serena' }
+    $continuesSystem = $catalog.systems | Where-Object { $_.id -eq 'cli-continues' }
+    if ($null -eq $serenaSystem -or -not $serenaSystem.workflowRole -or -not $serenaSystem.activation) { throw 'Serena integration metadata is missing.' }
+    if ($null -eq $continuesSystem -or -not $continuesSystem.workflowRole -or -not $continuesSystem.costPolicy) { throw 'cli-continues integration metadata is missing.' }
     $ignoreSource = Get-Content -Raw -LiteralPath (Join-Path $root '.gitignore')
     if ($ignoreSource -match '(?m)^systems\.json$') { throw 'The versioned system catalog is hidden by an overly broad ignore rule.' }
 
     $gitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
     if ($gitState.branch -ne 'main' -or -not $gitState.clean) { throw 'Git review endpoint did not report the clean test repository.' }
     Set-Content -LiteralPath (Join-Path $testRepository 'review-me.txt') -Value 'review only' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $testRepository 'other.txt') -Value 'must not appear' -Encoding utf8
     $dirtyGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
     if ($dirtyGitState.clean -or -not ($dirtyGitState.files | Where-Object { $_.path -eq 'review-me.txt' })) { throw 'Git review endpoint did not expose the changed file.' }
+    if ($dirtyGitState.PSObject.Properties.Name -contains 'diff') { throw 'Git status endpoint still exposes a combined repository diff.' }
+    $fileDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=review-me.txt" -TimeoutSec 10
+    if ($fileDiff.diff -notmatch 'review only' -or $fileDiff.diff -match 'must not appear') { throw 'Git file diff did not isolate the requested file.' }
+    if ($appSource -notmatch "addEventListener\('wheel'" -or $appSource -notmatch "addEventListener\('pointermove'") { throw 'Graph mouse zoom or pan controls are missing.' }
 
     $invalidInstallerBody = @{ projectId = $project.id; installKey = 'not-approved' } | ConvertTo-Json
     try {
@@ -109,9 +119,19 @@ try {
     Set-Content -LiteralPath $testTask -Value "# Goal`n`nPrüfe UTF-8: äöü ß → Dry-run routing validation." -Encoding utf8
     $router = Join-Path $root 'router\Invoke-ProjectAiTask.ps1'
     $routerSource = Get-Content -Raw -LiteralPath $router
-    if ($routerSource -notmatch 'StandardInputEncoding\s*=\s*\$utf8') { throw 'Router does not explicitly enforce UTF-8 stdin.' }
+    if ($routerSource -notmatch 'StandardInputEncoding.*\$utf8') { throw 'Router does not explicitly enforce UTF-8 stdin when the runtime supports it.' }
     if ($routerSource -notmatch '\[Console\]::OutputEncoding\s*=\s*\$consoleUtf8') { throw 'Router does not explicitly enforce UTF-8 console output.' }
     if ($routerSource -notmatch 'Read-only context policy') { throw 'Router does not define the lightweight advisory context policy.' }
+    if ($routerSource -notmatch 'New-ContinuesHandoffArtifact') { throw 'Router does not create controlled cli-continues handoff artifacts.' }
+    if ($routerSource -notmatch '\[AllowEmptyString\(\)\]\[string\]\$InputText') { throw 'Router does not accept empty stdin for non-interactive Hermes execution.' }
+    if ($routerSource -notmatch 'Execute this controlled \$Mode task now') { throw 'Hermes does not receive the compact controlled goal prompt.' }
+    if ($routerSource -notmatch 'safe Windows command-line budget') { throw 'Hermes prompt size is not guarded for Windows.' }
+    if ($routerSource -notmatch 'mcp__serena__initial_instructions') { throw 'Hermes does not receive the native Serena MCP tool name.' }
+    if ($routerSource -notmatch 'worktree add --detach' -or $routerSource -notmatch 'local-hermes-write-not-approved') { throw 'Local Hermes read-only isolation or write-task block is missing.' }
+    if ($routerSource -notmatch "'chat', '-q'" -or $routerSource -match "@\('-z'") { throw 'Hermes still hides live tool progress in one-shot mode.' }
+    if ($routerSource -match "'--ephemeral'" -or $routerSource -match "'--no-session-persistence'") { throw 'Provider sessions are still disabled, so cli-continues cannot hand work off.' }
+    if ($routerSource -notmatch 'Serena') { throw 'Router does not describe the Serena symbol-navigation boundary.' }
+    if ($appSource -notmatch 'system\.workflowRole' -or $appSource -notmatch 'Hermes \+ Ollama') { throw 'System integration metadata or Hermes orchestration label is missing from the UI.' }
     $routerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs') -LocalOnly -DryRun
     if ($LASTEXITCODE -ne 0 -or ($routerOutput -join "`n") -notmatch 'ollama') { throw 'Local-only provider routing dry-run failed.' }
 

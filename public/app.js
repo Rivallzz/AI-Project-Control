@@ -13,7 +13,6 @@ const elements = {
   knowledgeProjectName: document.getElementById('knowledgeProjectName'), knowledgeSearch: document.getElementById('knowledgeSearch'),
   knowledgeLoadState: document.getElementById('knowledgeLoadState'), graphStats: document.getElementById('graphStats'),
   graphCanvas: document.getElementById('graphCanvas'), graphDetails: document.getElementById('graphDetails'),
-  graphZoomOut: document.getElementById('graphZoomOut'), graphZoomFit: document.getElementById('graphZoomFit'), graphZoomIn: document.getElementById('graphZoomIn'),
   obsidianStats: document.getElementById('obsidianStats'), noteList: document.getElementById('noteList'),
   noteTitle: document.getElementById('noteTitle'), noteContent: document.getElementById('noteContent'),
   history: document.getElementById('conversationHistory'),
@@ -26,13 +25,14 @@ const elements = {
   provisionSlug: document.getElementById('provisionSlug'), provisionParent: document.getElementById('provisionParent'),
   provisionDescription: document.getElementById('provisionDescription'), provisionGitHub: document.getElementById('provisionGitHub'),
   provisionVisibility: document.getElementById('provisionVisibility'), provisionMessage: document.getElementById('provisionMessage'),
-  projectMessage: document.getElementById('projectMessage'),
-  projectList: document.getElementById('projectList'),
   attentionList: document.getElementById('attentionList'),
-  portfolioList: document.getElementById('portfolioList'),
+  portfolioProjectName: document.getElementById('portfolioProjectName'), portfolioState: document.getElementById('portfolioState'),
+  portfolioNextAction: document.getElementById('portfolioNextAction'), portfolioCurrentTask: document.getElementById('portfolioCurrentTask'),
+  portfolioLastRun: document.getElementById('portfolioLastRun'), portfolioRepository: document.getElementById('portfolioRepository'), portfolioKnowledge: document.getElementById('portfolioKnowledge'),
   gitProjectName: document.getElementById('gitProjectName'), gitState: document.getElementById('gitState'), gitSummary: document.getElementById('gitSummary'),
   gitFileList: document.getElementById('gitFileList'), gitDiff: document.getElementById('gitDiffContent'), gitSelectAll: document.getElementById('gitSelectAll'),
-  gitCommitMessage: document.getElementById('gitCommitMessage'), gitCommit: document.getElementById('gitCommitButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
+  gitDiffFileName: document.getElementById('gitDiffFileName'), gitCommitMessage: document.getElementById('gitCommitMessage'),
+  gitCommit: document.getElementById('gitCommitButton'), gitCommitPush: document.getElementById('gitCommitPushButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
   busyOverlay: document.getElementById('busyOverlay'), busyTitle: document.getElementById('busyTitle'), busyMessage: document.getElementById('busyMessage'),
 };
 
@@ -44,10 +44,18 @@ let graphData = null;
 let graphPositions = new Map();
 let selectedGraphNodeId = null;
 let graphZoom = 1;
+let graphPanX = 0;
+let graphPanY = 0;
+let graphDrag = null;
+let graphDidDrag = false;
 let knowledgeSearchTimer = null;
 let gitData = null;
+let selectedGitFile = null;
 let selectedAttachments = [];
 let feedFilter = 'important';
+let liveJobs = new Map();
+let jobEventSource = null;
+let jobRenderPending = false;
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
@@ -101,7 +109,7 @@ function renderProviders(status) {
     : claude.retry_not_before_local ? `Nächste Prüfung ab ${claude.retry_not_before_local}` : claude.reason || 'Nicht verfügbar';
   elements.providerList.append(providerRow('2. Claude Code', claude, claudeDetail));
   const ollama = status.ollama;
-  elements.providerList.append(providerRow('3. Ollama', ollama, ollama.available ? `${ollama.model} · lokal` : ollama.reason || 'Nicht verfügbar'));
+  elements.providerList.append(providerRow('3. Hermes + Ollama', ollama, ollama.available ? `${ollama.model} · nur isolierte Read-only-Experimente` : ollama.reason || 'Nicht verfügbar'));
 }
 
 function componentRow(name, ok, detail, warning = false) {
@@ -134,6 +142,11 @@ function formatTime(value) {
 }
 
 function renderJobs(jobs) {
+  const outerScrollTop = elements.jobs.scrollTop;
+  const feedScroll = new Map(Array.from(elements.jobs.querySelectorAll('[data-job-id]')).map((node) => {
+    const feed = node.querySelector('.feed-log');
+    return [node.dataset.jobId, feed ? { top: feed.scrollTop, atBottom: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24 } : null];
+  }));
   elements.jobs.replaceChildren();
   if (!jobs.length) {
     const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Noch keine Jobs in dieser Dashboard-Sitzung.';
@@ -141,6 +154,7 @@ function renderJobs(jobs) {
   }
   for (const job of jobs) {
     const container = document.createElement('article'); container.className = 'job';
+    container.dataset.jobId = job.id;
     const head = document.createElement('div'); head.className = 'job-head';
     const title = document.createElement('div'); const heading = document.createElement('h3'); heading.textContent = `${job.projectName || 'Projekt'} · ${job.provider}`;
     const meta = document.createElement('div'); meta.className = 'job-meta'; meta.textContent = `${formatTime(job.startedAt)} · ${job.workingDirectory}`;
@@ -155,14 +169,24 @@ function renderJobs(jobs) {
       stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen'; container.append(stop);
     }
     const feed = document.createElement('div'); feed.className = 'feed-log';
-    const stdoutLines = String(job.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: line.includes('AI_EVENT') || /^\[\d{4}-/.test(line) ? 'event' : '' }));
+    const stdoutLines = String(job.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => ({
+      line,
+      kind: /AI_EVENT|AI_RUN_DIRECTORY|AI_PROJECT_ROUTER_OK/.test(line) || /^\[\d{4}-/.test(line) ? 'event' : '',
+    }));
     const stderrLines = String(job.stderr || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: 'error' }));
     const allLines = [...stdoutLines, ...stderrLines];
-    const lines = allLines.filter((entry) => {
+    let lines = allLines.filter((entry) => {
       if (feedFilter === 'all') return true;
       if (feedFilter === 'errors') return entry.kind === 'error' || /fail|error|blocked|quota/i.test(entry.line);
-      return entry.kind === 'error' || entry.kind === 'event' || /AI_PROJECT_ROUTER_OK|AI_RUN_DIRECTORY|provider=|fallback|complete|blocked/i.test(entry.line);
+      if (entry.kind === 'event') return true;
+      if (entry.kind === 'error') return /Provider\s+\w+.*(?:failed|exited|changed)|local Hermes|No provider|write tasks are disabled/i.test(entry.line);
+      const stream = entry.line.match(/AI_STREAM provider=[^\s]+\s*(.*)/);
+      if (!stream) return false;
+      return /\bpreparing\b|\bread\s+[^\s]|\bsearch(?:ed|ing)?\b|\$\s+|API call failed|Non-retryable|completion sentinel|read-only/i.test(stream[1]);
     }).slice(feedFilter === 'all' ? -80 : -30);
+    if (feedFilter === 'important' && job.status === 'failed' && !lines.some((entry) => entry.kind === 'error')) {
+      lines.push({ line: 'Lauf fehlgeschlagen. Technische Details stehen unter Fehler oder Alles.', kind: 'error' });
+    }
     if (!lines.length) {
       const waiting = document.createElement('div'); waiting.className = 'feed-line';
       waiting.textContent = allLines.length ? 'Keine Ereignisse für diesen Filter.' : 'Warte auf Agentenausgabe…'; feed.append(waiting);
@@ -172,10 +196,46 @@ function renderJobs(jobs) {
       }
     }
     container.append(feed); elements.jobs.append(container);
+    const previous = feedScroll.get(job.id);
+    if (previous?.atBottom || (!previous && job.status === 'running')) feed.scrollTop = feed.scrollHeight;
+    else if (previous) feed.scrollTop = previous.top;
   }
+  elements.jobs.scrollTop = outerScrollTop;
+}
+
+function visibleLiveJobs() {
+  if (!activeProject) return [];
+  return Array.from(liveJobs.values())
+    .filter((job) => job.projectId === activeProject.id || job.kind === 'provision' || job.kind === 'dashboard-command')
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function scheduleLiveJobRender() {
+  if (jobRenderPending) return;
+  jobRenderPending = true;
+  requestAnimationFrame(() => { jobRenderPending = false; renderJobs(visibleLiveJobs()); });
+}
+
+function connectJobEvents() {
+  if (jobEventSource) jobEventSource.close();
+  jobEventSource = new EventSource('/api/events');
+  jobEventSource.addEventListener('job', (event) => {
+    try {
+      const job = JSON.parse(event.data);
+      liveJobs.set(job.id, job);
+      scheduleLiveJobRender();
+    } catch {}
+  });
 }
 
 function summarizeFeedLine(line) {
+  const incomplete = line.match(/Provider\s+(\w+)\s+exited without the required completion sentinel/i);
+  if (incomplete) return `${incomplete[1]} · Aufgabe unvollständig: erforderliche Abschlussmarke fehlt.`;
+  const readOnlyViolation = line.match(/Provider\s+(\w+)\s+changed the worktree during a read-only task/i);
+  if (readOnlyViolation) return `${readOnlyViolation[1]} · Read-only-Schutz ausgelöst: isolierte Änderungen wurden verworfen.`;
+  if (/local Hermes.*write tasks are disabled/i.test(line)) return 'Hermes lokal · Schreibaufträge sind aus Sicherheitsgründen gesperrt.';
+  const runDirectory = line.match(/AI_RUN_DIRECTORY\s+(.+)/);
+  if (runDirectory) return `Run-Artefakte · ${runDirectory[1]}`;
   if (line.includes('AI_EVENT')) return line.replace(/^.*?AI_EVENT\s*/, '');
   const stream = line.match(/AI_STREAM provider=([^\s]+)\s+(.+)/);
   if (stream) {
@@ -209,63 +269,31 @@ function renderProjectSelector() {
   elements.knowledgeProjectName.textContent = activeProject.name;
 }
 
-function renderProjectList() {
-  elements.projectList.replaceChildren();
-  for (const project of registry.projects) {
-    const row = document.createElement('div'); row.className = 'project-row';
-    const info = document.createElement('div'); const title = document.createElement('h3'); title.textContent = project.name;
-    const repository = document.createElement('div'); repository.className = 'project-path'; repository.textContent = project.repository;
-    const graph = document.createElement('div'); graph.className = 'project-path'; graph.textContent = `Graphify: ${project.graphPath}`;
-    const obsidian = document.createElement('div'); obsidian.className = 'project-path'; obsidian.textContent = `Obsidian: ${project.obsidianPath}`;
-    info.append(title, repository, graph, obsidian);
-    const actions = document.createElement('div'); actions.className = 'project-actions';
-    if (project.id !== activeProject.id) {
-      const select = document.createElement('button'); select.type = 'button'; select.className = 'button secondary';
-      select.dataset.selectProject = project.id; select.textContent = 'Auswählen'; actions.append(select);
-    }
-    if (registry.projects.length > 1) {
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger';
-      remove.dataset.removeProject = project.id; remove.textContent = 'Entfernen'; actions.append(remove);
-    }
-    row.append(info, actions); elements.projectList.append(row);
-  }
-}
-
 function renderPortfolio(data) {
+  const project = data.project;
+  elements.portfolioProjectName.textContent = project.name;
+  elements.portfolioState.className = `project-state ${project.stateClass}`; elements.portfolioState.textContent = project.state;
+  elements.portfolioNextAction.textContent = project.nextAction;
+  elements.portfolioCurrentTask.textContent = project.currentTask || 'Kein CURRENT_TASK.md-Inhalt hinterlegt';
+  elements.portfolioLastRun.textContent = project.running
+    ? `${project.running.provider} läuft · ${project.running.phase || 'gestartet'}`
+    : project.lastTask || 'Noch kein Lauf gespeichert';
+  elements.portfolioRepository.textContent = `${project.repository.branch || 'kein Branch'} · ${project.repository.clean ? 'clean' : 'lokale Änderungen'}`;
+  elements.portfolioKnowledge.textContent = `Graph ${project.graph.status} · ${project.obsidian.notes} Obsidian-Notizen`;
   elements.attentionList.replaceChildren();
   if (!data.attention.length) {
     const empty = document.createElement('div'); empty.className = 'empty';
-    empty.textContent = 'Keine Blockade oder Entscheidung wartet auf dich.'; elements.attentionList.append(empty);
+    empty.textContent = 'Keine Blockade oder ungeklärte Änderung.'; elements.attentionList.append(empty);
   } else {
     for (const entry of data.attention) {
       const row = document.createElement('div'); row.className = `attention-item ${entry.severity === 'error' ? 'error' : ''}`;
       const marker = document.createElement('span'); marker.className = 'attention-marker'; marker.setAttribute('aria-hidden', 'true');
       const text = document.createElement('div'); text.className = 'attention-text';
       const message = document.createElement('div'); message.textContent = entry.message;
-      const project = document.createElement('div'); project.className = 'attention-project'; project.textContent = entry.projectName;
-      text.append(message, project);
+      text.append(message);
       const open = document.createElement('button'); open.type = 'button'; open.className = 'button secondary table-button';
-      open.dataset.portfolioProject = entry.projectId; open.textContent = 'Öffnen'; row.append(marker, text, open); elements.attentionList.append(row);
+      open.dataset.portfolioTarget = entry.target || 'tasks'; open.textContent = 'Öffnen'; row.append(marker, text, open); elements.attentionList.append(row);
     }
-  }
-
-  elements.portfolioList.replaceChildren();
-  for (const project of data.projects) {
-    const row = document.createElement('article'); row.className = 'portfolio-row';
-    const identity = document.createElement('div'); identity.className = 'portfolio-project';
-    const name = document.createElement('h3'); name.textContent = project.name;
-    const state = document.createElement('span'); state.className = `project-state ${project.stateClass}`; state.textContent = project.state;
-    identity.append(name, state);
-    const task = document.createElement('div'); task.className = 'portfolio-detail portfolio-task';
-    task.textContent = project.lastTask || 'Noch kein Task';
-    const health = document.createElement('div'); health.className = 'portfolio-detail portfolio-health';
-    health.textContent = `${project.repository.branch || 'kein Git'} · ${project.repository.clean ? 'clean' : 'Änderungen'} · Graph ${project.graph.status}`;
-    const next = document.createElement('div'); next.className = 'portfolio-detail portfolio-next'; next.textContent = project.nextAction;
-    const open = document.createElement('button'); open.type = 'button'; open.className = 'button secondary';
-    open.dataset.portfolioProject = project.id;
-    open.dataset.portfolioTarget = !project.repository.clean || project.stateClass === 'ready' ? 'git' : 'tasks';
-    open.textContent = open.dataset.portfolioTarget === 'git' ? 'Prüfen' : project.id === activeProject.id ? 'Arbeitsbereich' : 'Auswählen';
-    row.append(identity, task, health, next, open); elements.portfolioList.append(row);
   }
 }
 
@@ -302,6 +330,16 @@ function renderSystemRows(container, systems, grouped = false) {
       const usage = document.createElement('div'); usage.className = 'system-usage muted'; usage.textContent = 'Derzeit keinem Projekt zugeordnet'; item.append(usage);
     }
     if (system.reason) { const reason = document.createElement('div'); reason.className = 'system-reason'; reason.textContent = system.reason; item.append(reason); }
+    if (system.workflowRole || system.activation || system.costPolicy) {
+      const integration = document.createElement('dl'); integration.className = 'system-integration';
+      for (const [label, value] of [['Rolle', system.workflowRole], ['Aktivierung', system.activation], ['Kosten', system.costPolicy]]) {
+        if (!value) continue;
+        const term = document.createElement('dt'); term.textContent = label;
+        const description = document.createElement('dd'); description.textContent = value;
+        integration.append(term, description);
+      }
+      item.append(integration);
+    }
     if ((!system.ok && system.installKey) || !system.autoDetected) {
       const actions = document.createElement('div'); actions.className = 'system-actions';
       if (!system.ok && system.installKey) {
@@ -335,6 +373,7 @@ async function loadSystems(force = false) {
 
 function renderGitState(data) {
   gitData = data;
+  if (!data.files.some((file) => file.path === selectedGitFile)) selectedGitFile = null;
   elements.gitProjectName.textContent = `${data.projectName} · ${data.repository}`;
   elements.gitState.className = `status ${data.clean ? 'ok' : 'warn'}`;
   elements.gitState.textContent = data.clean ? 'clean' : `${data.files.length} Änderung(en)`;
@@ -351,17 +390,25 @@ function renderGitState(data) {
     const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Keine lokalen Änderungen.'; elements.gitFileList.append(empty);
   } else {
     for (const file of data.files) {
-      const label = document.createElement('label'); label.className = 'git-file-row';
+      const row = document.createElement('div'); row.className = `git-file-row${file.path === selectedGitFile ? ' active' : ''}`;
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = file.path; checkbox.checked = true;
+      checkbox.setAttribute('aria-label', `Für Commit auswählen: ${file.path}`);
+      const view = document.createElement('button'); view.type = 'button'; view.className = 'git-file-view'; view.dataset.gitFile = file.path;
+      view.setAttribute('aria-label', `Änderungen anzeigen: ${file.path}`);
       const status = document.createElement('span'); status.className = 'git-file-status'; status.textContent = file.untracked ? '??' : `${file.staged}${file.working}`;
       const name = document.createElement('span'); name.className = 'git-file-path'; name.textContent = file.originalPath ? `${file.originalPath} → ${file.path}` : file.path;
-      label.append(checkbox, status, name); elements.gitFileList.append(label);
+      view.append(status, name); row.append(checkbox, view); elements.gitFileList.append(row);
     }
   }
-  elements.gitDiff.textContent = data.diff || (data.files.some((file) => file.untracked) ? 'Unverfolgte Dateien werden nach dem Hinzufügen im Diff sichtbar.' : 'Keine Textänderungen vorhanden.');
+  if (!selectedGitFile) {
+    elements.gitDiffFileName.textContent = 'Keine Datei ausgewählt';
+    elements.gitDiff.textContent = data.clean ? 'Keine lokalen Änderungen.' : 'Klicke auf eine Dateizeile, um ausschließlich deren Änderungen zu sehen.';
+  }
   elements.gitCommit.disabled = data.clean;
+  elements.gitCommitPush.disabled = data.clean || !data.remote;
   elements.gitPush.disabled = !data.remote || (data.hasUpstream && data.ahead === 0);
-  elements.gitMessage.textContent = data.diffTruncated ? 'Der Diff wurde aus Sicherheitsgründen gekürzt.' : '';
+  elements.gitPush.classList.toggle('hidden', elements.gitPush.disabled);
+  elements.gitMessage.textContent = '';
 }
 
 async function loadGitState() {
@@ -372,6 +419,17 @@ async function loadGitState() {
   catch (error) { elements.gitState.className = 'status fail'; elements.gitState.textContent = 'Fehler'; elements.gitMessage.textContent = error.message; }
 }
 
+async function loadGitFileDiff(filePath) {
+  selectedGitFile = filePath;
+  elements.gitFileList.querySelectorAll('.git-file-row').forEach((row) => row.classList.toggle('active', row.querySelector('[data-git-file]')?.dataset.gitFile === filePath));
+  elements.gitDiffFileName.textContent = filePath; elements.gitDiff.textContent = 'Dateiänderungen werden geladen…';
+  try {
+    const result = await api(`/api/git/diff?${projectQuery()}&path=${encodeURIComponent(filePath)}`);
+    elements.gitDiff.textContent = result.diff;
+    elements.gitMessage.textContent = result.truncated ? 'Die Dateiansicht wurde bei 400.000 Zeichen gekürzt.' : result.binary ? 'Binärdateien besitzen keinen Text-Diff.' : '';
+  } catch (error) { elements.gitDiff.textContent = error.message; }
+}
+
 async function activateProject(projectId) {
   const target = registry.projects.find((project) => project.id === projectId);
   setBusy(true, 'Projekt wird gewechselt', `${target?.name || 'Projekt'} und seine lokalen Verbindungen werden geprüft.`);
@@ -379,8 +437,8 @@ async function activateProject(projectId) {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
-    graphData = null; selectedGraphNodeId = null; graphZoom = 1; gitData = null;
-    renderProjectSelector(); renderProjectList(); resetKnowledge();
+    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null;
+    renderProjectSelector(); resetKnowledge();
     await refreshAll(true);
   } finally { setBusy(false); }
 }
@@ -411,8 +469,8 @@ function layoutGraph(width, height) {
   const centerX = width / 2; const centerY = height / 2; const orbit = Math.max(40, Math.min(width, height) * 0.32) * graphZoom;
   groupEntries.forEach(([name, nodes], groupIndex) => {
     const groupAngle = (Math.PI * 2 * groupIndex) / Math.max(1, groupEntries.length) - Math.PI / 2;
-    const groupX = groupEntries.length === 1 ? centerX : centerX + Math.cos(groupAngle) * orbit;
-    const groupY = groupEntries.length === 1 ? centerY : centerY + Math.sin(groupAngle) * orbit;
+    const groupX = groupEntries.length === 1 ? centerX + graphPanX : centerX + graphPanX + Math.cos(groupAngle) * orbit;
+    const groupY = groupEntries.length === 1 ? centerY + graphPanY : centerY + graphPanY + Math.sin(groupAngle) * orbit;
     const radius = Math.max(18, Math.min(90, 10 + Math.sqrt(nodes.length) * 10)) * graphZoom;
     nodes.sort((a, b) => b.degree - a.degree).forEach((node, index) => {
       const angle = index * 2.3999632297;
@@ -424,6 +482,7 @@ function layoutGraph(width, height) {
 
 function drawGraph() {
   const canvas = elements.graphCanvas; const rect = canvas.getBoundingClientRect(); const ratio = window.devicePixelRatio || 1;
+  canvas.dataset.zoom = graphZoom.toFixed(3); canvas.dataset.panX = graphPanX.toFixed(1); canvas.dataset.panY = graphPanY.toFixed(1);
   const width = Math.max(320, rect.width); const height = Math.max(280, rect.height);
   canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
   const context = canvas.getContext('2d'); context.scale(ratio, ratio); context.clearRect(0, 0, width, height);
@@ -485,7 +544,7 @@ async function loadGraph() {
   try {
     const query = elements.knowledgeSearch.value.trim();
     graphData = await api(`/api/graph?${projectQuery()}&q=${encodeURIComponent(query)}`);
-    selectedGraphNodeId = null;
+    selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0;
     elements.graphStats.textContent = `${graphData.totals.nodes} Knoten · ${graphData.totals.links} Beziehungen${graphData.truncated ? ' · fokussierte Ansicht' : ''}${graphData.builtAtCommit ? ` · Commit ${graphData.builtAtCommit.slice(0, 8)}` : ''}`;
     renderGraphDetails(null); drawGraph();
   } catch (error) {
@@ -609,7 +668,8 @@ async function refreshStatus(force = false) {
 async function refreshJobs() {
   if (!activeProject) return;
   const rows = await api(`/api/jobs?${projectQuery()}`);
-  renderJobs(rows);
+  for (const row of rows) liveJobs.set(row.id, row);
+  renderJobs(visibleLiveJobs());
   const latestTask = rows.find((job) => job.kind === 'task');
   if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzter Job fehlgeschlagen. Details stehen im Live-Feed und Verlauf.';
   else if (latestTask?.status === 'completed') elements.formMessage.textContent = 'Letzter Job abgeschlossen.';
@@ -617,7 +677,7 @@ async function refreshJobs() {
   if (rows.some((job) => job.status === 'completed' && job.projectId && !registry.projects.some((project) => project.id === job.projectId))) {
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || activeProject;
-    renderProjectSelector(); renderProjectList();
+    renderProjectSelector();
   }
 }
 async function refreshHistory() { if (activeProject) renderHistory(await api(`/api/runs?${projectQuery()}`)); }
@@ -638,7 +698,7 @@ async function initialize() {
     [config, registry] = await Promise.all([api('/api/config'), api('/api/projects')]);
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
     elements.provisionParent.value = config.defaultProjectParent;
-    renderProjectSelector(); renderProjectList(); await refreshAll(true);
+    renderProjectSelector(); connectJobEvents(); await refreshAll(true);
   } catch (error) { elements.connection.className = 'connection error'; elements.connection.textContent = error.message; }
 }
 
@@ -720,12 +780,38 @@ elements.provisionForm.addEventListener('submit', async (event) => {
 elements.knowledgeSearch.addEventListener('input', () => {
   clearTimeout(knowledgeSearchTimer); knowledgeSearchTimer = setTimeout(loadActiveKnowledge, 350);
 });
-elements.graphZoomOut.addEventListener('click', () => { graphZoom = Math.max(0.55, graphZoom - 0.15); drawGraph(); });
-elements.graphZoomFit.addEventListener('click', () => { graphZoom = 1; drawGraph(); });
-elements.graphZoomIn.addEventListener('click', () => { graphZoom = Math.min(2.5, graphZoom + 0.15); drawGraph(); });
+elements.graphCanvas.addEventListener('wheel', (event) => {
+  if (!graphData) return;
+  event.preventDefault();
+  const rect = elements.graphCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left; const y = event.clientY - rect.top;
+  const oldZoom = graphZoom; const nextZoom = Math.max(0.45, Math.min(3.5, oldZoom * Math.exp(-event.deltaY * 0.0012)));
+  const centerX = rect.width / 2; const centerY = rect.height / 2; const scale = nextZoom / oldZoom;
+  graphPanX = x - centerX - scale * (x - centerX - graphPanX);
+  graphPanY = y - centerY - scale * (y - centerY - graphPanY);
+  graphZoom = nextZoom; drawGraph();
+}, { passive: false });
+
+elements.graphCanvas.addEventListener('pointerdown', (event) => {
+  if (!graphData || event.button !== 0) return;
+  graphDrag = { x: event.clientX, y: event.clientY, panX: graphPanX, panY: graphPanY };
+  graphDidDrag = false; elements.graphCanvas.classList.add('dragging'); elements.graphCanvas.setPointerCapture(event.pointerId);
+});
+elements.graphCanvas.addEventListener('pointermove', (event) => {
+  if (!graphDrag) return;
+  const dx = event.clientX - graphDrag.x; const dy = event.clientY - graphDrag.y;
+  if (Math.hypot(dx, dy) > 3) graphDidDrag = true;
+  graphPanX = graphDrag.panX + dx; graphPanY = graphDrag.panY + dy; drawGraph();
+});
+elements.graphCanvas.addEventListener('pointerup', (event) => {
+  if (!graphDrag) return;
+  graphDrag = null; elements.graphCanvas.classList.remove('dragging'); elements.graphCanvas.releasePointerCapture(event.pointerId);
+});
+elements.graphCanvas.addEventListener('pointercancel', () => { graphDrag = null; elements.graphCanvas.classList.remove('dragging'); });
 
 elements.graphCanvas.addEventListener('click', (event) => {
   if (!graphData) return;
+  if (graphDidDrag) { graphDidDrag = false; return; }
   const rect = elements.graphCanvas.getBoundingClientRect(); const x = event.clientX - rect.left; const y = event.clientY - rect.top;
   let closest = null; let closestDistance = 14;
   for (const [id, position] of graphPositions) {
@@ -753,28 +839,39 @@ elements.form.addEventListener('submit', async (event) => {
 });
 
 document.getElementById('portfolioView').addEventListener('click', async (event) => {
-  const button = event.target.closest('button[data-portfolio-project]'); if (!button) return;
-  if (button.dataset.portfolioProject !== activeProject.id) await activateProject(button.dataset.portfolioProject);
-  showView(button.dataset.portfolioTarget || 'tasks');
+  const button = event.target.closest('button[data-portfolio-target]'); if (button) showView(button.dataset.portfolioTarget);
 });
 
 elements.gitSelectAll.addEventListener('click', () => {
   const boxes = [...elements.gitFileList.querySelectorAll('input[type="checkbox"]')];
   const shouldSelect = boxes.some((box) => !box.checked); boxes.forEach((box) => { box.checked = shouldSelect; });
 });
-elements.gitCommit.addEventListener('click', async () => {
+elements.gitFileList.addEventListener('click', (event) => {
+  const view = event.target.closest('[data-git-file]'); if (view) loadGitFileDiff(view.dataset.gitFile);
+});
+
+async function commitSelectedGitFiles(pushAfterCommit) {
   const paths = [...elements.gitFileList.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
   if (!paths.length) { elements.gitMessage.textContent = 'Wähle mindestens eine Datei aus.'; return; }
   const message = elements.gitCommitMessage.value.trim();
   if (!message) { elements.gitMessage.textContent = 'Eine Commit-Nachricht ist erforderlich.'; elements.gitCommitMessage.focus(); return; }
-  if (!window.confirm(`${paths.length} Datei(en) im Branch ${gitData?.branch || '—'} committen?`)) return;
-  elements.gitCommit.disabled = true; elements.gitMessage.textContent = 'Commit wird erstellt…';
+  const action = pushAfterCommit ? 'committen und anschließend pushen' : 'lokal committen';
+  if (!window.confirm(`${paths.length} Datei(en) im Branch ${gitData?.branch || '—'} ${action}?`)) return;
+  elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitMessage.textContent = 'Commit wird erstellt…';
+  let committed = false;
   try {
     const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, paths, message }) });
-    elements.gitCommitMessage.value = ''; renderGitState(result.state); elements.gitMessage.textContent = 'Commit wurde lokal erstellt. Noch nichts wurde gepusht.';
-  } catch (error) { elements.gitMessage.textContent = error.message; }
-  finally { elements.gitCommit.disabled = false; }
-});
+    committed = true; elements.gitCommitMessage.value = '';
+    if (pushAfterCommit) {
+      elements.gitMessage.textContent = 'Commit erstellt, Branch wird gepusht…';
+      const pushed = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id }) });
+      renderGitState(pushed.state); elements.gitMessage.textContent = 'Auswahl wurde committed und der Branch hochgeladen.';
+    } else { renderGitState(result.state); elements.gitMessage.textContent = 'Commit wurde lokal erstellt. Noch nichts wurde gepusht.'; }
+  } catch (error) { elements.gitMessage.textContent = committed ? `Commit wurde erstellt, Push ist fehlgeschlagen: ${error.message}` : error.message; }
+  finally { elements.gitCommit.disabled = Boolean(gitData?.clean); elements.gitCommitPush.disabled = Boolean(gitData?.clean || !gitData?.remote); }
+}
+elements.gitCommit.addEventListener('click', () => commitSelectedGitFiles(false));
+elements.gitCommitPush.addEventListener('click', () => commitSelectedGitFiles(true));
 elements.gitPush.addEventListener('click', async () => {
   if (!gitData?.remote) { elements.gitMessage.textContent = 'Kein origin-Remote konfiguriert.'; return; }
   if (!window.confirm(`Branch ${gitData.branch} ohne Force-Push zu ${gitData.remote} hochladen?`)) return;
@@ -790,18 +887,6 @@ elements.jobs.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-stop-job]'); if (!button) return; button.disabled = true;
   try { await api(`/api/jobs/${button.dataset.stopJob}/stop`, { method: 'POST', body: '{}' }); await refreshJobs(); }
   catch (error) { elements.formMessage.textContent = error.message; }
-});
-
-elements.projectList.addEventListener('click', async (event) => {
-  const select = event.target.closest('button[data-select-project]'); if (select) { await activateProject(select.dataset.selectProject); return; }
-  const remove = event.target.closest('button[data-remove-project]'); if (!remove) return;
-  const project = registry.projects.find((candidate) => candidate.id === remove.dataset.removeProject);
-  if (!window.confirm(`${project.name} nur aus dem Dashboard entfernen? Dateien werden nicht gelöscht.`)) return;
-  try {
-    await api(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'DELETE' });
-    registry = await api('/api/projects'); activeProject = registry.projects.find((candidate) => candidate.id === registry.activeProjectId);
-    renderProjectSelector(); renderProjectList(); resetKnowledge(); await refreshAll(true);
-  } catch (error) { elements.projectMessage.textContent = error.message; }
 });
 
 document.getElementById('systemsView').addEventListener('click', async (event) => {

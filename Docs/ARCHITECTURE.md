@@ -12,10 +12,12 @@ Browser UI
         -> Codex subscription
         -> Claude Code subscription
         -> Hermes + Ollama fallback
+        -> cli-continues minimal session extract on verified quota handoff
      -> Graphify index reader
+     -> Serena MCP for on-demand symbol-level code navigation
      -> Obsidian project-area reader
      -> Git review API
-        -> read-only status and diff
+        -> compact status plus on-demand per-file diff
         -> explicitly confirmed commit
         -> explicitly confirmed non-force push
      -> versioned system catalog
@@ -39,12 +41,22 @@ Image attachments are accepted only as PNG, JPEG, WebP or GIF, limited to four f
 
 Each registered project has a repository path, a Graphify graph path and an Obsidian project path. Repository files remain authoritative. Graphify selects likely files; the agent must read those files directly. Obsidian stores working notes, prompts, run links and owner-approved lessons.
 
+Serena is global but project-activated. Its caches and project metadata live under `%LOCALAPPDATA%\AI Project Control\serena-projects`, not inside repositories. It is used after Graphify has narrowed a code task, when symbol lookup or reference navigation avoids broad file reads.
+
+The local Hermes adapter receives the complete bounded execution prompt directly. It does not depend on the local model deciding to open an external prompt file. A 24,000-character guard keeps the invocation below the Windows command-line budget; larger local tasks must be narrowed or use Codex/Claude.
+
 Write tasks receive a unique `ai/*` branch in an automatic worktree. The canonical checkout is never used as the write directory.
 
 ## Dynamic inventory
 
 The server reads system definitions from `config/systems.json` and probes the current computer at runtime. Project capabilities are inferred from repository signals such as `project.godot`, package manifests, asset directories, workflow files and media files. Project-dependent tools are then labelled with the projects that use them. Adding a catalog entry or capability does not require editing `server.js`.
 
+Catalog entries may also declare workflow role, activation and cost policy. These fields make the difference between software that is merely detected and an integration that has a bounded place in the workflow.
+
 ## Git boundary
 
-The Git view is a review and publication surface, not an editor. Status and diff are read-only. A commit requires an explicit file selection, message and confirmation. Existing staged files outside the selection block the operation. Push is a separate confirmation and never uses force.
+The Git view is a review and publication surface, not an editor. Status is compact and a read-only diff is loaded only for the file the owner opens. Checkboxes are reserved for commit selection. A selected commit can remain local or be followed by an explicitly confirmed push. Existing staged files outside the selection block the operation. Push never uses force.
+
+## Active project overview
+
+The Portfolio view derives one overview for the project selected in the global dropdown. It combines the current repository task, latest run, Git state, Graphify freshness, Obsidian note count, blockers and one recommended next action. It does not duplicate project switching or maintain a second project list.

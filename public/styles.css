@@ -322,25 +322,24 @@ td { overflow-wrap: anywhere; }
 .source-badge.authority { border-color: #4a7160; color: #88d0a5; }
 .source-badge.discovery { border-color: #466476; color: #8cc4e4; }
 .source-badge.working { border-color: #75663d; color: #dfc778; }
-.knowledge-unified-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(350px, 0.75fr); gap: 18px; }
+.knowledge-unified-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
 .knowledge-source { min-width: 0; padding-top: 12px; border-top: 1px solid var(--border); }
 .source-heading { min-height: 34px; margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .source-heading > div:first-child { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .source-heading h3 { margin: 0; font-size: 14px; }
-.graph-controls { display: flex; gap: 4px; }
-.icon-button { width: 32px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 3px; background: #171a1b; color: var(--text); font-size: 18px; cursor: pointer; }
-.icon-button:hover { border-color: #626b67; background: var(--surface-2); }
-.fit-button { width: 40px; font-size: 11px; font-weight: 700; }
 .knowledge-stats { min-height: 24px; color: var(--muted); font-size: 12px; }
 .graph-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 230px); gap: 12px; }
 .graph-canvas {
   width: 100%;
-  height: 560px;
+  height: 620px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: #111415;
-  cursor: crosshair;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
+.graph-canvas.dragging { cursor: grabbing; }
 .knowledge-details, .note-reader {
   min-width: 0;
   border-left: 1px solid var(--border);
@@ -352,8 +351,8 @@ td { overflow-wrap: anywhere; }
 .knowledge-details dd { margin: 2px 0 0; }
 .neighbor-list { margin: 5px 0 0; padding-left: 18px; color: var(--muted); }
 
-.notes-layout { display: grid; grid-template-rows: minmax(150px, 220px) minmax(260px, 1fr); gap: 12px; min-height: 560px; }
-.note-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; }
+.notes-layout { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.note-list { border: 1px solid var(--border); border-radius: 5px; }
 .note-button {
   width: 100%;
   min-height: 36px;
@@ -367,21 +366,24 @@ td { overflow-wrap: anywhere; }
   overflow-wrap: anywhere;
 }
 .note-button:hover, .note-button.active { background: var(--surface-2); }
-.note-reader { border-left: 0; border-top: 1px solid var(--border); padding: 12px 0 0; }
-.note-reader pre { max-height: 330px; margin-top: 10px; }
+.note-reader { border-left: 1px solid var(--border); border-top: 0; padding: 0 0 0 16px; }
+.note-reader pre { max-height: none; overflow: visible; margin-top: 10px; }
 
 .git-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 16px; }
 .git-summary span { padding: 4px 7px; border: 1px solid #303536; border-radius: 3px; background: #181b1c; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .git-review-layout { display: grid; grid-template-columns: minmax(280px, 0.38fr) minmax(0, 1fr); gap: 18px; }
 .git-files, .git-diff { min-width: 0; padding-top: 10px; border-top: 1px solid var(--border); }
 .git-file-list { max-height: 560px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; }
-.git-file-row { min-height: 38px; padding: 8px 9px; border-bottom: 1px solid #303536; display: grid; grid-template-columns: auto 28px minmax(0, 1fr); align-items: center; gap: 7px; cursor: pointer; }
+.git-file-row { min-height: 38px; padding: 0 9px; border-bottom: 1px solid #303536; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; }
 .git-file-row:last-child { border-bottom: 0; }
-.git-file-row:hover { background: var(--surface-2); }
+.git-file-row:hover, .git-file-row.active { background: var(--surface-2); }
+.git-file-row.active { box-shadow: inset 3px 0 0 var(--green); }
+.git-file-view { min-width: 0; min-height: 38px; padding: 7px 0; border: 0; background: transparent; color: var(--text); display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 7px; text-align: left; cursor: pointer; }
 .git-file-status { color: var(--amber); font-family: Consolas, monospace; font-size: 11px; }
 .git-file-path { overflow-wrap: anywhere; }
+.git-diff-file { max-width: 55%; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-diff pre { min-height: 420px; max-height: 560px; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: #111415; overflow: auto; white-space: pre; color: #cdd3d0; font: 12px/1.55 Consolas, monospace; }
-.git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(260px, 1fr) auto auto; align-items: end; gap: 9px; }
+.git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(260px, 1fr) auto auto auto; align-items: end; gap: 9px; }
 .git-commit-control label { margin-top: 0; }
 .git-actions .form-message { grid-column: 1 / -1; }
 
@@ -417,19 +419,19 @@ td { overflow-wrap: anywhere; }
 .attachment-chip span { display: block; padding: 5px 7px; color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .attachment-remove { position: absolute; top: 4px; right: 4px; width: 24px; height: 24px; border: 1px solid #59605e; border-radius: 3px; background: rgba(17, 20, 21, 0.92); color: var(--text); cursor: pointer; }
 
-.attention-list { display: grid; gap: 0; }
+.attention-list { display: grid; gap: 0; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 .attention-item { padding: 10px 0; border-top: 1px solid #303536; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .attention-item:first-child { border-top: 0; padding-top: 0; }
 .attention-marker { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
 .attention-item.error .attention-marker { background: var(--red); }
 .attention-text { min-width: 0; overflow-wrap: anywhere; }
-.attention-project { color: var(--muted); font-size: 11px; }
-.portfolio-list { display: grid; }
-.portfolio-row { padding: 13px 0; border-top: 1px solid #303536; display: grid; grid-template-columns: minmax(170px, 0.8fr) minmax(210px, 1.3fr) minmax(150px, 0.7fr) minmax(220px, 1fr) auto; align-items: center; gap: 16px; }
-.portfolio-row:first-child { border-top: 0; padding-top: 0; }
-.portfolio-project h3 { margin: 0; }
-.portfolio-detail { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.portfolio-next { color: var(--text); }
+.portfolio-next-action { padding: 14px 0 18px; border-bottom: 1px solid var(--border); display: grid; gap: 4px; }
+.portfolio-next-action span, .portfolio-overview-grid article span { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.portfolio-next-action strong { font-size: 18px; font-weight: 650; }
+.portfolio-overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
+.portfolio-overview-grid article { min-width: 0; min-height: 88px; padding: 14px 0; border-bottom: 1px solid #303536; display: grid; align-content: start; gap: 6px; }
+.portfolio-overview-grid article strong { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.portfolio-actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
 .project-state { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--blue); }
 .project-state.blocked { color: var(--red); }
 .project-state.attention { color: var(--amber); }
@@ -453,6 +455,9 @@ td { overflow-wrap: anywhere; }
 .system-group-title { grid-column: 1 / -1; margin: 12px 0 0; padding-bottom: 6px; border-bottom: 1px solid #303536; color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .system-group-title:first-child { margin-top: 0; }
 .system-reason { margin-top: 6px; color: #c8cfcb; font-size: 12px; }
+.system-integration { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 10px; margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.system-integration dt { color: #c8cfcb; font-weight: 700; }
+.system-integration dd { margin: 0; overflow-wrap: anywhere; }
 .system-usage { margin-top: 7px; padding-top: 6px; border-top: 1px solid #2d3232; color: #88d0a5; font-size: 11px; }
 .system-usage.muted { color: var(--muted); }
 .setup-summary { min-height: 38px; margin-bottom: 14px; padding: 9px 11px; border: 1px solid #303536; border-radius: 5px; background: #181b1c; color: var(--muted); }
@@ -499,20 +504,13 @@ td { overflow-wrap: anywhere; }
   .provider-row, .component-row { border-top: 0; border-left: 1px solid #303536; padding: 0 0 0 9px; }
   .provider-row:first-child, .component-row:first-child { border-left: 0; padding-left: 0; }
   .chat-panel, .live-feed-panel { height: calc(100dvh - 260px); min-height: 520px; }
-  .portfolio-row { grid-template-columns: minmax(170px, 0.8fr) minmax(190px, 1fr) minmax(160px, 0.7fr) minmax(220px, 1fr) auto; }
 }
 
 @media (max-width: 1150px) {
   .activity-grid { grid-template-columns: 1fr; }
   .chat-panel { height: calc(100dvh - 310px); min-height: 600px; }
   .live-feed-panel { height: auto; min-height: 260px; max-height: 430px; }
-  .portfolio-row { grid-template-columns: minmax(170px, 0.8fr) minmax(200px, 1.2fr) minmax(220px, 1fr) auto; }
-  .portfolio-row .portfolio-health { display: none; }
   .knowledge-unified-grid { grid-template-columns: 1fr; }
-  .notes-layout { grid-template-columns: minmax(220px, 0.42fr) minmax(0, 1fr); grid-template-rows: minmax(380px, 1fr); min-height: 420px; }
-  .note-list { max-height: 460px; }
-  .note-reader { border-top: 0; border-left: 1px solid var(--border); padding: 0 0 0 12px; }
-  .note-reader pre { max-height: 410px; }
 }
 
 @media (max-width: 850px) {
@@ -539,8 +537,6 @@ td { overflow-wrap: anywhere; }
   .token-toggle { grid-column: 1 / -1; }
   .system-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .knowledge-details { border-left: 0; border-top: 1px solid var(--border); padding: 12px 0 0; }
-  .portfolio-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
-  .portfolio-row .portfolio-task, .portfolio-row .portfolio-health, .portfolio-row .portfolio-next { grid-column: 1 / -1; }
 }
 
 @media (max-width: 620px) {
@@ -569,8 +565,9 @@ td { overflow-wrap: anywhere; }
   .graph-canvas { height: 360px; }
   .graph-layout { grid-template-columns: 1fr; }
   .notes-layout { grid-template-columns: 1fr; grid-template-rows: auto auto; min-height: 0; }
-  .note-list { max-height: 240px; }
   .note-reader { border-left: 0; border-top: 1px solid var(--border); padding: 12px 0 0; }
+  .note-reader pre { max-height: none; overflow: visible; }
+  .portfolio-overview-grid { grid-template-columns: 1fr; }
   .git-actions { grid-template-columns: 1fr; }
   .git-actions .button { width: 100%; }
   .message { max-width: 92%; }
