@@ -311,7 +311,7 @@ async function mcpSummary() {
   const claudeConfig = path.join(HOME, '.claude.json');
   if (fs.existsSync(codexConfig)) {
     const text = await fsp.readFile(codexConfig, 'utf8');
-    codexServers = (text.match(/^\[mcp_servers\.[^\]]+\]$/gm) || []).length;
+    codexServers = new Set([...text.matchAll(/^\[mcp_servers\.([^.\]]+)\]$/gm)].map((match) => match[1])).size;
   }
   if (fs.existsSync(claudeConfig)) {
     try {

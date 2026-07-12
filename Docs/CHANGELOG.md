@@ -8,5 +8,5 @@
 - Added automatic write-task worktrees and chat-based project registration.
 - Added an explicit subscription-token toggle and clearer cost/credit status.
 - Added MCP inventory plus documented ECC and Hermes responsibilities.
+- Corrected MCP inventory to count servers without counting their environment sections twice.
 - Added project-owned architecture, provider, integration and operation documentation.
-
