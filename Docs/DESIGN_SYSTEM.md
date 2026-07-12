@@ -14,6 +14,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 
 - Async operations lasting more than 300 ms show a blocking status dialog or an inline loading state.
 - The conversation uses one scroll region. User messages appear right, agent responses left, oldest first.
+- Running work appears as an in-conversation assistant response with a concise phase timeline; raw provider and tool output stays inside an optional technical disclosure.
 - Project switching keeps the previous screen visible beneath a clear loading scrim.
 - Buttons exist only for distinct commands. Conversation continuation uses the composer, not a separate follow-up action.
 - Image attachments support file selection and clipboard paste with the same validation limits.
@@ -44,4 +45,5 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Marketing heroes, decorative cards, gradients, glass effects or glow-heavy visuals.
 - A second LLM call for every ordinary chat message.
 - Nested message scrollbars, ambiguous status percentages or raw logs as the default view.
+- A separate live-feed column that competes with the project conversation.
 - Installing project-specific tools globally when the active project does not need them.

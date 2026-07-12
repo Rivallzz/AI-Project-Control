@@ -11,3 +11,5 @@ Provider results now distinguish completed, controlled blocked and failed runs. 
 Project switching now reloads the currently visible project view. In particular, `Prüfen & Git` clears and disables the previous repository state before loading the selected project's worktrees and changes.
 
 Git review now separates uncommitted status from ancestry, previews changed image files and offers confirmed bulk cleanup only for clean task worktrees already contained in the integration branch. Cross-project activity reports recent completion as an actionable review state. Chat and live-feed auto-follow stop when the owner intentionally scrolls away from the newest content.
+
+The project workspace now uses one chat-centred timeline. Active provider phases, focused tool events and stop control appear directly in the current assistant response; verbose technical output remains available through progressive disclosure. The separate live-feed column no longer competes with the conversation.

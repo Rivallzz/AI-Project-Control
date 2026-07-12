@@ -79,7 +79,7 @@ try {
     if ($indexSource -notmatch 'attachmentInput' -or $indexSource -notmatch 'data-view="portfolio"' -or $indexSource -notmatch 'busyOverlay') { throw 'Responsive chat, portfolio or loading controls are missing.' }
     if ($indexSource -notmatch 'data-view="git"' -or $indexSource -notmatch 'knowledgeSearch' -or $indexSource -match 'Notizen laden') { throw 'Git review or automatic unified knowledge controls are missing.' }
     if ($indexSource -match 'data-view="projects"' -or $indexSource -match 'graphZoomIn') { throw 'Redundant project navigation or graph zoom buttons are still present.' }
-    if ($appSource -notmatch '\[\.\.\.runs\]\.reverse\(\)') { throw 'Conversation history is not rendered oldest-first.' }
+    if ($appSource -notmatch "\.sort\(\(left, right\) => String\(left\.time\)\.localeCompare") { throw 'Conversation history is not rendered oldest-first.' }
     if ($appSource -notmatch "addEventListener\('paste'" -or $appSource -match 'data-open-run') { throw 'Chat paste support or simplified conversation actions are incorrect.' }
     if ($indexSource -notmatch 'class="provider-overview"' -or $indexSource -notmatch 'id="backgroundActivity"') { throw 'Compact provider header or background task activity is missing.' }
     if ($indexSource -notmatch 'id="workflowContext"' -or $appSource -notmatch 'function renderJobActivity' -or $appSource -notmatch 'needsCodeTools') { throw 'Project-specific workflow filtering is missing.' }
@@ -90,7 +90,8 @@ try {
     if ($appSource -notmatch 'Aufgabenbranch aufräumen' -or $appSource -notmatch 'kein separater Integrationsbranch' -or $appSource -notmatch "data.integration.branch === 'main' \? 'Aufgabe → main'") { throw 'Main fallback or already-integrated task cleanup is not clearly disclosed.' }
     if ($appSource -notmatch "visibleView === 'git'.*loadGitState" -or $appSource -notmatch 'Der Git-Zustand des neuen Projekts wird geladen') { throw 'Project switching can leave stale Git data visible.' }
     if ($indexSource -notmatch 'id="gitImagePreview"' -or $indexSource -notmatch 'id="gitCleanupMergedButton"') { throw 'Git image preview or merged-worktree cleanup controls are missing.' }
-    if ($indexSource -notmatch 'id="historyJumpLatest"' -or $appSource -notmatch 'historyFollow' -or $appSource -notmatch 'feedScrollState') { throw 'User-controlled chat or live-feed scroll tracking is missing.' }
+    if ($indexSource -notmatch 'id="historyJumpLatest"' -or $appSource -notmatch 'historyFollow' -or $appSource -notmatch 'function jobConversationElement') { throw 'User-controlled chat following or inline task progress is missing.' }
+    if ($indexSource -match 'live-feed-panel' -or $appSource -notmatch 'technical-activity' -or $appSource -notmatch 'function renderMessageText') { throw 'Chat-centric activity details or readable response formatting are missing.' }
     if ($appSource -notmatch 'abgeschlossen · prüfen' -or $appSource -notmatch 'acknowledgedActivityJobs') { throw 'Cross-project completion tracking is not actionable.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json

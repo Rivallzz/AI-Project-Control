@@ -10,7 +10,7 @@ const elements = {
   attachmentPreview: document.getElementById('attachmentPreview'),
   provider: document.getElementById('providerSelect'), mode: document.getElementById('modeSelect'),
   useSubscriptionTokens: document.getElementById('useSubscriptionTokens'),
-  start: document.getElementById('startButton'), formMessage: document.getElementById('formMessage'), jobs: document.getElementById('jobList'),
+  start: document.getElementById('startButton'), formMessage: document.getElementById('formMessage'),
   knowledgeProjectName: document.getElementById('knowledgeProjectName'), knowledgeSearch: document.getElementById('knowledgeSearch'),
   knowledgeLoadState: document.getElementById('knowledgeLoadState'), graphStats: document.getElementById('graphStats'),
   graphCanvas: document.getElementById('graphCanvas'), graphDetails: document.getElementById('graphDetails'),
@@ -55,14 +55,16 @@ let knowledgeSearchTimer = null;
 let gitData = null;
 let selectedGitFile = null;
 let selectedAttachments = [];
-let feedFilter = 'important';
 let liveJobs = new Map();
 let jobEventSource = null;
 let jobRenderPending = false;
 let componentStatus = null;
 let historyFollow = true;
 let historyLatestVersion = null;
-const feedScrollState = new Map();
+let runHistory = [];
+const submittedTaskText = new Map();
+const submittedTaskAttachments = new Map();
+const terminalHistoryRefreshes = new Set();
 const acknowledgedActivityJobs = new Set(JSON.parse(sessionStorage.getItem('acknowledgedActivityJobs') || '[]'));
 
 async function api(path, options = {}) {
@@ -190,77 +192,11 @@ function formatTime(value) {
   return new Intl.DateTimeFormat('de-DE', { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(value));
 }
 
-function renderJobs(jobs) {
-  const outerScrollTop = elements.jobs.scrollTop;
-  Array.from(elements.jobs.querySelectorAll('[data-job-id]')).forEach((node) => {
-    const feed = node.querySelector('.feed-log');
-    if (feed) feedScrollState.set(node.dataset.jobId, { top: feed.scrollTop, follow: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24 });
-  });
-  elements.jobs.replaceChildren();
-  if (!jobs.length) {
-    const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Noch keine Jobs in dieser Dashboard-Sitzung.';
-    elements.jobs.append(empty); return;
-  }
-  for (const job of jobs) {
-    const container = document.createElement('article'); container.className = 'job';
-    container.dataset.jobId = job.id;
-    const head = document.createElement('div'); head.className = 'job-head';
-    const title = document.createElement('div'); const heading = document.createElement('h3'); heading.textContent = `${job.projectName || 'Projekt'} · ${job.provider}`;
-    const meta = document.createElement('div'); meta.className = 'job-meta'; meta.textContent = `${formatTime(job.startedAt)} · ${job.workingDirectory}`;
-    title.append(heading, meta);
-    const state = document.createElement('span');
-    const stateClass = job.status === 'completed' ? 'ok' : job.status === 'failed' ? 'fail' : ['stopped', 'blocked'].includes(job.status) ? 'warn' : 'info';
-    const stateLabel = job.status === 'blocked' ? 'blockiert' : job.status;
-    state.className = `status ${stateClass}`; state.textContent = stateLabel; head.append(title, state);
-    const task = document.createElement('div'); task.className = 'job-task'; task.textContent = `${job.phase || job.mode} · ${job.taskPreview}`;
-    container.append(head, task);
-    if (job.status === 'running') {
-      const stop = document.createElement('button'); stop.className = 'button danger'; stop.type = 'button';
-      stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen'; container.append(stop);
-    }
-    const feed = document.createElement('div'); feed.className = 'feed-log';
-    const stdoutLines = String(job.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => ({
-      line,
-      kind: /AI_EVENT|AI_RUN_DIRECTORY|AI_PROJECT_ROUTER_(?:OK|BLOCKED)/.test(line) || /^\[\d{4}-/.test(line) ? 'event' : '',
-    }));
-    const stderrLines = String(job.stderr || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: 'error' }));
-    const allLines = [...stdoutLines, ...stderrLines];
-    let lines = allLines.filter((entry) => {
-      if (feedFilter === 'all') return true;
-      if (feedFilter === 'errors') return entry.kind === 'error' || /fail|error|blocked|quota/i.test(entry.line);
-      if (entry.kind === 'event') return true;
-      if (entry.kind === 'error') return /Provider\s+\w+.*(?:failed|exited|changed)|local Hermes|No provider|write tasks are disabled/i.test(entry.line);
-      const stream = entry.line.match(/AI_STREAM provider=[^\s]+\s*(.*)/);
-      if (!stream) return false;
-      return /\bpreparing\b|\bread\s+[^\s]|\bsearch(?:ed|ing)?\b|\$\s+|API call failed|Non-retryable|completion sentinel|read-only/i.test(stream[1]);
-    }).slice(feedFilter === 'all' ? -80 : -30);
-    if (feedFilter === 'important' && ['failed', 'blocked'].includes(job.status) && !lines.some((entry) => entry.kind === 'error')) {
-      lines.push({ line: job.status === 'blocked' ? 'Lauf blockiert. Die konkrete Begründung steht im Verlauf.' : 'Lauf fehlgeschlagen. Technische Details stehen unter Fehler oder Alles.', kind: 'error' });
-    }
-    if (!lines.length) {
-      const waiting = document.createElement('div'); waiting.className = 'feed-line';
-      waiting.textContent = allLines.length ? 'Keine Ereignisse für diesen Filter.' : 'Warte auf Agentenausgabe…'; feed.append(waiting);
-    } else {
-      for (const entry of lines) {
-        const line = document.createElement('div'); line.className = `feed-line ${entry.kind}`; line.textContent = summarizeFeedLine(entry.line); feed.append(line);
-      }
-    }
-    container.append(feed); elements.jobs.append(container);
-    const previous = feedScrollState.get(job.id);
-    const follow = previous ? previous.follow : job.status === 'running';
-    if (follow) feed.scrollTop = feed.scrollHeight;
-    else if (previous) feed.scrollTop = previous.top;
-    feedScrollState.set(job.id, { top: feed.scrollTop, follow });
-    feed.addEventListener('scroll', () => feedScrollState.set(job.id, { top: feed.scrollTop, follow: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24 }));
-  }
-  elements.jobs.scrollTop = outerScrollTop;
-}
-
 function visibleLiveJobs() {
   if (!activeProject) return [];
   return Array.from(liveJobs.values())
-    .filter((job) => job.projectId === activeProject.id || job.kind === 'provision' || job.kind === 'dashboard-command')
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    .filter((job) => job.projectId === activeProject.id && job.kind === 'task')
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
 function scheduleLiveJobRender() {
@@ -268,7 +204,7 @@ function scheduleLiveJobRender() {
   jobRenderPending = true;
   requestAnimationFrame(() => {
     jobRenderPending = false;
-    renderJobs(visibleLiveJobs());
+    renderConversation();
     renderJobActivity();
     if (componentStatus) renderComponents(componentStatus);
   });
@@ -282,6 +218,11 @@ function connectJobEvents() {
       const job = JSON.parse(event.data);
       liveJobs.set(job.id, job);
       scheduleLiveJobRender();
+      if (job.projectId === activeProject?.id && ['completed', 'failed', 'blocked', 'stopped'].includes(job.status) && !terminalHistoryRefreshes.has(job.id)) {
+        terminalHistoryRefreshes.add(job.id);
+        setTimeout(() => refreshHistory(), 250);
+        setTimeout(() => refreshHistory(), 1500);
+      }
     } catch {}
   });
 }
@@ -307,6 +248,87 @@ function summarizeFeedLine(line) {
     } catch { return `${stream[1]} · ${stream[2].slice(0, 320)}`; }
   }
   return line.slice(0, 500);
+}
+
+function jobLogEntries(job) {
+  const stdout = String(job.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => ({
+    line,
+    kind: /AI_EVENT|AI_RUN_DIRECTORY|AI_PROJECT_ROUTER_(?:OK|BLOCKED)/.test(line) || /^\[\d{4}-/.test(line) ? 'event' : '',
+  }));
+  const stderr = String(job.stderr || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: 'error' }));
+  return [...stdout, ...stderr];
+}
+
+function importantJobEntries(job) {
+  const entries = jobLogEntries(job).filter((entry) => {
+    if (entry.kind) return true;
+    const stream = entry.line.match(/AI_STREAM provider=[^\s]+\s*(.*)/);
+    return stream && /item\.(?:started|completed)|preparing|\bread\b|\bsearch|\btool\b|\$\s+|API call failed|completion sentinel|read-only/i.test(stream[1]);
+  });
+  const unique = [];
+  for (const entry of entries) {
+    const summary = summarizeFeedLine(entry.line);
+    if (!summary || unique.at(-1)?.summary === summary) continue;
+    unique.push({ ...entry, summary });
+  }
+  return unique.slice(-6);
+}
+
+function jobStatus(job) {
+  if (job.status === 'running') return { label: 'läuft', className: 'info', title: 'Ich arbeite an deiner Aufgabe' };
+  if (job.status === 'stopping') return { label: 'wird gestoppt', className: 'warn', title: 'Die Aufgabe wird kontrolliert gestoppt' };
+  if (job.status === 'completed') return { label: 'abgeschlossen', className: 'ok', title: 'Die Aufgabe wurde abgeschlossen' };
+  if (job.status === 'blocked') return { label: 'blockiert', className: 'warn', title: 'Die Aufgabe benötigt eine Entscheidung' };
+  if (job.status === 'stopped') return { label: 'gestoppt', className: 'warn', title: 'Die Aufgabe wurde gestoppt' };
+  return { label: 'fehlgeschlagen', className: 'fail', title: 'Die Aufgabe konnte nicht abgeschlossen werden' };
+}
+
+function jobConversationElement(job) {
+  const article = document.createElement('article'); article.className = 'conversation-run live-conversation-run'; article.dataset.jobId = job.id;
+  const status = jobStatus(job);
+  const meta = document.createElement('div'); meta.className = 'conversation-meta';
+  const identity = document.createElement('span'); identity.textContent = `${formatTime(job.createdAt || job.startedAt)} · ${job.provider || 'AI Project Control'}`;
+  const state = document.createElement('span'); state.className = `status ${status.className}`; state.textContent = status.label;
+  meta.append(identity, state); article.append(meta);
+  article.append(messageElement('user', 'Du', submittedTaskText.get(job.id) || job.taskPreview, submittedTaskAttachments.get(job.id) || []));
+
+  const assistant = document.createElement('div'); assistant.className = 'message assistant live-response';
+  const label = document.createElement('div'); label.className = 'message-label'; label.textContent = job.provider || 'AI Project Control';
+  const body = document.createElement('div'); body.className = 'message-body';
+  const progress = document.createElement('div'); progress.className = `agent-progress ${job.status}`;
+  const marker = document.createElement('span'); marker.className = 'agent-progress-marker'; marker.setAttribute('aria-hidden', 'true');
+  const progressText = document.createElement('div');
+  const title = document.createElement('strong'); title.textContent = status.title;
+  const phase = document.createElement('span'); phase.textContent = `${job.provider || 'Provider'} · ${job.phase || 'Auftrag wird vorbereitet'}`;
+  progressText.append(title, phase); progress.append(marker, progressText); body.append(progress);
+
+  const important = importantJobEntries(job);
+  if (important.length) {
+    const timeline = document.createElement('div'); timeline.className = 'activity-timeline';
+    for (const entry of important) {
+      const row = document.createElement('div'); row.className = `activity-event ${entry.kind}`; row.textContent = entry.summary; timeline.append(row);
+    }
+    body.append(timeline);
+  }
+
+  const rawEntries = jobLogEntries(job);
+  if (rawEntries.length) {
+    const details = document.createElement('details'); details.className = 'technical-activity';
+    const summary = document.createElement('summary'); summary.textContent = `Technische Aktivität (${rawEntries.length})`;
+    const log = document.createElement('div'); log.className = 'technical-activity-log';
+    for (const entry of rawEntries.slice(-100)) {
+      const row = document.createElement('div'); row.className = `feed-line ${entry.kind}`; row.textContent = summarizeFeedLine(entry.line); log.append(row);
+    }
+    details.append(summary, log); body.append(details);
+  }
+
+  if (job.status === 'running') {
+    const actions = document.createElement('div'); actions.className = 'run-actions';
+    const stop = document.createElement('button'); stop.className = 'button danger'; stop.type = 'button'; stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen';
+    actions.append(stop); body.append(actions);
+  }
+  assistant.append(label, body); article.append(assistant);
+  return article;
 }
 
 function showView(name) {
@@ -529,7 +551,7 @@ async function activateProject(projectId) {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
-    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; historyFollow = true; historyLatestVersion = null; elements.gitTarget.replaceChildren();
+    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; runHistory = []; historyFollow = true; historyLatestVersion = null; elements.gitTarget.replaceChildren();
     elements.gitFileList.replaceChildren(); elements.gitDiffFileName.textContent = 'Projekt wird gewechselt'; elements.gitDiff.textContent = 'Der Git-Zustand des neuen Projekts wird geladen.';
     elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src');
     elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitIntegrate.disabled = true; elements.gitPush.disabled = true;
@@ -717,10 +739,66 @@ async function addImageFiles(files) {
   renderAttachmentPreview();
 }
 
+function appendInlineFormatting(target, value) {
+  const text = String(value || '');
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > cursor) target.append(document.createTextNode(text.slice(cursor, match.index)));
+    if (match[0].startsWith('**')) {
+      const strong = document.createElement('strong'); strong.textContent = match[0].slice(2, -2); target.append(strong);
+    } else {
+      const code = document.createElement('code'); code.textContent = match[0].slice(1, -1); target.append(code);
+    }
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) target.append(document.createTextNode(text.slice(cursor)));
+}
+
+function renderMessageText(target, value) {
+  const lines = String(value || 'Keine gespeicherte Ausgabe.').split(/\r?\n/);
+  let paragraph = [];
+  let list = null;
+  let codeLines = null;
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const node = document.createElement('p');
+    paragraph.forEach((line, index) => { if (index) node.append(document.createElement('br')); appendInlineFormatting(node, line); });
+    target.append(node); paragraph = [];
+  };
+  const closeList = () => { list = null; };
+  for (const line of lines) {
+    if (line.startsWith('```')) {
+      flushParagraph(); closeList();
+      if (codeLines === null) codeLines = [];
+      else {
+        const pre = document.createElement('pre'); const code = document.createElement('code'); code.textContent = codeLines.join('\n'); pre.append(code); target.append(pre); codeLines = null;
+      }
+      continue;
+    }
+    if (codeLines !== null) { codeLines.push(line); continue; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const unordered = line.match(/^[-*]\s+(.+)$/);
+    const ordered = line.match(/^\d+\.\s+(.+)$/);
+    if (heading) {
+      flushParagraph(); closeList(); const node = document.createElement(`h${Math.min(4, heading[1].length + 2)}`); appendInlineFormatting(node, heading[2]); target.append(node); continue;
+    }
+    if (unordered || ordered) {
+      flushParagraph(); const tag = ordered ? 'ol' : 'ul';
+      if (!list || list.tagName.toLowerCase() !== tag) { list = document.createElement(tag); target.append(list); }
+      const item = document.createElement('li'); appendInlineFormatting(item, (unordered || ordered)[1]); list.append(item); continue;
+    }
+    if (!line.trim()) { flushParagraph(); closeList(); continue; }
+    closeList(); paragraph.push(line);
+  }
+  if (codeLines !== null) { const pre = document.createElement('pre'); const code = document.createElement('code'); code.textContent = codeLines.join('\n'); pre.append(code); target.append(pre); }
+  flushParagraph();
+}
+
 function messageElement(role, label, text, attachments = []) {
   const message = document.createElement('div'); message.className = `message ${role}`;
   const heading = document.createElement('div'); heading.className = 'message-label'; heading.textContent = label;
-  const body = document.createElement('div'); body.className = 'message-body'; body.textContent = text || 'Keine gespeicherte Ausgabe.';
+  const body = document.createElement('div'); body.className = 'message-body'; renderMessageText(body, text);
   message.append(heading, body);
   if (attachments.length) {
     const gallery = document.createElement('div'); gallery.className = 'message-attachments';
@@ -734,36 +812,51 @@ function messageElement(role, label, text, attachments = []) {
   return message;
 }
 
-function renderHistory(runs) {
+function runConversationElement(run) {
+  const article = document.createElement('article'); article.className = 'conversation-run';
+  const meta = document.createElement('div'); meta.className = 'conversation-meta';
+  const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${run.provider || 'externer Lauf'}`;
+  const stateClass = run.status === 'PASS' ? 'ok' : run.status === 'FAIL' ? 'fail' : run.status === 'external' ? 'info' : 'warn';
+  const state = document.createElement('span'); state.className = `status ${stateClass}`; state.textContent = run.status;
+  meta.append(identity, state); article.append(meta);
+  if (run.task) article.append(messageElement('user', 'Du', run.task, run.attachments || []));
+  article.append(messageElement('assistant', run.provider || 'AI Project Control', run.response));
+  const summary = document.createElement('div'); summary.className = 'run-summary';
+  for (const value of [run.mode, run.tests, run.filesChanged, run.gate].filter(Boolean)) {
+    const chip = document.createElement('span'); chip.textContent = value; summary.append(chip);
+  }
+  if (summary.childElementCount) article.append(summary);
+  return article;
+}
+
+function renderConversation() {
   const hadContent = elements.history.childElementCount > 0;
   const previousTop = elements.history.scrollTop;
   const shouldFollow = !hadContent || historyFollow;
-  const nextVersion = runs[0] ? `${runs[0].name}:${runs[0].modifiedAt}` : null;
+  const recordedPaths = new Set(runHistory.map((run) => String(run.path || '').toLowerCase()));
+  const jobs = visibleLiveJobs().filter((job) => !job.runDirectory || !recordedPaths.has(String(job.runDirectory).toLowerCase()));
+  const entries = [
+    ...runHistory.map((run) => ({ type: 'run', time: run.modifiedAt, value: run })),
+    ...jobs.map((job) => ({ type: 'job', time: job.createdAt || job.startedAt, value: job })),
+  ].sort((left, right) => String(left.time).localeCompare(String(right.time)));
+  const nextVersion = entries.map((entry) => entry.type === 'run'
+    ? `${entry.value.name}:${entry.value.modifiedAt}`
+    : `${entry.value.id}:${entry.value.status}:${String(entry.value.stdout || '').length}:${String(entry.value.stderr || '').length}`).join('|');
   const hasNewContent = Boolean(historyLatestVersion && nextVersion && historyLatestVersion !== nextVersion);
   elements.history.replaceChildren();
-  if (!runs.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Noch kein Lauf für dieses Projekt.'; elements.history.append(empty); return; }
-  for (const run of [...runs].reverse()) {
-    const article = document.createElement('article'); article.className = 'conversation-run';
-    const meta = document.createElement('div'); meta.className = 'conversation-meta';
-    const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${run.provider || 'externer Lauf'}`;
-    const stateClass = run.status === 'PASS' ? 'ok' : run.status === 'FAIL' ? 'fail' : run.status === 'external' ? 'info' : 'warn';
-    const state = document.createElement('span'); state.className = `status ${stateClass}`; state.textContent = run.status;
-    meta.append(identity, state); article.append(meta);
-    if (run.task) article.append(messageElement('user', 'Du', run.task, run.attachments || []));
-    article.append(messageElement('assistant', run.provider || 'AI Project Control', run.response));
-    const summary = document.createElement('div'); summary.className = 'run-summary';
-    for (const value of [run.mode, run.tests, run.filesChanged, run.gate].filter(Boolean)) {
-      const chip = document.createElement('span'); chip.textContent = value; summary.append(chip);
-    }
-    if (summary.childElementCount) article.append(summary);
-    elements.history.append(article);
-  }
+  if (!entries.length) { const empty = document.createElement('div'); empty.className = 'empty chat-empty'; empty.textContent = 'Noch kein Gespräch für dieses Projekt.'; elements.history.append(empty); return; }
+  for (const entry of entries) elements.history.append(entry.type === 'run' ? runConversationElement(entry.value) : jobConversationElement(entry.value));
   requestAnimationFrame(() => {
     if (shouldFollow) { elements.history.scrollTop = elements.history.scrollHeight; elements.historyJumpLatest.classList.add('hidden'); }
     else { elements.history.scrollTop = previousTop; elements.historyJumpLatest.classList.toggle('hidden', !hasNewContent); }
     historyFollow = shouldFollow;
   });
   historyLatestVersion = nextVersion;
+}
+
+function renderHistory(runs) {
+  runHistory = runs;
+  renderConversation();
 }
 
 async function refreshStatus(force = false) {
@@ -778,12 +871,12 @@ async function refreshJobs() {
   if (!activeProject) return;
   const rows = await api(`/api/jobs?${projectQuery()}`);
   for (const row of rows) liveJobs.set(row.id, row);
-  renderJobs(visibleLiveJobs());
+  renderConversation();
   renderJobActivity();
   if (componentStatus) renderComponents(componentStatus);
   const latestTask = rows.find((job) => job.kind === 'task');
-  if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzter Job fehlgeschlagen. Details stehen im Live-Feed und Verlauf.';
-  else if (latestTask?.status === 'blocked') elements.formMessage.textContent = 'Letzter Job wurde kontrolliert blockiert. Die Begründung steht im Verlauf.';
+  if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzte Aufgabe fehlgeschlagen. Details stehen direkt im Gespräch.';
+  else if (latestTask?.status === 'blocked') elements.formMessage.textContent = 'Letzte Aufgabe wurde kontrolliert blockiert. Die Begründung steht direkt im Gespräch.';
   else if (latestTask?.status === 'completed') elements.formMessage.textContent = 'Letzter Job abgeschlossen.';
   else if (latestTask?.status === 'stopped') elements.formMessage.textContent = 'Letzter Job wurde gestoppt.';
   if (rows.some((job) => job.status === 'completed' && job.projectId && !registry.projects.some((project) => project.id === job.projectId))) {
@@ -832,13 +925,6 @@ elements.provider.addEventListener('change', () => { if (componentStatus) render
 elements.mode.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
 elements.useSubscriptionTokens.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
 elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); });
-
-document.querySelector('.feed-filter').addEventListener('click', (event) => {
-  const button = event.target.closest('button[data-feed-filter]'); if (!button) return;
-  feedFilter = button.dataset.feedFilter;
-  document.querySelectorAll('[data-feed-filter]').forEach((candidate) => candidate.classList.toggle('active', candidate === button));
-  refreshJobs();
-});
 
 elements.attachmentButton.addEventListener('click', () => elements.attachmentInput.click());
 elements.attachmentInput.addEventListener('change', async () => {
@@ -897,7 +983,7 @@ elements.provisionForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const githubText = elements.provisionGitHub.checked ? ` und als ${elements.provisionVisibility.value} GitHub-Repository` : '';
   if (!window.confirm(`Projekt lokal mit initialem Git-Commit${githubText} erstellen?`)) return;
-  elements.provisionMessage.textContent = 'Projektaufbau wurde gestartet. Fortschritt erscheint im Live-Feed.';
+  elements.provisionMessage.textContent = 'Projektaufbau wurde gestartet. Fortschritt erscheint im Arbeitsbereich des neuen Projekts.';
   try {
     await api('/api/projects/provision', { method: 'POST', body: JSON.stringify({
       name: elements.provisionName.value, slug: elements.provisionSlug.value,
@@ -958,13 +1044,17 @@ elements.noteList.addEventListener('click', (event) => {
 
 elements.form.addEventListener('submit', async (event) => {
   event.preventDefault(); elements.start.disabled = true; elements.formMessage.textContent = 'Task wird gestartet…';
+  const taskText = elements.task.value;
   try {
     const job = await api('/api/tasks', { method: 'POST', body: JSON.stringify({
-      projectId: activeProject.id, task: elements.task.value, provider: elements.provider.value,
+      projectId: activeProject.id, task: taskText, provider: elements.provider.value,
       mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
       attachments: selectedAttachments.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })),
     }) });
-    elements.formMessage.textContent = `Job ${job.id.slice(0, 8)} läuft.`; elements.task.value = ''; elements.task.style.height = ''; clearAttachments(); await refreshJobs();
+    submittedTaskText.set(job.id, taskText);
+    submittedTaskAttachments.set(job.id, selectedAttachments.map(({ name, dataUrl }) => ({ name, url: dataUrl })));
+    liveJobs.set(job.id, job); renderConversation();
+    elements.formMessage.textContent = 'Aufgabe läuft. Fortschritt erscheint direkt im Gespräch.'; elements.task.value = ''; elements.task.style.height = ''; clearAttachments(); await refreshJobs();
   } catch (error) { elements.formMessage.textContent = error.message; }
   finally { elements.start.disabled = false; }
 });
@@ -1049,7 +1139,7 @@ elements.gitPush.addEventListener('click', async () => {
   finally { elements.gitPush.disabled = false; }
 });
 
-elements.jobs.addEventListener('click', async (event) => {
+elements.history.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-stop-job]'); if (!button) return; button.disabled = true;
   try { await api(`/api/jobs/${button.dataset.stopJob}/stop`, { method: 'POST', body: '{}' }); await refreshJobs(); }
   catch (error) { elements.formMessage.textContent = error.message; }
@@ -1059,7 +1149,7 @@ document.getElementById('systemsView').addEventListener('click', async (event) =
   const install = event.target.closest('button[data-install-system]');
   if (install) {
     if (!window.confirm(`${install.dataset.installName} über den freigegebenen offiziellen Paketweg installieren? Es werden keine kostenpflichtigen Dienste aktiviert.`)) return;
-    install.disabled = true; elements.systemMessage.textContent = `${install.dataset.installName} wird installiert. Der Fortschritt erscheint im Live-Feed.`;
+    install.disabled = true; elements.systemMessage.textContent = `${install.dataset.installName} wird installiert. Der Fortschritt erscheint direkt im Projektgespräch.`;
     try {
       await api('/api/systems/install', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, installKey: install.dataset.installSystem }) });
       showView('tasks'); await refreshJobs();
