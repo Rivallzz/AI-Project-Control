@@ -2,8 +2,9 @@
 
 const elements = {
   connection: document.getElementById('connectionState'),
+  backgroundActivity: document.getElementById('backgroundActivity'),
   projectSelect: document.getElementById('projectSelect'), addProject: document.getElementById('addProjectButton'),
-  providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'),
+  providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'), workflowContext: document.getElementById('workflowContext'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
   attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
   attachmentPreview: document.getElementById('attachmentPreview'),
@@ -29,10 +30,11 @@ const elements = {
   portfolioProjectName: document.getElementById('portfolioProjectName'), portfolioState: document.getElementById('portfolioState'),
   portfolioNextAction: document.getElementById('portfolioNextAction'), portfolioCurrentTask: document.getElementById('portfolioCurrentTask'),
   portfolioLastRun: document.getElementById('portfolioLastRun'), portfolioRepository: document.getElementById('portfolioRepository'), portfolioKnowledge: document.getElementById('portfolioKnowledge'),
-  gitProjectName: document.getElementById('gitProjectName'), gitState: document.getElementById('gitState'), gitSummary: document.getElementById('gitSummary'),
+  gitProjectName: document.getElementById('gitProjectName'), gitTarget: document.getElementById('gitTargetSelect'), gitState: document.getElementById('gitState'), gitSummary: document.getElementById('gitSummary'),
   gitFileList: document.getElementById('gitFileList'), gitDiff: document.getElementById('gitDiffContent'), gitSelectAll: document.getElementById('gitSelectAll'),
   gitDiffFileName: document.getElementById('gitDiffFileName'), gitCommitMessage: document.getElementById('gitCommitMessage'),
-  gitCommit: document.getElementById('gitCommitButton'), gitCommitPush: document.getElementById('gitCommitPushButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
+  gitBranchFlow: document.getElementById('gitBranchFlow'), gitCommit: document.getElementById('gitCommitButton'), gitCommitPush: document.getElementById('gitCommitPushButton'),
+  gitIntegrate: document.getElementById('gitIntegrateButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
   busyOverlay: document.getElementById('busyOverlay'), busyTitle: document.getElementById('busyTitle'), busyMessage: document.getElementById('busyMessage'),
 };
 
@@ -56,6 +58,7 @@ let feedFilter = 'important';
 let liveJobs = new Map();
 let jobEventSource = null;
 let jobRenderPending = false;
+let componentStatus = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
@@ -82,6 +85,7 @@ function statusClass(ok, available) {
 
 function providerRow(name, provider, detail, percent = null) {
   const row = document.createElement('div'); row.className = 'provider-row';
+  row.title = detail;
   const line = document.createElement('div'); line.className = 'row-line';
   const label = document.createElement('span'); label.className = 'row-name'; label.textContent = name;
   const state = document.createElement('span'); state.className = `status ${statusClass(true, provider.available)}`;
@@ -103,13 +107,13 @@ function renderProviders(status) {
   const codexDetail = codex.quota_known
     ? `${codex.primary_used_percent}% im 5h-Fenster · Reset ${codex.primary_resets_local} · Woche ${codex.secondary_used_percent}%${creditNote}`
     : codex.reason || 'Kontingent unbekannt';
-  elements.providerList.append(providerRow('1. Codex', codex, codexDetail, codex.primary_used_percent ?? null));
+  elements.providerList.append(providerRow('Codex', codex, codexDetail, codex.primary_used_percent ?? null));
   const claude = status.claude;
   const claudeDetail = claude.available ? `${claude.subscription_type || 'Subscription'} · Restkontingent wird von Claude nicht numerisch bereitgestellt · API-Abrechnung gesperrt`
     : claude.retry_not_before_local ? `Nächste Prüfung ab ${claude.retry_not_before_local}` : claude.reason || 'Nicht verfügbar';
-  elements.providerList.append(providerRow('2. Claude Code', claude, claudeDetail));
+  elements.providerList.append(providerRow('Claude', claude, claudeDetail));
   const ollama = status.ollama;
-  elements.providerList.append(providerRow('3. Hermes + Ollama', ollama, ollama.available ? `${ollama.model} · nur isolierte Read-only-Experimente` : ollama.reason || 'Nicht verfügbar'));
+  elements.providerList.append(providerRow('Hermes + Ollama', ollama, ollama.available ? `${ollama.model} · Read-only` : ollama.reason || 'Nicht verfügbar'));
 }
 
 function componentRow(name, ok, detail, warning = false) {
@@ -123,17 +127,52 @@ function componentRow(name, ok, detail, warning = false) {
 }
 
 function renderComponents(data) {
+  componentStatus = data;
   elements.componentList.replaceChildren();
-  elements.componentList.append(componentRow('Provider Router', data.router.ok, data.router.path));
-  elements.componentList.append(componentRow('Codex CLI', data.codex.ok, data.codex.text));
-  elements.componentList.append(componentRow('Claude Code', data.claude.ok, data.claude.text));
-  elements.componentList.append(componentRow('Hermes', data.hermes.ok, data.hermes.text));
-  elements.componentList.append(componentRow('Ollama', data.ollama.ok, data.ollama.text));
-  elements.componentList.append(componentRow('Graphify', data.graphify.ok, data.graphify.text));
-  elements.componentList.append(componentRow('ECC', data.ecc.ok, `Commit ${data.ecc.commit}`));
-  elements.componentList.append(componentRow('MCP', data.mcp.ok, data.mcp.text));
-  elements.componentList.append(componentRow('Obsidian', data.obsidian.ok, data.obsidian.path));
-  elements.componentList.append(componentRow('Repository', data.repository.ok, `${data.repository.branch} · ${data.repository.clean ? 'clean' : 'Änderungen vorhanden'}`, data.repository.ok && !data.repository.clean));
+  const running = Array.from(liveJobs.values()).find((job) => job.projectId === activeProject?.id && job.kind === 'task' && job.status === 'running');
+  const provider = running?.provider || elements.provider.value;
+  const mode = running?.mode || elements.mode.value;
+  const useSubscription = running ? running.useSubscriptionTokens !== false : elements.useSubscriptionTokens.checked;
+  const modeLabel = mode === 'Write' ? 'Änderungen erlaubt' : 'Nur lesen';
+  elements.workflowContext.textContent = `${activeProject?.name || 'Projekt'} · ${modeLabel}${running ? ' · läuft' : ' · bereit'}`;
+
+  const rows = [
+    componentRow('Repository-Basis', data.repository.ok, `Haupt-Checkout · ${data.repository.branch} · ${data.repository.clean ? 'sauber' : 'Änderungen vorhanden'}`, data.repository.ok && !data.repository.clean),
+    componentRow('Graphify', data.graphify.ok, data.graphify.text),
+    componentRow('Obsidian', data.obsidian.ok, data.obsidian.path),
+    componentRow('Provider Router', data.router.ok, data.router.path),
+  ];
+
+  let execution;
+  if (!useSubscription || provider === 'Ollama') {
+    execution = { name: 'Ausführung · Lokal', ok: data.hermes.ok && data.ollama.ok, detail: `Hermes + ${data.ollama.text}` };
+  } else if (provider === 'Codex') {
+    execution = { name: 'Ausführung · Codex', ok: data.codex.ok, detail: data.codex.text };
+  } else if (provider === 'Claude') {
+    execution = { name: 'Ausführung · Claude', ok: data.claude.ok, detail: data.claude.text };
+  } else {
+    const localFallback = mode === 'ReadOnly' ? ' → Hermes lokal' : '';
+    execution = { name: 'Ausführung · Auto', ok: data.codex.ok || data.claude.ok, detail: `Codex → Claude${localFallback}` };
+  }
+  rows.push(componentRow(execution.name, execution.ok, execution.detail));
+
+  const taskText = `${running?.taskPreview || ''} ${elements.task.value}`;
+  const needsCodeTools = mode === 'Write' && /\b(code|c#|godot|script|klasse|symbol|bug|test|integration|terrain|szene|scene)\b/i.test(taskText);
+  if (needsCodeTools) rows.push(componentRow('MCP-Werkzeuge', data.mcp.ok, data.mcp.text));
+  elements.componentList.append(...rows);
+}
+
+function renderJobActivity() {
+  const running = Array.from(liveJobs.values()).filter((job) => job.kind === 'task' && job.status === 'running');
+  const background = running.filter((job) => job.projectId !== activeProject?.id);
+  const current = running.find((job) => job.projectId === activeProject?.id);
+  const visible = background.length ? background : current ? [current] : [];
+  elements.backgroundActivity.classList.toggle('hidden', visible.length === 0);
+  if (!visible.length) { elements.backgroundActivity.textContent = ''; elements.backgroundActivity.removeAttribute('title'); return; }
+  elements.backgroundActivity.textContent = background.length
+    ? `${background[0].projectName}${background.length > 1 ? ` +${background.length - 1}` : ''} läuft im Hintergrund`
+    : `${current.projectName} · Aufgabe läuft`;
+  elements.backgroundActivity.title = visible.map((job) => `${job.projectName}: ${job.taskPreview}`).join('\n');
 }
 
 function formatTime(value) {
@@ -213,7 +252,12 @@ function visibleLiveJobs() {
 function scheduleLiveJobRender() {
   if (jobRenderPending) return;
   jobRenderPending = true;
-  requestAnimationFrame(() => { jobRenderPending = false; renderJobs(visibleLiveJobs()); });
+  requestAnimationFrame(() => {
+    jobRenderPending = false;
+    renderJobs(visibleLiveJobs());
+    renderJobActivity();
+    if (componentStatus) renderComponents(componentStatus);
+  });
 }
 
 function connectJobEvents() {
@@ -374,11 +418,23 @@ async function loadSystems(force = false) {
 function renderGitState(data) {
   gitData = data;
   if (!data.files.some((file) => file.path === selectedGitFile)) selectedGitFile = null;
-  elements.gitProjectName.textContent = `${data.projectName} · ${data.repository}`;
+  elements.gitProjectName.textContent = `${data.projectName} · ${data.worktreeKind}`;
+  elements.gitBranchFlow.textContent = `Aufgabe → ${data.integration.branch} → main`;
+  elements.gitTarget.replaceChildren();
+  for (const target of data.targets) {
+    const option = document.createElement('option'); option.value = target.path;
+    const state = target.clean ? 'sauber' : `${target.changedCount} Änderung(en)`;
+    const role = target.branch === data.integration.branch ? 'Integrationsbranch' : target.kind;
+    option.textContent = `${role} · ${target.branch || 'ohne Branch'} · ${state}`;
+    option.selected = target.path.toLowerCase() === data.worktree.toLowerCase();
+    option.disabled = !target.available;
+    elements.gitTarget.append(option);
+  }
   elements.gitState.className = `status ${data.clean ? 'ok' : 'warn'}`;
   elements.gitState.textContent = data.clean ? 'clean' : `${data.files.length} Änderung(en)`;
   elements.gitSummary.replaceChildren();
   for (const text of [
+    `Arbeitsordner: ${data.worktree}`,
     `Branch: ${data.branch || '—'}`,
     `Remote: ${data.remote || 'nicht konfiguriert'}`,
     data.hasUpstream ? `${data.ahead} voraus · ${data.behind} zurück` : 'kein Upstream',
@@ -406,16 +462,21 @@ function renderGitState(data) {
   }
   elements.gitCommit.disabled = data.clean;
   elements.gitCommitPush.disabled = data.clean || !data.remote;
-  elements.gitPush.disabled = !data.remote || (data.hasUpstream && data.ahead === 0);
+  elements.gitIntegrate.disabled = !data.integration.canFastForward;
+  elements.gitIntegrate.classList.toggle('hidden', !data.integration.canFastForward);
+  elements.gitIntegrate.textContent = `In ${data.integration.branch} übernehmen`;
+  elements.gitPush.disabled = !data.remote || !data.clean || (data.hasUpstream && data.ahead === 0);
   elements.gitPush.classList.toggle('hidden', elements.gitPush.disabled);
-  elements.gitMessage.textContent = '';
+  elements.gitMessage.textContent = !data.integration.selectedIsIntegration && data.integration.alreadyIntegrated
+    ? `Dieser Aufgabenstand ist bereits in ${data.integration.branch} enthalten.` : '';
 }
 
-async function loadGitState() {
+async function loadGitState(worktree = elements.gitTarget.value) {
   if (!activeProject) return;
   elements.gitState.className = 'status warn'; elements.gitState.textContent = 'wird geprüft';
   elements.gitMessage.textContent = '';
-  try { renderGitState(await api(`/api/git?${projectQuery()}`)); }
+  const target = worktree ? `&worktree=${encodeURIComponent(worktree)}` : '';
+  try { renderGitState(await api(`/api/git?${projectQuery()}${target}`)); }
   catch (error) { elements.gitState.className = 'status fail'; elements.gitState.textContent = 'Fehler'; elements.gitMessage.textContent = error.message; }
 }
 
@@ -424,7 +485,7 @@ async function loadGitFileDiff(filePath) {
   elements.gitFileList.querySelectorAll('.git-file-row').forEach((row) => row.classList.toggle('active', row.querySelector('[data-git-file]')?.dataset.gitFile === filePath));
   elements.gitDiffFileName.textContent = filePath; elements.gitDiff.textContent = 'Dateiänderungen werden geladen…';
   try {
-    const result = await api(`/api/git/diff?${projectQuery()}&path=${encodeURIComponent(filePath)}`);
+    const result = await api(`/api/git/diff?${projectQuery()}&worktree=${encodeURIComponent(gitData.worktree)}&path=${encodeURIComponent(filePath)}`);
     elements.gitDiff.textContent = result.diff;
     elements.gitMessage.textContent = result.truncated ? 'Die Dateiansicht wurde bei 400.000 Zeichen gekürzt.' : result.binary ? 'Binärdateien besitzen keinen Text-Diff.' : '';
   } catch (error) { elements.gitDiff.textContent = error.message; }
@@ -437,7 +498,7 @@ async function activateProject(projectId) {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
-    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null;
+    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; elements.gitTarget.replaceChildren();
     renderProjectSelector(); resetKnowledge();
     await refreshAll(true);
   } finally { setBusy(false); }
@@ -670,6 +731,8 @@ async function refreshJobs() {
   const rows = await api(`/api/jobs?${projectQuery()}`);
   for (const row of rows) liveJobs.set(row.id, row);
   renderJobs(visibleLiveJobs());
+  renderJobActivity();
+  if (componentStatus) renderComponents(componentStatus);
   const latestTask = rows.find((job) => job.kind === 'task');
   if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzter Job fehlgeschlagen. Details stehen im Live-Feed und Verlauf.';
   else if (latestTask?.status === 'completed') elements.formMessage.textContent = 'Letzter Job abgeschlossen.';
@@ -709,6 +772,10 @@ document.querySelector('.view-tabs').addEventListener('click', (event) => {
 elements.systemsRefresh.addEventListener('click', () => loadSystems(true));
 elements.addProject.addEventListener('click', () => { showView('projects'); elements.provisionName.focus(); });
 elements.projectSelect.addEventListener('change', () => activateProject(elements.projectSelect.value));
+elements.provider.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
+elements.mode.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
+elements.useSubscriptionTokens.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
+elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); });
 
 document.querySelector('.feed-filter').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-feed-filter]'); if (!button) return;
@@ -860,11 +927,11 @@ async function commitSelectedGitFiles(pushAfterCommit) {
   elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitMessage.textContent = 'Commit wird erstellt…';
   let committed = false;
   try {
-    const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, paths, message }) });
+    const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree, paths, message }) });
     committed = true; elements.gitCommitMessage.value = '';
     if (pushAfterCommit) {
       elements.gitMessage.textContent = 'Commit erstellt, Branch wird gepusht…';
-      const pushed = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id }) });
+      const pushed = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
       renderGitState(pushed.state); elements.gitMessage.textContent = 'Auswahl wurde committed und der Branch hochgeladen.';
     } else { renderGitState(result.state); elements.gitMessage.textContent = 'Commit wurde lokal erstellt. Noch nichts wurde gepusht.'; }
   } catch (error) { elements.gitMessage.textContent = committed ? `Commit wurde erstellt, Push ist fehlgeschlagen: ${error.message}` : error.message; }
@@ -872,12 +939,24 @@ async function commitSelectedGitFiles(pushAfterCommit) {
 }
 elements.gitCommit.addEventListener('click', () => commitSelectedGitFiles(false));
 elements.gitCommitPush.addEventListener('click', () => commitSelectedGitFiles(true));
+elements.gitTarget.addEventListener('change', () => { selectedGitFile = null; loadGitState(elements.gitTarget.value); });
+elements.gitIntegrate.addEventListener('click', async () => {
+  if (!gitData?.integration?.canFastForward) { elements.gitMessage.textContent = gitData?.integration?.reason || 'Dieser Aufgabenstand kann nicht automatisch integriert werden.'; return; }
+  if (!window.confirm(`Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen? main bleibt unverändert.`)) return;
+  elements.gitIntegrate.disabled = true; elements.gitMessage.textContent = `${gitData.integration.branch} wird aktualisiert…`;
+  try {
+    const result = await api('/api/git/integrate', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
+    selectedGitFile = null; renderGitState(result.state);
+    elements.gitMessage.textContent = `Aufgabenstand wurde lokal in ${result.state.integration.branch} übernommen. Prüfe und pushe jetzt nur diesen Integrationsbranch; main bleibt unverändert.`;
+  } catch (error) { elements.gitMessage.textContent = error.message; }
+  finally { elements.gitIntegrate.disabled = !gitData?.integration?.canFastForward; }
+});
 elements.gitPush.addEventListener('click', async () => {
   if (!gitData?.remote) { elements.gitMessage.textContent = 'Kein origin-Remote konfiguriert.'; return; }
   if (!window.confirm(`Branch ${gitData.branch} ohne Force-Push zu ${gitData.remote} hochladen?`)) return;
   elements.gitPush.disabled = true; elements.gitMessage.textContent = 'Branch wird gepusht…';
   try {
-    const result = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id }) });
+    const result = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
     renderGitState(result.state); elements.gitMessage.textContent = 'Branch wurde erfolgreich hochgeladen.';
   } catch (error) { elements.gitMessage.textContent = error.message; }
   finally { elements.gitPush.disabled = false; }

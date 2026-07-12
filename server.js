@@ -229,7 +229,25 @@ function normalizedProject(project) {
     repository: path.resolve(String(project.repository)),
     graphPath: path.resolve(String(project.graphPath)),
     obsidianPath: path.resolve(String(project.obsidianPath)),
+    integrationBranch: project.integrationBranch ? String(project.integrationBranch) : null,
   };
+}
+
+async function getIntegrationBranch(project) {
+  const candidates = [];
+  if (project.integrationBranch) candidates.push(project.integrationBranch);
+  candidates.push('develop');
+  const remoteHead = await execFileAsync('git.exe', ['-C', project.repository, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+  if (remoteHead.exitCode === 0) candidates.push(remoteHead.stdout.trim().replace(/^origin\//, ''));
+  candidates.push('main');
+  const current = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '--show-current']);
+  if (current.exitCode === 0) candidates.push(current.stdout.trim());
+  for (const branch of [...new Set(candidates.filter(Boolean))]) {
+    if (!/^[A-Za-z0-9._\/-]+$/.test(branch)) continue;
+    const exists = await execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+    if (exists.exitCode === 0) return branch;
+  }
+  throw new Error('No local integration branch is available for this project.');
 }
 
 async function loadProjects() {
@@ -669,7 +687,7 @@ function snapshotJob(job) {
   return {
     id: job.id, kind: job.kind || 'task', phase: job.phase || null,
     projectId: job.projectId, projectName: job.projectName,
-    status: job.status, provider: job.provider, mode: job.mode,
+    status: job.status, provider: job.provider, mode: job.mode, useSubscriptionTokens: job.useSubscriptionTokens,
     workingDirectory: job.workingDirectory, taskPreview: job.taskPreview,
     createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
     exitCode: job.exitCode, runDirectory: job.runDirectory, pid: job.pid,
@@ -731,11 +749,12 @@ async function registerProjectFromChat(task) {
 
 async function createTaskWorktree(project, task, id) {
   const branch = `ai/${safeId(task).slice(0, 28)}-${id.slice(0, 8)}`;
+  const integrationBranch = await getIntegrationBranch(project);
   const workingDirectory = path.join(WORKTREE_ROOT, safeId(project.name), `${new Date().toISOString().replace(/[:.]/g, '-')}-${id.slice(0, 8)}`);
   await fsp.mkdir(path.dirname(workingDirectory), { recursive: true });
-  const result = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'add', '-b', branch, workingDirectory, 'HEAD'], { timeout: 60000 });
+  const result = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'add', '-b', branch, workingDirectory, integrationBranch], { timeout: 60000 });
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Automatic task worktree creation failed.');
-  return { workingDirectory, branch };
+  return { workingDirectory, branch, integrationBranch };
 }
 
 async function startTask(payload) {
@@ -784,14 +803,14 @@ async function startTask(payload) {
   const systemText = registeredSystems.map((system) => `- ${system.name} (${system.type}): ${system.path}${system.note ? ` — ${system.note}` : ''}`).join('\n') || '- No additional systems registered for agent use.';
   const id = randomUUID();
   const attachments = await saveTaskAttachments(id, payload.attachments);
-  const worktree = mode === 'Write' ? await createTaskWorktree(project, task, id) : { workingDirectory: project.repository, branch: null };
+  const worktree = mode === 'Write' ? await createTaskWorktree(project, task, id) : { workingDirectory: project.repository, branch: null, integrationBranch: await getIntegrationBranch(project) };
   const workingDirectory = worktree.workingDirectory;
   const taskPath = path.join(TASK_ROOT, `${id}.md`);
   const attachmentSection = attachments.length
     ? `\nAttachment-ID: ${id}\n\n## Attachments\n\n${attachments.map((attachment) => `- ${attachment.name} (${attachment.type}): ${attachment.path}`).join('\n')}\n`
     : '';
   const strategy = deterministicTaskStrategy(task, mode, project);
-  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
+  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nIntegration branch: ${worktree.integrationBranch}\nPromotion rule: task branch -> ${worktree.integrationBranch} -> main; never task branch -> main\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
   await fsp.writeFile(taskPath, taskPackage, 'utf8');
 
   const args = [
@@ -802,7 +821,7 @@ async function startTask(payload) {
   if (!useSubscriptionTokens) args.push('-LocalOnly');
   const child = spawn('pwsh.exe', args, { cwd: workingDirectory, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
   const job = {
-    id, kind: 'task', phase: 'routing', projectId: project.id, projectName: project.name, status: 'running', provider, mode,
+    id, kind: 'task', phase: 'routing', projectId: project.id, projectName: project.name, status: 'running', provider, mode, useSubscriptionTokens,
     workingDirectory, taskPreview: task.slice(0, 160), taskPath,
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), finishedAt: null,
     exitCode: null, runDirectory: null, pid: child.pid, stdout: '', stderr: '', child,
@@ -1229,43 +1248,147 @@ function parseGitStatus(output) {
   return files;
 }
 
-async function getGitState(project) {
-  const branch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '--show-current']);
-  const status = await execFileAsync('git.exe', ['-C', project.repository, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+function parseGitWorktrees(output) {
+  return String(output || '').trim().split(/\r?\n\r?\n/).filter(Boolean).map((block) => {
+    const entry = { path: null, head: null, branch: null, detached: false, locked: false, prunable: false };
+    for (const line of block.split(/\r?\n/)) {
+      const separator = line.indexOf(' ');
+      const key = separator < 0 ? line : line.slice(0, separator);
+      const value = separator < 0 ? '' : line.slice(separator + 1);
+      if (key === 'worktree') entry.path = path.resolve(value);
+      else if (key === 'HEAD') entry.head = value;
+      else if (key === 'branch') entry.branch = value.replace(/^refs\/heads\//, '');
+      else if (key === 'detached') entry.detached = true;
+      else if (key === 'locked') entry.locked = true;
+      else if (key === 'prunable') entry.prunable = true;
+    }
+    return entry;
+  }).filter((entry) => entry.path);
+}
+
+async function getProjectWorktrees(project) {
+  const result = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'list', '--porcelain']);
+  if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Git worktree list failed.');
+  const mainPath = path.resolve(project.repository);
+  const entries = parseGitWorktrees(result.stdout);
+  const targets = await Promise.all(entries.map(async (entry) => {
+    const status = await execFileAsync('git.exe', ['-C', entry.path, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+    const files = status.exitCode === 0 ? parseGitStatus(status.stdout) : [];
+    let updatedAt = null;
+    try { updatedAt = (await fsp.stat(entry.path)).mtime.toISOString(); } catch {}
+    const mainCheckout = entry.path.toLowerCase() === mainPath.toLowerCase();
+    return {
+      path: entry.path, branch: entry.branch || (entry.detached ? 'detached HEAD' : ''), head: entry.head,
+      mainCheckout, kind: mainCheckout ? 'Haupt-Checkout' : entry.branch?.startsWith('ai/') ? 'Aufgaben-Worktree' : 'Zusätzlicher Worktree',
+      clean: files.length === 0, changedCount: files.length, updatedAt,
+      available: status.exitCode === 0 && !entry.prunable, locked: entry.locked, prunable: entry.prunable,
+    };
+  }));
+  return targets.sort((left, right) => {
+    const leftPriority = !left.mainCheckout && !left.clean ? 0 : left.mainCheckout && !left.clean ? 1 : !left.mainCheckout ? 2 : 3;
+    const rightPriority = !right.mainCheckout && !right.clean ? 0 : right.mainCheckout && !right.clean ? 1 : !right.mainCheckout ? 2 : 3;
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+    return String(right.updatedAt || '').localeCompare(String(left.updatedAt || ''));
+  });
+}
+
+async function resolveGitTarget(project, requestedWorktree) {
+  const targets = await getProjectWorktrees(project);
+  if (!targets.length) throw new Error('No Git worktree is registered for this project.');
+  let target = null;
+  if (requestedWorktree) {
+    const resolved = path.resolve(String(requestedWorktree));
+    target = targets.find((candidate) => candidate.path.toLowerCase() === resolved.toLowerCase());
+    if (!target) throw new Error('Requested worktree is not registered with this project repository.');
+  } else {
+    target = targets.find((candidate) => candidate.available && !candidate.mainCheckout && !candidate.clean)
+      || targets.find((candidate) => candidate.available && !candidate.mainCheckout && candidate.branch.startsWith('ai/'))
+      || targets.find((candidate) => candidate.available && candidate.mainCheckout);
+  }
+  if (!target?.available) throw new Error('Selected worktree is not currently available.');
+  return { target, targets };
+}
+
+async function getGitState(project, requestedWorktree = null) {
+  const { target, targets } = await resolveGitTarget(project, requestedWorktree);
+  const workingDirectory = target.path;
+  const integrationBranch = await getIntegrationBranch(project);
+  const integrationTarget = targets.find((candidate) => candidate.branch === integrationBranch && candidate.available) || null;
+  const branch = await execFileAsync('git.exe', ['-C', workingDirectory, 'branch', '--show-current']);
+  const status = await execFileAsync('git.exe', ['-C', workingDirectory, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
   if (status.exitCode !== 0 || branch.exitCode !== 0) throw new Error(status.stderr.trim() || branch.stderr.trim() || 'Git status failed.');
-  const remote = await execFileAsync('git.exe', ['-C', project.repository, 'remote', 'get-url', 'origin']);
-  const head = await execFileAsync('git.exe', ['-C', project.repository, 'log', '-1', '--pretty=format:%h%x00%s%x00%aI']);
-  const upstream = await execFileAsync('git.exe', ['-C', project.repository, 'rev-list', '--left-right', '--count', '@{upstream}...HEAD']);
+  const remote = await execFileAsync('git.exe', ['-C', workingDirectory, 'remote', 'get-url', 'origin']);
+  const head = await execFileAsync('git.exe', ['-C', workingDirectory, 'log', '-1', '--pretty=format:%h%x00%s%x00%aI']);
+  const upstream = await execFileAsync('git.exe', ['-C', workingDirectory, 'rev-list', '--left-right', '--count', '@{upstream}...HEAD']);
   const ghAuth = await execFileAsync('gh.exe', ['auth', 'status', '--active']);
   const files = parseGitStatus(status.stdout);
   const [behind = 0, ahead = 0] = upstream.exitCode === 0 ? upstream.stdout.trim().split(/\s+/).map(Number) : [0, 0];
   const [hash = '', subject = '', committedAt = ''] = head.stdout.split('\0');
+  let alreadyIntegrated = target.branch === integrationBranch;
+  let integrationIsAncestor = target.branch === integrationBranch;
+  if (target.branch && target.branch !== 'detached HEAD' && target.branch !== integrationBranch) {
+    const integrated = await execFileAsync('git.exe', ['-C', project.repository, 'merge-base', '--is-ancestor', target.branch, integrationBranch]);
+    const basedOnIntegration = await execFileAsync('git.exe', ['-C', project.repository, 'merge-base', '--is-ancestor', integrationBranch, target.branch]);
+    alreadyIntegrated = integrated.exitCode === 0;
+    integrationIsAncestor = basedOnIntegration.exitCode === 0;
+  }
+  const canFastForward = Boolean(
+    integrationTarget && !target.mainCheckout && target.branch && target.branch !== 'detached HEAD'
+    && target.branch !== integrationBranch && files.length === 0 && integrationTarget.clean
+    && integrationIsAncestor && !alreadyIntegrated
+  );
   return {
     projectId: project.id, projectName: project.name, repository: project.repository,
+    worktree: workingDirectory, worktreeKind: target.kind, mainCheckout: target.mainCheckout, targets,
     branch: branch.stdout.trim(), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
     githubAuthenticated: ghAuth.exitCode === 0, clean: files.length === 0, files,
     ahead, behind, hasUpstream: upstream.exitCode === 0,
     lastCommit: hash ? { hash, subject, committedAt } : null,
+    integration: {
+      branch: integrationBranch, worktree: integrationTarget?.path || null,
+      selectedIsIntegration: target.branch === integrationBranch,
+      alreadyIntegrated, canFastForward,
+      reason: canFastForward ? null
+        : target.branch === integrationBranch ? 'Der Integrationsbranch ist bereits ausgewählt.'
+          : alreadyIntegrated ? `Dieser Aufgabenstand ist bereits in ${integrationBranch} enthalten.`
+            : files.length ? 'Committe zuerst die ausgewählten Änderungen.'
+              : !integrationTarget ? `Für ${integrationBranch} ist kein verfügbarer Worktree geöffnet.`
+                : !integrationTarget.clean ? `${integrationBranch} enthält lokale Änderungen.`
+                  : !integrationIsAncestor ? `Der Aufgabenbranch basiert nicht mehr direkt auf ${integrationBranch}.`
+                    : 'Der Aufgabenstand kann nicht automatisch integriert werden.',
+    },
   };
 }
 
-async function getGitFileDiff(project, requestedPath) {
+async function integrateGitWorktree(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const state = await getGitState(project, payload.worktree);
+  if (!state.integration.canFastForward || !state.integration.worktree) {
+    throw new Error(state.integration.reason || 'The selected task branch cannot be integrated safely.');
+  }
+  const merge = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'merge', '--ff-only', state.branch], { timeout: 120000 });
+  if (merge.exitCode !== 0) throw new Error(merge.stderr.trim() || merge.stdout.trim() || `Fast-forward into ${state.integration.branch} failed.`);
+  componentCache.delete(project.id);
+  return { ok: true, output: (merge.stdout || merge.stderr).trim(), state: await getGitState(project, state.integration.worktree) };
+}
+
+async function getGitFileDiff(project, requestedPath, requestedWorktree = null) {
   const filePath = String(requestedPath || '');
-  const state = await getGitState(project);
+  const state = await getGitState(project, requestedWorktree);
   const file = state.files.find((candidate) => candidate.path === filePath);
   if (!file || path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) throw new Error('Requested file is no longer part of the current Git status.');
   const limit = 400000;
   let text = '';
   if (file.untracked) {
-    const absolute = path.join(project.repository, filePath);
+    const absolute = path.join(state.worktree, filePath);
     const stat = await fsp.stat(absolute);
     if (stat.size > limit) return { path: filePath, diff: `Neue Datei · ${stat.size} Bytes\n\nVorschau wegen Dateigröße nicht geladen.`, truncated: true, binary: false };
     const buffer = await fsp.readFile(absolute);
     if (buffer.includes(0)) return { path: filePath, diff: `Neue Binärdatei · ${stat.size} Bytes`, truncated: false, binary: true };
     text = `--- /dev/null\n+++ b/${filePath.replace(/\\/g, '/')}\n@@ Neue Datei @@\n` + buffer.toString('utf8').split(/\r?\n/).map((line) => `+${line}`).join('\n');
   } else {
-    const cached = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--cached', '--no-ext-diff', '--unified=3', '--', filePath]);
-    const working = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--no-ext-diff', '--unified=3', '--', filePath]);
+    const cached = await execFileAsync('git.exe', ['-C', state.worktree, 'diff', '--cached', '--no-ext-diff', '--unified=3', '--', filePath]);
+    const working = await execFileAsync('git.exe', ['-C', state.worktree, 'diff', '--no-ext-diff', '--unified=3', '--', filePath]);
     text = [cached.stdout && '# Bereits gestaged\n' + cached.stdout, working.stdout && '# Arbeitsverzeichnis\n' + working.stdout].filter(Boolean).join('\n');
     if (!text && file.originalPath) text = `Umbenannt: ${file.originalPath} -> ${filePath}`;
   }
@@ -1278,7 +1401,7 @@ async function commitGitChanges(payload) {
   const requestedPaths = [...new Set(Array.isArray(payload.paths) ? payload.paths.map(String) : [])];
   if (!message || message.length > 200) throw new Error('Commit message must contain between 1 and 200 characters.');
   if (!requestedPaths.length) throw new Error('Select at least one changed file.');
-  const state = await getGitState(project);
+  const state = await getGitState(project, payload.worktree);
   const currentPaths = new Set(state.files.map((file) => file.path));
   if (requestedPaths.some((candidate) => !currentPaths.has(candidate) || path.isAbsolute(candidate) || candidate.split(/[\\/]/).includes('..'))) {
     throw new Error('A selected path is no longer part of the current Git status. Reload the review.');
@@ -1287,22 +1410,22 @@ async function commitGitChanges(payload) {
   if (alreadyStaged.some((candidate) => !requestedPaths.includes(candidate))) {
     throw new Error('There are already staged files outside the selection. Select them too or unstage them before committing.');
   }
-  const add = await execFileAsync('git.exe', ['-C', project.repository, 'add', '--', ...requestedPaths], { timeout: 60000 });
+  const add = await execFileAsync('git.exe', ['-C', state.worktree, 'add', '--', ...requestedPaths], { timeout: 60000 });
   if (add.exitCode !== 0) throw new Error(add.stderr.trim() || 'Git add failed.');
-  const commit = await execFileAsync('git.exe', ['-C', project.repository, 'commit', '-m', message], { timeout: 120000 });
+  const commit = await execFileAsync('git.exe', ['-C', state.worktree, 'commit', '-m', message], { timeout: 120000 });
   if (commit.exitCode !== 0) throw new Error(commit.stderr.trim() || commit.stdout.trim() || 'Git commit failed.');
   componentCache.delete(project.id);
-  return { ok: true, output: commit.stdout.trim(), state: await getGitState(project) };
+  return { ok: true, output: commit.stdout.trim(), state: await getGitState(project, state.worktree) };
 }
 
 async function pushGitBranch(payload) {
   const { project } = await getProject(String(payload.projectId || ''));
-  const state = await getGitState(project);
+  const state = await getGitState(project, payload.worktree);
   if (!state.branch || !/^[A-Za-z0-9._\/-]+$/.test(state.branch)) throw new Error('Current branch name is not safe to push.');
   if (!state.remote) throw new Error('No origin remote is configured.');
-  const push = await execFileAsync('git.exe', ['-C', project.repository, 'push', '-u', 'origin', state.branch], { timeout: 180000 });
+  const push = await execFileAsync('git.exe', ['-C', state.worktree, 'push', '-u', 'origin', state.branch], { timeout: 180000 });
   if (push.exitCode !== 0) throw new Error(push.stderr.trim() || push.stdout.trim() || 'Git push failed.');
-  return { ok: true, output: (push.stdout || push.stderr).trim(), state: await getGitState(project) };
+  return { ok: true, output: (push.stdout || push.stderr).trim(), state: await getGitState(project, state.worktree) };
 }
 
 async function openRun(runPath) {
@@ -1364,13 +1487,14 @@ const server = http.createServer(async (request, response) => {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getObsidian(project, url.searchParams.get('q'), url.searchParams.get('file')));
     }
     if (request.method === 'GET' && url.pathname === '/api/git') {
-      const { project } = await getProject(projectId); return sendJson(response, 200, await getGitState(project));
+      const { project } = await getProject(projectId); return sendJson(response, 200, await getGitState(project, url.searchParams.get('worktree')));
     }
     if (request.method === 'GET' && url.pathname === '/api/git/diff') {
-      const { project } = await getProject(projectId); return sendJson(response, 200, await getGitFileDiff(project, url.searchParams.get('path')));
+      const { project } = await getProject(projectId); return sendJson(response, 200, await getGitFileDiff(project, url.searchParams.get('path'), url.searchParams.get('worktree')));
     }
     if (request.method === 'POST' && url.pathname === '/api/git/commit') return sendJson(response, 200, await commitGitChanges(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/push') return sendJson(response, 200, await pushGitBranch(await readJsonBody(request)));
+    if (request.method === 'POST' && url.pathname === '/api/git/integrate') return sendJson(response, 200, await integrateGitWorktree(await readJsonBody(request)));
     if (request.method === 'GET' && url.pathname === '/api/jobs') {
       const rows = Array.from(jobs.values()).map(snapshotJob).filter((job) => !projectId || job.projectId === projectId || job.kind === 'provision' || job.kind === 'dashboard-command').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       return sendJson(response, 200, rows);

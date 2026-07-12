@@ -17,24 +17,27 @@
       <select id="projectSelect" aria-label="Aktives Projekt"></select>
       <button id="addProjectButton" class="button secondary" type="button">Projekt hinzufügen</button>
     </div>
+    <section class="provider-overview" aria-labelledby="providerHeading">
+      <div class="provider-overview-heading">
+        <h2 id="providerHeading">Provider</h2>
+        <span class="policy">Subscription-only</span>
+      </div>
+      <div id="providerList" class="provider-list" aria-live="polite"></div>
+    </section>
     <div class="topbar-actions">
+      <span id="backgroundActivity" class="background-activity hidden"></span>
       <span id="connectionState" class="connection pending">Verbindung wird geprüft</span>
     </div>
   </header>
 
   <main class="layout">
     <aside class="sidebar">
-      <section class="panel" aria-labelledby="providerHeading">
-        <div class="section-heading">
-          <h2 id="providerHeading">Provider</h2>
-          <span class="policy">Subscription-only</span>
-        </div>
-        <div id="providerList" class="provider-list" aria-live="polite"></div>
-      </section>
-
       <section class="panel" aria-labelledby="systemHeading">
-        <div class="section-heading"><h2 id="systemHeading">Workflowstatus</h2></div>
+        <div class="section-heading workflow-heading">
+          <div><h2 id="systemHeading">Workflowstatus</h2><p id="workflowContext">Aktueller Projektablauf</p></div>
+        </div>
         <div id="componentList" class="component-list" aria-live="polite"></div>
+        <p class="workflow-scope-note">Zeigt nur Komponenten, die der aktuelle Auftrag in diesem Projekt benötigt.</p>
       </section>
     </aside>
 
@@ -154,6 +157,10 @@
               <div><h2 id="gitHeading">Änderungen prüfen</h2><p id="gitProjectName">Lokaler Repository-Zustand</p></div>
               <span id="gitState" class="status warn">wird geprüft</span>
             </div>
+            <div class="git-context-bar">
+              <label class="git-target-control" for="gitTargetSelect"><span>Arbeitsstand</span><select id="gitTargetSelect" aria-label="Git-Arbeitsstand auswählen"></select></label>
+              <div class="git-branch-flow"><span>Freigabeweg</span><strong id="gitBranchFlow">Aufgabe → Integrationsbranch → main</strong><small>Ein Aufgabenbranch wird niemals direkt nach main befördert.</small></div>
+            </div>
             <div id="gitSummary" class="git-summary" aria-live="polite"></div>
             <div class="git-review-layout">
               <section class="git-files" aria-labelledby="gitFilesHeading">
@@ -168,7 +175,8 @@
             <div class="git-actions">
               <div class="git-commit-control"><label for="gitCommitMessage">Commit-Nachricht</label><input id="gitCommitMessage" maxlength="200" placeholder="Kurze, konkrete Zusammenfassung"></div>
               <button id="gitCommitButton" class="button secondary" type="button">Nur committen</button>
-              <button id="gitCommitPushButton" class="button primary" type="button">Committen & pushen</button>
+              <button id="gitCommitPushButton" class="button secondary" type="button">Committen & Branch pushen</button>
+              <button id="gitIntegrateButton" class="button primary hidden" type="button">In Integrationsbranch übernehmen</button>
               <button id="gitPushButton" class="button secondary hidden" type="button">Ausstehende Commits pushen</button>
               <span id="gitMessage" class="form-message" role="status"></span>
             </div>

@@ -56,3 +56,5 @@
 - Switched Hermes from final-output-only one-shot execution to visible non-interactive chat progress and corrected Serena MCP names to the native `mcp__serena__*` form.
 - Disabled unsupported native thinking for the local `polis-coder` Hermes profile and prevented echoed prompt sentinels or visible provider errors from producing false PASS results.
 - Isolated local Hermes read-only runs in disposable detached worktrees, removed write-capable file tools from that mode and blocked all local Hermes write tasks after instruction-adherence violations.
+- Connected `Prüfen & Git` to every Git-registered project worktree, defaulting to the latest changed task worktree and keeping per-file review, commit and push operations bound to the selected task branch.
+- Simplified Git promotion to task branch → integration branch → `main`, based new write worktrees on `develop` when present, added a guarded fast-forward into the clean integration checkout and moved the worktree selector to the left of the review surface.

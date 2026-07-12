@@ -45,7 +45,7 @@ Serena is global but project-activated. Its caches and project metadata live und
 
 The local Hermes adapter receives the complete bounded execution prompt directly. It does not depend on the local model deciding to open an external prompt file. A 24,000-character guard keeps the invocation below the Windows command-line budget; larger local tasks must be narrowed or use Codex/Claude.
 
-Write tasks receive a unique `ai/*` branch in an automatic worktree. The canonical checkout is never used as the write directory.
+Write tasks receive a unique `ai/*` branch in an automatic worktree based on the project's integration branch. A local `develop` branch is preferred when present; otherwise the repository's default branch is used. The canonical checkout is never used as the write directory.
 
 ## Dynamic inventory
 
@@ -55,7 +55,9 @@ Catalog entries may also declare workflow role, activation and cost policy. Thes
 
 ## Git boundary
 
-The Git view is a review and publication surface, not an editor. Status is compact and a read-only diff is loaded only for the file the owner opens. Checkboxes are reserved for commit selection. A selected commit can remain local or be followed by an explicitly confirmed push. Existing staged files outside the selection block the operation. Push never uses force.
+The Git view is a review and publication surface, not an editor. It discovers every worktree registered with the selected project directly from Git, defaults to the latest changed task worktree and allows the owner to switch explicitly between task worktrees and the integration checkout. Status is compact and a read-only diff is loaded only for the file the owner opens. Checkboxes are reserved for commit selection. Commit and push commands run in the selected worktree, never silently in another checkout.
+
+Promotion follows one visible path: task branch → integration branch → `main`. After a task branch is clean and committed, the dashboard may fast-forward it into the clean integration checkout. It refuses divergent history and never starts a conflict-producing merge. Pushing the integration branch remains a separate owner action; promotion from the integration branch to `main` remains a reviewed pull request outside automatic task execution. Existing staged files outside the selection block the operation. Push never uses force.
 
 ## Active project overview
 

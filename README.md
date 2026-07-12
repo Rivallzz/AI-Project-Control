@@ -7,10 +7,10 @@ AI Project Control is a local, multi-project workspace for running controlled ta
 - One chat-like task and feedback timeline per project.
 - Provider routing: Codex, then Claude Code, then Hermes with local Ollama.
 - A visible switch that disables subscription-token use and forces the local Hermes/Ollama path.
-- Automatic isolated Git worktrees for write tasks.
+- Automatic isolated Git worktrees for write tasks, based on the project's integration branch (`develop` when present).
 - Live provider, handoff and tool output.
 - Unified Graphify relationship explorer and automatically loaded Obsidian working notes.
-- On-demand per-file Git review, selected-file commits and explicit branch pushes without a repository editor.
+- Worktree-aware per-file Git review with a guarded task-branch → integration-branch → `main` promotion path.
 - Automatic local project provisioning with Git, documentation, Graphify and Obsidian.
 - Machine and project integration inventory, including Hermes, ECC and MCP.
 - Symbol-level code navigation through Serena and compact quota handoffs through cli-continues.

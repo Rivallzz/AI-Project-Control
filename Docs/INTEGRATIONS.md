@@ -26,7 +26,7 @@ That extract is supplemental. The task package, current worktree, Git status, di
 
 ## Git And GitHub
 
-Git status, branch, upstream, remote and text diffs are read through the local Git CLI. GitHub authentication is reported through GitHub CLI. Commit and push are owner-triggered actions in separate confirmation steps. The dashboard does not merge, force-push or edit repository files in the review view.
+Git status, branch, upstream, remote, worktrees and text diffs are read through the local Git CLI. GitHub authentication is reported through GitHub CLI. Commit, task-to-integration fast-forward and push are owner-triggered actions in separate confirmation steps. A safe fast-forward never resolves conflicts or promotes directly to `main`; only the integration branch is intended to enter `main` through a reviewed pull request. The dashboard never force-pushes or edits repository files in the review view.
 
 ## Hermes And ECC
 

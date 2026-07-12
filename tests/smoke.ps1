@@ -40,6 +40,10 @@ try {
 
     New-Item -ItemType Directory -Force -Path $testRepository | Out-Null
     & git.exe -C $testRepository init -b main | Out-Null
+    Set-Content -LiteralPath (Join-Path $testRepository 'README.md') -Value '# Test Repository' -Encoding utf8
+    & git.exe -C $testRepository add README.md
+    & git.exe -C $testRepository -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Initialize test repository' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create initial test commit.' }
     $projectBody = @{
         name = 'ExampleProject'
         repository = $testRepository
@@ -77,6 +81,11 @@ try {
     if ($indexSource -match 'data-view="projects"' -or $indexSource -match 'graphZoomIn') { throw 'Redundant project navigation or graph zoom buttons are still present.' }
     if ($appSource -notmatch '\[\.\.\.runs\]\.reverse\(\)') { throw 'Conversation history is not rendered oldest-first.' }
     if ($appSource -notmatch "addEventListener\('paste'" -or $appSource -match 'data-open-run') { throw 'Chat paste support or simplified conversation actions are incorrect.' }
+    if ($indexSource -notmatch 'class="provider-overview"' -or $indexSource -notmatch 'id="backgroundActivity"') { throw 'Compact provider header or background task activity is missing.' }
+    if ($indexSource -notmatch 'id="workflowContext"' -or $appSource -notmatch 'function renderJobActivity' -or $appSource -notmatch 'needsCodeTools') { throw 'Project-specific workflow filtering is missing.' }
+    if ($appSource -match "componentRow\('ECC'" -or $appSource -match "componentRow\('Hermes'" ) { throw 'Workflow sidebar still renders unrelated global inventory rows.' }
+    if ($indexSource -notmatch 'id="gitTargetSelect"' -or $appSource -notmatch 'worktree=\$\{encodeURIComponent\(gitData\.worktree\)\}') { throw 'Git review is not connected to selectable task worktrees.' }
+    if ($indexSource -notmatch 'id="gitIntegrateButton"' -or $indexSource -notmatch 'id="gitBranchFlow"' -or $appSource -notmatch '/api/git/integrate') { throw 'Task-to-integration-branch promotion controls are missing.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
@@ -105,6 +114,29 @@ try {
     if ($dirtyGitState.PSObject.Properties.Name -contains 'diff') { throw 'Git status endpoint still exposes a combined repository diff.' }
     $fileDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=review-me.txt" -TimeoutSec 10
     if ($fileDiff.diff -notmatch 'review only' -or $fileDiff.diff -match 'must not appear') { throw 'Git file diff did not isolate the requested file.' }
+    $reviewWorktree = Join-Path $dataRoot 'review-worktree'
+    $worktreeErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & git -C $testRepository worktree add -b ai/dashboard-review-test $reviewWorktree HEAD 2>$null | Out-Null
+    $worktreeExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $worktreeErrorAction
+    if ($worktreeExitCode -ne 0) { throw 'Could not create test worktree.' }
+    Set-Content -LiteralPath (Join-Path $reviewWorktree 'task-change.txt') -Value 'task worktree change' -Encoding utf8
+    $worktreeGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
+    if ($worktreeGitState.branch -ne 'ai/dashboard-review-test' -or $worktreeGitState.mainCheckout -or $worktreeGitState.worktree -ne $reviewWorktree) { throw 'Git review did not prioritize the changed task worktree.' }
+    if ($worktreeGitState.targets.Count -lt 2 -or -not ($worktreeGitState.files | Where-Object { $_.path -eq 'task-change.txt' })) { throw 'Git review did not expose all worktrees or the task change.' }
+    $encodedWorktree = [uri]::EscapeDataString($reviewWorktree)
+    $worktreeDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&worktree=$encodedWorktree&path=task-change.txt" -TimeoutSec 10
+    if ($worktreeDiff.diff -notmatch 'task worktree change') { throw 'Git worktree file diff did not use the selected task worktree.' }
+    Remove-Item -LiteralPath (Join-Path $testRepository 'review-me.txt'), (Join-Path $testRepository 'other.txt') -Force
+    & git.exe -C $reviewWorktree add task-change.txt
+    & git.exe -C $reviewWorktree -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Add task worktree change' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not commit the test worktree change.' }
+    $readyToIntegrate = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedWorktree" -TimeoutSec 10
+    if ($readyToIntegrate.integration.branch -ne 'main' -or -not $readyToIntegrate.integration.canFastForward) { throw 'Clean task branch was not approved for a safe integration-branch fast-forward.' }
+    $integrateBody = @{ projectId = $project.id; worktree = $reviewWorktree } | ConvertTo-Json
+    $integrated = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/integrate" -ContentType 'application/json' -Body $integrateBody -TimeoutSec 15
+    if ($integrated.state.branch -ne 'main' -or $integrated.state.lastCommit.subject -ne 'Add task worktree change') { throw 'Task branch was not fast-forwarded into the integration branch.' }
     if ($appSource -notmatch "addEventListener\('wheel'" -or $appSource -notmatch "addEventListener\('pointermove'") { throw 'Graph mouse zoom or pan controls are missing.' }
 
     $invalidInstallerBody = @{ projectId = $project.id; installKey = 'not-approved' } | ConvertTo-Json
