@@ -104,6 +104,11 @@ function parseJsonOutput(text) {
   return JSON.parse(text.slice(start));
 }
 
+async function readJsonFile(filePath) {
+  const text = await fsp.readFile(filePath, 'utf8');
+  return JSON.parse(text.replace(/^\uFEFF/, ''));
+}
+
 function safeId(value) {
   const base = String(value || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
   return base || 'project';
@@ -125,7 +130,7 @@ async function loadProjects() {
     await saveProjects(initial);
     return initial;
   }
-  const registry = JSON.parse(await fsp.readFile(PROJECTS_PATH, 'utf8'));
+  const registry = await readJsonFile(PROJECTS_PATH);
   if (!Array.isArray(registry.projects) || registry.projects.length === 0) throw new Error('Project registry is invalid.');
   registry.projects = registry.projects.map(normalizedProject);
   if (!registry.projects.some((project) => project.id === registry.activeProjectId)) {
@@ -216,7 +221,7 @@ async function loadSystems() {
     await saveSystems(initial);
     return initial;
   }
-  const registry = JSON.parse(await fsp.readFile(SYSTEMS_PATH, 'utf8'));
+  const registry = await readJsonFile(SYSTEMS_PATH);
   if (!Array.isArray(registry.systems)) registry.systems = [];
   return registry;
 }
@@ -259,7 +264,7 @@ async function loadMemory(projectId) {
   await fsp.mkdir(MEMORY_ROOT, { recursive: true });
   const memoryPath = path.join(MEMORY_ROOT, `${safeId(projectId)}.json`);
   if (!fs.existsSync(memoryPath)) return { projectId, notes: [] };
-  const memory = JSON.parse(await fsp.readFile(memoryPath, 'utf8'));
+  const memory = await readJsonFile(memoryPath);
   if (!Array.isArray(memory.notes)) memory.notes = [];
   return memory;
 }
