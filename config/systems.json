@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 1,
+  "systems": [
+    {
+      "id": "node",
+      "name": "Node.js",
+      "category": "Runtime",
+      "tier": "required",
+      "reason": "Laufzeit des lokalen Dashboards.",
+      "detect": { "type": "command", "command": "node.exe", "args": ["--version"] },
+      "install": { "name": "Node.js LTS", "command": "winget.exe", "args": ["install", "--id", "OpenJS.NodeJS.LTS", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "category": "Entwicklung",
+      "tier": "required",
+      "reason": "Versionskontrolle, Branches und sichere Worktrees.",
+      "detect": { "type": "command", "command": "git.exe", "args": ["--version"] },
+      "install": { "name": "Git", "command": "winget.exe", "args": ["install", "--id", "Git.Git", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "powershell",
+      "name": "PowerShell 7",
+      "category": "Runtime",
+      "tier": "required",
+      "reason": "Führt Router, Statusprüfungen und lokale Übergaben aus.",
+      "detect": { "type": "command", "command": "pwsh.exe", "args": ["--version"] },
+      "install": { "name": "PowerShell 7", "command": "winget.exe", "args": ["install", "--id", "Microsoft.PowerShell", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "codex",
+      "name": "Codex CLI",
+      "category": "KI-Agent",
+      "tier": "recommended",
+      "reason": "Primärer Coding-Agent mit bestehendem ChatGPT-Kontingent.",
+      "detect": { "type": "command", "command": "codex.exe", "args": ["--version"] },
+      "install": { "name": "Codex CLI", "command": "npm.cmd", "args": ["install", "--global", "@openai/codex"] }
+    },
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "category": "KI-Agent",
+      "tier": "recommended",
+      "reason": "Zweiter Coding-Agent und Provider-Fallback.",
+      "detect": { "type": "command", "command": "claude.exe", "args": ["--version"] },
+      "install": { "name": "Claude Code", "command": "npm.cmd", "args": ["install", "--global", "@anthropic-ai/claude-code"] }
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes Agent",
+      "category": "Orchestrierung",
+      "tier": "recommended",
+      "reason": "Kontrollierte Orchestrierung komplexer, mehrstufiger Aufgaben.",
+      "detect": { "type": "command", "command": "hermes.exe", "args": ["--version"] }
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "category": "Lokale KI",
+      "tier": "recommended",
+      "reason": "Kostenloser lokaler Fallback ohne Abo-Tokens.",
+      "detect": { "type": "ollama" },
+      "install": { "name": "Ollama", "command": "winget.exe", "args": ["install", "--id", "Ollama.Ollama", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "python",
+      "name": "Python",
+      "category": "Runtime",
+      "tier": "recommended",
+      "reason": "Basis für Graphify, lokale Analyse und Automatisierung.",
+      "detect": { "type": "command", "command": "python.exe", "args": ["--version"] },
+      "install": { "name": "Python 3.12", "command": "winget.exe", "args": ["install", "--id", "Python.Python.3.12", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "uv",
+      "name": "uv",
+      "category": "Runtime",
+      "tier": "recommended",
+      "reason": "Reproduzierbare, schnelle Python-Umgebungen.",
+      "detect": { "type": "command", "command": "uv.exe", "args": ["--version"] },
+      "install": { "name": "uv", "command": "winget.exe", "args": ["install", "--id", "astral-sh.uv", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "graphify",
+      "name": "Graphify",
+      "category": "Kontext",
+      "tier": "recommended",
+      "reason": "Grenzt relevanten Projektkontext vor Agentenläufen ein.",
+      "detect": { "type": "pythonModule", "module": "graphify" }
+    },
+    {
+      "id": "obsidian",
+      "name": "Obsidian",
+      "category": "Wissen",
+      "tier": "recommended",
+      "reason": "Persönliches Arbeitswissen ohne die Repository-Wahrheit zu duplizieren.",
+      "detect": { "type": "path", "paths": ["{OBSIDIAN_VAULT}"] },
+      "install": { "name": "Obsidian", "command": "winget.exe", "args": ["install", "--id", "Obsidian.Obsidian", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "ecc",
+      "name": "ECC",
+      "category": "Kontext",
+      "tier": "recommended",
+      "reason": "Reduziert dauerhaften Agentenkontext und unterstützt gezielte Retrieval-Muster.",
+      "detect": { "type": "path", "paths": ["{ECC_ROOT}"] }
+    },
+    {
+      "id": "mcp",
+      "name": "MCP",
+      "category": "Werkzeugverbindung",
+      "tier": "recommended",
+      "reason": "Standardisierte lokale Werkzeugverbindungen; MCP selbst verursacht keine Kosten.",
+      "detect": { "type": "mcp" }
+    },
+    {
+      "id": "github-cli",
+      "name": "GitHub CLI",
+      "category": "Entwicklung",
+      "tier": "recommended",
+      "reason": "Kontrollierte GitHub-Aktionen aus dem Dashboard.",
+      "detect": { "type": "command", "command": "gh.exe", "args": ["--version"] },
+      "install": { "name": "GitHub CLI", "command": "winget.exe", "args": ["install", "--id", "GitHub.cli", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "ripgrep",
+      "name": "ripgrep",
+      "category": "Entwicklung",
+      "tier": "recommended",
+      "reason": "Schnelle, tokenarme Dateisuche.",
+      "detect": { "type": "command", "command": "rg.exe", "args": ["--version"] },
+      "install": { "name": "ripgrep", "command": "winget.exe", "args": ["install", "--id", "BurntSushi.ripgrep.MSVC", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "jq",
+      "name": "jq",
+      "category": "Entwicklung",
+      "tier": "recommended",
+      "reason": "Strukturierte JSON-Auswertung ohne LLM-Aufruf.",
+      "detect": { "type": "command", "command": "jq.exe", "args": ["--version"] },
+      "install": { "name": "jq", "command": "winget.exe", "args": ["install", "--id", "jqlang.jq", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "cc-switch",
+      "name": "CC Switch",
+      "category": "Provider",
+      "tier": "recommended",
+      "reason": "Optionale Komfortschicht für Provider-Konfigurationen.",
+      "detect": { "type": "path", "paths": ["{LOCALAPPDATA}\\Programs\\CC-Switch\\cc-switch.exe"] }
+    },
+    {
+      "id": "comfy-desktop",
+      "name": "Comfy Desktop",
+      "category": "Bildgenerierung",
+      "tier": "project",
+      "capabilities": ["image-generation"],
+      "reason": "Lokale Bild- und Assetgenerierung für passende Projekte.",
+      "detect": { "type": "path", "paths": ["{LOCALAPPDATA}\\Programs\\Comfy Desktop\\Comfy Desktop.exe"] }
+    },
+    {
+      "id": "comfy-cloud",
+      "name": "Comfy Cloud",
+      "category": "Bildgenerierung",
+      "tier": "project",
+      "capabilities": ["image-generation"],
+      "reason": "Optionale Cloud-Erweiterung; wegen möglicher Zusatzkosten standardmäßig ungenutzt.",
+      "detect": { "type": "comfyCloud" }
+    },
+    {
+      "id": "flux-local",
+      "name": "Flux lokal",
+      "category": "Bildmodell",
+      "tier": "project",
+      "capabilities": ["image-generation"],
+      "reason": "Lokales Bildmodell für Projekte mit Assetpipeline.",
+      "detect": { "type": "flux" }
+    },
+    {
+      "id": "ffmpeg",
+      "name": "FFmpeg",
+      "category": "Medienpipeline",
+      "tier": "project",
+      "capabilities": ["media"],
+      "reason": "Audio-, Video- und Medienverarbeitung für passende Projekte.",
+      "detect": { "type": "command", "command": "ffmpeg.exe", "args": ["-version"] },
+      "install": { "name": "FFmpeg", "command": "winget.exe", "args": ["install", "--id", "Gyan.FFmpeg", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "imagemagick",
+      "name": "ImageMagick",
+      "category": "Bildpipeline",
+      "tier": "project",
+      "capabilities": ["image-generation"],
+      "reason": "Automatische Bildverarbeitung für Projekte mit Assetpipeline.",
+      "detect": { "type": "command", "command": "magick.exe", "args": ["-version"] },
+      "install": { "name": "ImageMagick", "command": "winget.exe", "args": ["install", "--id", "ImageMagick.ImageMagick", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "7zip",
+      "name": "7-Zip",
+      "category": "Archive",
+      "tier": "project",
+      "capabilities": ["asset-pipeline"],
+      "reason": "Archive und Assetpakete für passende Projekte.",
+      "detect": { "type": "pathOrCommand", "paths": ["{PROGRAMFILES}\\7-Zip\\7z.exe"], "command": "7z.exe", "args": ["i"] },
+      "install": { "name": "7-Zip", "command": "winget.exe", "args": ["install", "--id", "7zip.7zip", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] }
+    },
+    {
+      "id": "godot",
+      "name": "Godot",
+      "category": "Game Engine",
+      "tier": "project",
+      "capabilities": ["godot"],
+      "reason": "Game Engine für Godot-Projekte.",
+      "detect": {
+        "type": "commandOrSearch",
+        "command": "godot.exe",
+        "args": ["--version"],
+        "roots": ["{HOME}\\Downloads", "{LOCALAPPDATA}\\Programs"],
+        "filePattern": "^Godot.*\\.exe$"
+      }
+    }
+  ]
+}

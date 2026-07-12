@@ -48,13 +48,70 @@ try {
     } | ConvertTo-Json
     $project = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/projects" -ContentType 'application/json' -Body $projectBody -TimeoutSec 10
     if ($project.name -ne 'ExampleProject' -or -not (Test-Path -LiteralPath $testObsidian)) { throw 'Project registration or Obsidian integration failed.' }
+    $obsidianNotes = Get-ChildItem -LiteralPath $testObsidian -Recurse -Filter '*.md'
+    if ($obsidianNotes.Count -lt 8) { throw 'Obsidian working area was not initialized with useful indexes.' }
+
+    $portfolio = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/portfolio" -TimeoutSec 20
+    if (-not ($portfolio.projects | Where-Object { $_.id -eq $project.id })) { throw 'Portfolio did not include the registered project.' }
+
+    $badAttachmentBody = @{
+        projectId = $project.id
+        task = 'Attachment validation only'
+        provider = 'Ollama'
+        mode = 'ReadOnly'
+        useSubscriptionTokens = $false
+        attachments = @(@{ name = 'unsafe.txt'; type = 'text/plain'; dataUrl = 'data:text/plain;base64,dGVzdA==' })
+    } | ConvertTo-Json -Depth 5
+    try {
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/tasks" -ContentType 'application/json' -Body $badAttachmentBody -TimeoutSec 10 | Out-Null
+        throw 'Unsupported attachment type was accepted.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Unsupported attachment type was accepted.') { throw }
+    }
+
+    $indexSource = Get-Content -Raw -LiteralPath (Join-Path $root 'public\index.html')
+    $appSource = Get-Content -Raw -LiteralPath (Join-Path $root 'public\app.js')
+    if ($indexSource -notmatch 'attachmentInput' -or $indexSource -notmatch 'data-view="portfolio"' -or $indexSource -notmatch 'busyOverlay') { throw 'Responsive chat, portfolio or loading controls are missing.' }
+    if ($indexSource -notmatch 'data-view="git"' -or $indexSource -notmatch 'knowledgeSearch' -or $indexSource -match 'Notizen laden') { throw 'Git review or automatic unified knowledge controls are missing.' }
+    if ($appSource -notmatch '\[\.\.\.runs\]\.reverse\(\)') { throw 'Conversation history is not rendered oldest-first.' }
+    if ($appSource -notmatch "addEventListener\('paste'" -or $appSource -match 'data-open-run') { throw 'Chat paste support or simplified conversation actions are incorrect.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
     if ($system.name -ne 'Example Tool') { throw 'System registration failed.' }
 
-    Set-Content -LiteralPath $testTask -Value "# Goal`n`nDry-run routing validation." -Encoding utf8
+    $inventory = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/systems?projectId=$($project.id)" -TimeoutSec 30
+    $nodeSystem = $inventory.global | Where-Object { $_.name -eq 'Node.js' }
+    if ($null -eq $nodeSystem -or $nodeSystem.tier -ne 'required') { throw 'System inventory does not classify required foundations.' }
+    $serverSource = Get-Content -Raw -LiteralPath (Join-Path $root 'server.js')
+    if ($serverSource -match 'SYSTEM_METADATA|INSTALL_CATALOG') { throw 'System definitions are still hardcoded in server.js.' }
+    $catalog = Get-Content -Raw -LiteralPath (Join-Path $root 'config\systems.json') | ConvertFrom-Json
+    if ($catalog.schemaVersion -ne 1 -or $catalog.systems.Count -lt 10) { throw 'Versioned system catalog is invalid.' }
+    $ignoreSource = Get-Content -Raw -LiteralPath (Join-Path $root '.gitignore')
+    if ($ignoreSource -match '(?m)^systems\.json$') { throw 'The versioned system catalog is hidden by an overly broad ignore rule.' }
+
+    $gitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
+    if ($gitState.branch -ne 'main' -or -not $gitState.clean) { throw 'Git review endpoint did not report the clean test repository.' }
+    Set-Content -LiteralPath (Join-Path $testRepository 'review-me.txt') -Value 'review only' -Encoding utf8
+    $dirtyGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
+    if ($dirtyGitState.clean -or -not ($dirtyGitState.files | Where-Object { $_.path -eq 'review-me.txt' })) { throw 'Git review endpoint did not expose the changed file.' }
+
+    $invalidInstallerBody = @{ projectId = $project.id; installKey = 'not-approved' } | ConvertTo-Json
+    try {
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems/install" -ContentType 'application/json' -Body $invalidInstallerBody -TimeoutSec 10 | Out-Null
+        throw 'Unknown installer was accepted.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Unknown installer was accepted.') { throw }
+    }
+
+    Set-Content -LiteralPath $testTask -Value "# Goal`n`nPrüfe UTF-8: äöü ß → Dry-run routing validation." -Encoding utf8
     $router = Join-Path $root 'router\Invoke-ProjectAiTask.ps1'
+    $routerSource = Get-Content -Raw -LiteralPath $router
+    if ($routerSource -notmatch 'StandardInputEncoding\s*=\s*\$utf8') { throw 'Router does not explicitly enforce UTF-8 stdin.' }
+    if ($routerSource -notmatch '\[Console\]::OutputEncoding\s*=\s*\$consoleUtf8') { throw 'Router does not explicitly enforce UTF-8 console output.' }
+    if ($routerSource -notmatch 'Read-only context policy') { throw 'Router does not define the lightweight advisory context policy.' }
     $routerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs') -LocalOnly -DryRun
     if ($LASTEXITCODE -ne 0 -or ($routerOutput -join "`n") -notmatch 'ollama') { throw 'Local-only provider routing dry-run failed.' }
 

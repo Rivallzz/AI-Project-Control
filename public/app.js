@@ -1,22 +1,24 @@
 'use strict';
 
 const elements = {
-  connection: document.getElementById('connectionState'), refresh: document.getElementById('refreshButton'),
+  connection: document.getElementById('connectionState'),
   projectSelect: document.getElementById('projectSelect'), addProject: document.getElementById('addProjectButton'),
   providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
+  attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
+  attachmentPreview: document.getElementById('attachmentPreview'),
   provider: document.getElementById('providerSelect'), mode: document.getElementById('modeSelect'),
   useSubscriptionTokens: document.getElementById('useSubscriptionTokens'),
   start: document.getElementById('startButton'), formMessage: document.getElementById('formMessage'), jobs: document.getElementById('jobList'),
-  knowledgeProjectName: document.getElementById('knowledgeProjectName'), graphSearch: document.getElementById('graphSearch'),
-  graphRefresh: document.getElementById('graphRefreshButton'), graphStats: document.getElementById('graphStats'),
+  knowledgeProjectName: document.getElementById('knowledgeProjectName'), knowledgeSearch: document.getElementById('knowledgeSearch'),
+  knowledgeLoadState: document.getElementById('knowledgeLoadState'), graphStats: document.getElementById('graphStats'),
   graphCanvas: document.getElementById('graphCanvas'), graphDetails: document.getElementById('graphDetails'),
-  obsidianSearch: document.getElementById('obsidianSearch'), obsidianRefresh: document.getElementById('obsidianRefreshButton'),
+  graphZoomOut: document.getElementById('graphZoomOut'), graphZoomFit: document.getElementById('graphZoomFit'), graphZoomIn: document.getElementById('graphZoomIn'),
   obsidianStats: document.getElementById('obsidianStats'), noteList: document.getElementById('noteList'),
   noteTitle: document.getElementById('noteTitle'), noteContent: document.getElementById('noteContent'),
-  history: document.getElementById('conversationHistory'), historyRefresh: document.getElementById('historyRefreshButton'),
+  history: document.getElementById('conversationHistory'),
   memoryForm: document.getElementById('memoryForm'), memoryText: document.getElementById('memoryText'), memoryMessage: document.getElementById('memoryMessage'),
-  systemsRefresh: document.getElementById('systemsRefreshButton'), projectSystems: document.getElementById('projectSystems'),
+  systemsRefresh: document.getElementById('systemsRefreshButton'), systemSetupSummary: document.getElementById('systemSetupSummary'), projectSystems: document.getElementById('projectSystems'),
   globalSystems: document.getElementById('globalSystems'), systemForm: document.getElementById('systemForm'),
   systemName: document.getElementById('systemName'), systemType: document.getElementById('systemType'), systemPath: document.getElementById('systemPath'),
   systemScope: document.getElementById('systemScope'), systemNote: document.getElementById('systemNote'), systemMessage: document.getElementById('systemMessage'),
@@ -26,6 +28,12 @@ const elements = {
   provisionVisibility: document.getElementById('provisionVisibility'), provisionMessage: document.getElementById('provisionMessage'),
   projectMessage: document.getElementById('projectMessage'),
   projectList: document.getElementById('projectList'),
+  attentionList: document.getElementById('attentionList'),
+  portfolioList: document.getElementById('portfolioList'),
+  gitProjectName: document.getElementById('gitProjectName'), gitState: document.getElementById('gitState'), gitSummary: document.getElementById('gitSummary'),
+  gitFileList: document.getElementById('gitFileList'), gitDiff: document.getElementById('gitDiffContent'), gitSelectAll: document.getElementById('gitSelectAll'),
+  gitCommitMessage: document.getElementById('gitCommitMessage'), gitCommit: document.getElementById('gitCommitButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
+  busyOverlay: document.getElementById('busyOverlay'), busyTitle: document.getElementById('busyTitle'), busyMessage: document.getElementById('busyMessage'),
 };
 
 let config = null;
@@ -35,8 +43,11 @@ let refreshing = false;
 let graphData = null;
 let graphPositions = new Map();
 let selectedGraphNodeId = null;
-let graphSearchTimer = null;
-let obsidianSearchTimer = null;
+let graphZoom = 1;
+let knowledgeSearchTimer = null;
+let gitData = null;
+let selectedAttachments = [];
+let feedFilter = 'important';
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
@@ -47,6 +58,13 @@ async function api(path, options = {}) {
 
 function projectQuery() {
   return `projectId=${encodeURIComponent(activeProject.id)}`;
+}
+
+function setBusy(active, title = 'Bitte warten', message = 'Lokaler Projektzustand wird geladen.') {
+  elements.busyTitle.textContent = title; elements.busyMessage.textContent = message;
+  elements.busyOverlay.classList.toggle('hidden', !active);
+  elements.projectSelect.disabled = active;
+  document.body.setAttribute('aria-busy', active ? 'true' : 'false');
 }
 
 function statusClass(ok, available) {
@@ -86,11 +104,11 @@ function renderProviders(status) {
   elements.providerList.append(providerRow('3. Ollama', ollama, ollama.available ? `${ollama.model} · lokal` : ollama.reason || 'Nicht verfügbar'));
 }
 
-function componentRow(name, ok, detail) {
+function componentRow(name, ok, detail, warning = false) {
   const row = document.createElement('div'); row.className = 'component-row';
   const line = document.createElement('div'); line.className = 'row-line';
   const label = document.createElement('span'); label.className = 'row-name'; label.textContent = name;
-  const state = document.createElement('span'); state.className = `status ${ok ? 'ok' : 'fail'}`; state.textContent = ok ? 'ok' : 'fehlt';
+  const state = document.createElement('span'); state.className = `status ${warning ? 'warn' : ok ? 'ok' : 'fail'}`; state.textContent = warning ? 'achtung' : ok ? 'ok' : 'fehlt';
   line.append(label, state);
   const description = document.createElement('div'); description.className = 'row-detail'; description.textContent = detail;
   row.append(line, description); return row;
@@ -107,7 +125,7 @@ function renderComponents(data) {
   elements.componentList.append(componentRow('ECC', data.ecc.ok, `Commit ${data.ecc.commit}`));
   elements.componentList.append(componentRow('MCP', data.mcp.ok, data.mcp.text));
   elements.componentList.append(componentRow('Obsidian', data.obsidian.ok, data.obsidian.path));
-  elements.componentList.append(componentRow('Repository', data.repository.ok && data.repository.clean, `${data.repository.branch} · ${data.repository.clean ? 'clean' : 'Änderungen vorhanden'}`));
+  elements.componentList.append(componentRow('Repository', data.repository.ok, `${data.repository.branch} · ${data.repository.clean ? 'clean' : 'Änderungen vorhanden'}`, data.repository.ok && !data.repository.clean));
 }
 
 function formatTime(value) {
@@ -139,9 +157,15 @@ function renderJobs(jobs) {
     const feed = document.createElement('div'); feed.className = 'feed-log';
     const stdoutLines = String(job.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: line.includes('AI_EVENT') || /^\[\d{4}-/.test(line) ? 'event' : '' }));
     const stderrLines = String(job.stderr || '').split(/\r?\n/).filter(Boolean).map((line) => ({ line, kind: 'error' }));
-    const lines = [...stdoutLines, ...stderrLines].slice(-80);
+    const allLines = [...stdoutLines, ...stderrLines];
+    const lines = allLines.filter((entry) => {
+      if (feedFilter === 'all') return true;
+      if (feedFilter === 'errors') return entry.kind === 'error' || /fail|error|blocked|quota/i.test(entry.line);
+      return entry.kind === 'error' || entry.kind === 'event' || /AI_PROJECT_ROUTER_OK|AI_RUN_DIRECTORY|provider=|fallback|complete|blocked/i.test(entry.line);
+    }).slice(feedFilter === 'all' ? -80 : -30);
     if (!lines.length) {
-      const waiting = document.createElement('div'); waiting.className = 'feed-line'; waiting.textContent = 'Warte auf Agentenausgabe…'; feed.append(waiting);
+      const waiting = document.createElement('div'); waiting.className = 'feed-line';
+      waiting.textContent = allLines.length ? 'Keine Ereignisse für diesen Filter.' : 'Warte auf Agentenausgabe…'; feed.append(waiting);
     } else {
       for (const entry of lines) {
         const line = document.createElement('div'); line.className = `feed-line ${entry.kind}`; line.textContent = summarizeFeedLine(entry.line); feed.append(line);
@@ -168,7 +192,9 @@ function summarizeFeedLine(line) {
 function showView(name) {
   document.querySelectorAll('[data-view-panel]').forEach((panel) => panel.classList.toggle('hidden', panel.dataset.viewPanel !== name));
   document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('active', button.dataset.view === name));
+  if (name === 'portfolio') loadPortfolio();
   if (name === 'knowledge') loadActiveKnowledge();
+  if (name === 'git') loadGitState();
   if (name === 'tasks') { refreshHistory(); refreshJobs(); }
   if (name === 'systems') loadSystems();
 }
@@ -205,9 +231,62 @@ function renderProjectList() {
   }
 }
 
-function renderSystemRows(container, systems) {
+function renderPortfolio(data) {
+  elements.attentionList.replaceChildren();
+  if (!data.attention.length) {
+    const empty = document.createElement('div'); empty.className = 'empty';
+    empty.textContent = 'Keine Blockade oder Entscheidung wartet auf dich.'; elements.attentionList.append(empty);
+  } else {
+    for (const entry of data.attention) {
+      const row = document.createElement('div'); row.className = `attention-item ${entry.severity === 'error' ? 'error' : ''}`;
+      const marker = document.createElement('span'); marker.className = 'attention-marker'; marker.setAttribute('aria-hidden', 'true');
+      const text = document.createElement('div'); text.className = 'attention-text';
+      const message = document.createElement('div'); message.textContent = entry.message;
+      const project = document.createElement('div'); project.className = 'attention-project'; project.textContent = entry.projectName;
+      text.append(message, project);
+      const open = document.createElement('button'); open.type = 'button'; open.className = 'button secondary table-button';
+      open.dataset.portfolioProject = entry.projectId; open.textContent = 'Öffnen'; row.append(marker, text, open); elements.attentionList.append(row);
+    }
+  }
+
+  elements.portfolioList.replaceChildren();
+  for (const project of data.projects) {
+    const row = document.createElement('article'); row.className = 'portfolio-row';
+    const identity = document.createElement('div'); identity.className = 'portfolio-project';
+    const name = document.createElement('h3'); name.textContent = project.name;
+    const state = document.createElement('span'); state.className = `project-state ${project.stateClass}`; state.textContent = project.state;
+    identity.append(name, state);
+    const task = document.createElement('div'); task.className = 'portfolio-detail portfolio-task';
+    task.textContent = project.lastTask || 'Noch kein Task';
+    const health = document.createElement('div'); health.className = 'portfolio-detail portfolio-health';
+    health.textContent = `${project.repository.branch || 'kein Git'} · ${project.repository.clean ? 'clean' : 'Änderungen'} · Graph ${project.graph.status}`;
+    const next = document.createElement('div'); next.className = 'portfolio-detail portfolio-next'; next.textContent = project.nextAction;
+    const open = document.createElement('button'); open.type = 'button'; open.className = 'button secondary';
+    open.dataset.portfolioProject = project.id;
+    open.dataset.portfolioTarget = !project.repository.clean || project.stateClass === 'ready' ? 'git' : 'tasks';
+    open.textContent = open.dataset.portfolioTarget === 'git' ? 'Prüfen' : project.id === activeProject.id ? 'Arbeitsbereich' : 'Auswählen';
+    row.append(identity, task, health, next, open); elements.portfolioList.append(row);
+  }
+}
+
+async function loadPortfolio() {
+  elements.attentionList.innerHTML = '<div class="empty">Projektzustände werden geprüft…</div>';
+  try { renderPortfolio(await api('/api/portfolio')); }
+  catch (error) { elements.attentionList.innerHTML = ''; const message = document.createElement('div'); message.className = 'empty'; message.textContent = error.message; elements.attentionList.append(message); }
+}
+
+function renderSystemRows(container, systems, grouped = false) {
   container.replaceChildren();
-  for (const system of systems) {
+  const tierOrder = ['required', 'recommended', 'project'];
+  const tierLabels = { required: 'Erforderliche Basis', recommended: 'Empfohlener Workflow', project: 'Projektabhängige Werkzeuge' };
+  const visibleSystems = systems.filter((system) => system.tier !== 'project' || system.ok || system.relevantToCurrentProject);
+  for (const tier of grouped ? tierOrder : ['all']) {
+    const rows = tier === 'all' ? visibleSystems : visibleSystems.filter((system) => (system.tier || 'recommended') === tier);
+    if (!rows.length) continue;
+    if (grouped) {
+      const heading = document.createElement('h3'); heading.className = 'system-group-title'; heading.textContent = tierLabels[tier]; container.append(heading);
+    }
+    for (const system of rows) {
     const item = document.createElement('article'); item.className = 'system-item';
     const head = document.createElement('div'); head.className = 'system-head';
     const name = document.createElement('h3'); name.textContent = system.name;
@@ -216,12 +295,27 @@ function renderSystemRows(container, systems) {
     const category = document.createElement('div'); category.className = 'system-category'; category.textContent = system.category;
     const detail = document.createElement('div'); detail.className = 'system-detail'; detail.textContent = system.detail || system.path || '—';
     item.append(head, category, detail);
-    if (!system.autoDetected) {
+    if (system.usedByProjects?.length) {
+      const usage = document.createElement('div'); usage.className = 'system-usage';
+      usage.textContent = `Verwendet von: ${system.usedByProjects.map((project) => project.name).join(', ')}`; item.append(usage);
+    } else if (system.tier === 'project') {
+      const usage = document.createElement('div'); usage.className = 'system-usage muted'; usage.textContent = 'Derzeit keinem Projekt zugeordnet'; item.append(usage);
+    }
+    if (system.reason) { const reason = document.createElement('div'); reason.className = 'system-reason'; reason.textContent = system.reason; item.append(reason); }
+    if ((!system.ok && system.installKey) || !system.autoDetected) {
       const actions = document.createElement('div'); actions.className = 'system-actions';
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger table-button';
-      remove.dataset.removeSystem = system.id; remove.textContent = 'Entfernen'; actions.append(remove); item.append(actions);
+      if (!system.ok && system.installKey) {
+        const install = document.createElement('button'); install.type = 'button'; install.className = 'button secondary table-button';
+        install.dataset.installSystem = system.installKey; install.dataset.installName = system.name; install.textContent = 'Installieren'; actions.append(install);
+      }
+      if (!system.autoDetected) {
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger table-button';
+        remove.dataset.removeSystem = system.id; remove.textContent = 'Entfernen'; actions.append(remove);
+      }
+      item.append(actions);
     }
     container.append(item);
+    }
   }
 }
 
@@ -230,17 +324,65 @@ async function loadSystems(force = false) {
   try {
     const inventory = await api(`/api/systems?${projectQuery()}${force ? '&force=1' : ''}`);
     renderSystemRows(elements.projectSystems, inventory.project);
-    renderSystemRows(elements.globalSystems, inventory.global);
+    renderSystemRows(elements.globalSystems, inventory.global, true);
+    const requiredMissing = inventory.global.filter((system) => system.tier === 'required' && !system.ok).length;
+    const recommendedMissing = inventory.global.filter((system) => system.tier === 'recommended' && !system.ok).length;
+    elements.systemSetupSummary.innerHTML = requiredMissing
+      ? `<strong>${requiredMissing} notwendige Komponente(n) fehlen.</strong> Fehlende freigegebene Werkzeuge können direkt installiert werden.`
+      : `<strong>Basis vollständig.</strong> ${recommendedMissing ? `${recommendedMissing} empfohlene Erweiterung(en) sind noch nicht eingerichtet.` : 'Der empfohlene lokale Workflow ist vollständig.'}`;
   } catch (error) { elements.systemMessage.textContent = error.message; }
 }
 
+function renderGitState(data) {
+  gitData = data;
+  elements.gitProjectName.textContent = `${data.projectName} · ${data.repository}`;
+  elements.gitState.className = `status ${data.clean ? 'ok' : 'warn'}`;
+  elements.gitState.textContent = data.clean ? 'clean' : `${data.files.length} Änderung(en)`;
+  elements.gitSummary.replaceChildren();
+  for (const text of [
+    `Branch: ${data.branch || '—'}`,
+    `Remote: ${data.remote || 'nicht konfiguriert'}`,
+    data.hasUpstream ? `${data.ahead} voraus · ${data.behind} zurück` : 'kein Upstream',
+    data.githubAuthenticated ? 'GitHub angemeldet' : 'GitHub nicht angemeldet',
+    data.lastCommit ? `Letzter Commit: ${data.lastCommit.hash} · ${data.lastCommit.subject}` : 'Noch kein Commit',
+  ]) { const item = document.createElement('span'); item.textContent = text; elements.gitSummary.append(item); }
+  elements.gitFileList.replaceChildren();
+  if (!data.files.length) {
+    const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Keine lokalen Änderungen.'; elements.gitFileList.append(empty);
+  } else {
+    for (const file of data.files) {
+      const label = document.createElement('label'); label.className = 'git-file-row';
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = file.path; checkbox.checked = true;
+      const status = document.createElement('span'); status.className = 'git-file-status'; status.textContent = file.untracked ? '??' : `${file.staged}${file.working}`;
+      const name = document.createElement('span'); name.className = 'git-file-path'; name.textContent = file.originalPath ? `${file.originalPath} → ${file.path}` : file.path;
+      label.append(checkbox, status, name); elements.gitFileList.append(label);
+    }
+  }
+  elements.gitDiff.textContent = data.diff || (data.files.some((file) => file.untracked) ? 'Unverfolgte Dateien werden nach dem Hinzufügen im Diff sichtbar.' : 'Keine Textänderungen vorhanden.');
+  elements.gitCommit.disabled = data.clean;
+  elements.gitPush.disabled = !data.remote || (data.hasUpstream && data.ahead === 0);
+  elements.gitMessage.textContent = data.diffTruncated ? 'Der Diff wurde aus Sicherheitsgründen gekürzt.' : '';
+}
+
+async function loadGitState() {
+  if (!activeProject) return;
+  elements.gitState.className = 'status warn'; elements.gitState.textContent = 'wird geprüft';
+  elements.gitMessage.textContent = '';
+  try { renderGitState(await api(`/api/git?${projectQuery()}`)); }
+  catch (error) { elements.gitState.className = 'status fail'; elements.gitState.textContent = 'Fehler'; elements.gitMessage.textContent = error.message; }
+}
+
 async function activateProject(projectId) {
-  await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
-  registry = await api('/api/projects');
-  activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
-  graphData = null; selectedGraphNodeId = null;
-  renderProjectSelector(); renderProjectList(); resetKnowledge();
-  await refreshAll(true);
+  const target = registry.projects.find((project) => project.id === projectId);
+  setBusy(true, 'Projekt wird gewechselt', `${target?.name || 'Projekt'} und seine lokalen Verbindungen werden geprüft.`);
+  try {
+    await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
+    registry = await api('/api/projects');
+    activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
+    graphData = null; selectedGraphNodeId = null; graphZoom = 1; gitData = null;
+    renderProjectSelector(); renderProjectList(); resetKnowledge();
+    await refreshAll(true);
+  } finally { setBusy(false); }
 }
 
 function resetKnowledge() {
@@ -248,6 +390,7 @@ function resetKnowledge() {
   elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen.</p>';
   const context = elements.graphCanvas.getContext('2d'); context.clearRect(0, 0, elements.graphCanvas.width, elements.graphCanvas.height);
   elements.noteList.replaceChildren(); elements.noteTitle.textContent = 'Keine Notiz ausgewählt'; elements.noteContent.textContent = 'Wähle links eine Notiz aus.';
+  elements.knowledgeLoadState.textContent = '';
 }
 
 function graphColor(value) {
@@ -265,12 +408,12 @@ function layoutGraph(width, height) {
     if (!groups.has(key)) groups.set(key, []); groups.get(key).push(node);
   }
   const groupEntries = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
-  const centerX = width / 2; const centerY = height / 2; const orbit = Math.max(40, Math.min(width, height) * 0.32);
+  const centerX = width / 2; const centerY = height / 2; const orbit = Math.max(40, Math.min(width, height) * 0.32) * graphZoom;
   groupEntries.forEach(([name, nodes], groupIndex) => {
     const groupAngle = (Math.PI * 2 * groupIndex) / Math.max(1, groupEntries.length) - Math.PI / 2;
     const groupX = groupEntries.length === 1 ? centerX : centerX + Math.cos(groupAngle) * orbit;
     const groupY = groupEntries.length === 1 ? centerY : centerY + Math.sin(groupAngle) * orbit;
-    const radius = Math.max(18, Math.min(90, 10 + Math.sqrt(nodes.length) * 10));
+    const radius = Math.max(18, Math.min(90, 10 + Math.sqrt(nodes.length) * 10)) * graphZoom;
     nodes.sort((a, b) => b.degree - a.degree).forEach((node, index) => {
       const angle = index * 2.3999632297;
       const distance = radius * Math.sqrt((index + 0.5) / nodes.length);
@@ -340,7 +483,7 @@ function renderGraphDetails(nodeId) {
 async function loadGraph() {
   elements.graphStats.textContent = 'Graph wird geladen…';
   try {
-    const query = elements.graphSearch.value.trim();
+    const query = elements.knowledgeSearch.value.trim();
     graphData = await api(`/api/graph?${projectQuery()}&q=${encodeURIComponent(query)}`);
     selectedGraphNodeId = null;
     elements.graphStats.textContent = `${graphData.totals.nodes} Knoten · ${graphData.totals.links} Beziehungen${graphData.truncated ? ' · fokussierte Ansicht' : ''}${graphData.builtAtCommit ? ` · Commit ${graphData.builtAtCommit.slice(0, 8)}` : ''}`;
@@ -362,7 +505,7 @@ function renderNoteList(data) {
 async function loadObsidian(selectedFile = null) {
   elements.obsidianStats.textContent = 'Notizen werden geladen…';
   try {
-    const query = elements.obsidianSearch.value.trim();
+    const query = elements.knowledgeSearch.value.trim();
     const filePart = selectedFile ? `&file=${encodeURIComponent(selectedFile)}` : '';
     const data = await api(`/api/obsidian?${projectQuery()}&q=${encodeURIComponent(query)}${filePart}`);
     renderNoteList(data);
@@ -373,37 +516,86 @@ async function loadObsidian(selectedFile = null) {
   } catch (error) { elements.obsidianStats.textContent = error.message; elements.noteList.replaceChildren(); }
 }
 
-function activeKnowledgeType() {
-  return document.querySelector('.segment.active')?.dataset.knowledge || 'graphify';
+async function loadActiveKnowledge() {
+  if (!activeProject) return;
+  elements.knowledgeLoadState.textContent = 'Wissen wird automatisch geladen…';
+  await Promise.all([loadGraph(), loadObsidian()]);
+  elements.knowledgeLoadState.textContent = 'Graph und Notizen aktuell';
 }
 
-function loadActiveKnowledge() {
-  if (activeKnowledgeType() === 'graphify') loadGraph(); else loadObsidian();
+function readFileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
+  });
 }
 
-function messageElement(role, label, text) {
+function renderAttachmentPreview() {
+  elements.attachmentPreview.replaceChildren();
+  elements.attachmentPreview.classList.toggle('hidden', selectedAttachments.length === 0);
+  selectedAttachments.forEach((attachment, index) => {
+    const chip = document.createElement('div'); chip.className = 'attachment-chip';
+    const image = document.createElement('img'); image.src = attachment.dataUrl; image.alt = attachment.name;
+    const name = document.createElement('span'); name.textContent = attachment.name;
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'attachment-remove';
+    remove.dataset.removeAttachment = String(index); remove.textContent = '×'; remove.setAttribute('aria-label', `${attachment.name} entfernen`);
+    chip.append(image, name, remove); elements.attachmentPreview.append(chip);
+  });
+}
+
+function clearAttachments() {
+  selectedAttachments = []; elements.attachmentInput.value = ''; renderAttachmentPreview();
+}
+
+async function addImageFiles(files) {
+  const allowed = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+  if (selectedAttachments.length + files.length > 4) throw new Error('Maximal vier Bilder pro Nachricht.');
+  for (const file of files) {
+    if (!allowed.has(file.type)) throw new Error(`${file.name || 'Bild'}: nicht unterstütztes Bildformat.`);
+    if (file.size > 5 * 1024 * 1024) throw new Error(`${file.name || 'Bild'}: größer als 5 MB.`);
+    const fallbackName = `screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.${file.type === 'image/jpeg' ? 'jpg' : file.type.split('/')[1]}`;
+    selectedAttachments.push({ name: file.name || fallbackName, type: file.type, size: file.size, dataUrl: await readFileDataUrl(file) });
+  }
+  elements.formMessage.textContent = selectedAttachments.length ? `${selectedAttachments.length} Bild(er) angehängt.` : '';
+  renderAttachmentPreview();
+}
+
+function messageElement(role, label, text, attachments = []) {
   const message = document.createElement('div'); message.className = `message ${role}`;
   const heading = document.createElement('div'); heading.className = 'message-label'; heading.textContent = label;
   const body = document.createElement('div'); body.className = 'message-body'; body.textContent = text || 'Keine gespeicherte Ausgabe.';
-  message.append(heading, body); return message;
+  message.append(heading, body);
+  if (attachments.length) {
+    const gallery = document.createElement('div'); gallery.className = 'message-attachments';
+    for (const attachment of attachments) {
+      const link = document.createElement('a'); link.className = 'message-attachment'; link.href = attachment.url; link.target = '_blank'; link.rel = 'noopener';
+      const image = document.createElement('img'); image.src = attachment.url; image.alt = attachment.name; image.loading = 'lazy';
+      const name = document.createElement('span'); name.textContent = attachment.name; link.append(image, name); gallery.append(link);
+    }
+    message.append(gallery);
+  }
+  return message;
 }
 
 function renderHistory(runs) {
   elements.history.replaceChildren();
   if (!runs.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Noch kein Lauf für dieses Projekt.'; elements.history.append(empty); return; }
-  for (const run of runs) {
+  for (const run of [...runs].reverse()) {
     const article = document.createElement('article'); article.className = 'conversation-run';
     const meta = document.createElement('div'); meta.className = 'conversation-meta';
-    const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${run.provider || run.status}`;
-    const state = document.createElement('span'); state.className = `status ${run.status === 'PASS' ? 'ok' : run.status === 'external' ? 'info' : 'warn'}`; state.textContent = run.status;
+    const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${run.provider || 'externer Lauf'}`;
+    const stateClass = run.status === 'PASS' ? 'ok' : run.status === 'FAIL' ? 'fail' : run.status === 'external' ? 'info' : 'warn';
+    const state = document.createElement('span'); state.className = `status ${stateClass}`; state.textContent = run.status;
     meta.append(identity, state); article.append(meta);
-    if (run.task) article.append(messageElement('user', 'Auftrag', run.task));
-    article.append(messageElement('assistant', 'Rückmeldung', run.response));
-    const actions = document.createElement('div'); actions.className = 'run-actions';
-    const follow = document.createElement('button'); follow.type = 'button'; follow.className = 'button secondary'; follow.dataset.continueRun = run.path; follow.textContent = 'Folgeauftrag';
-    const open = document.createElement('button'); open.type = 'button'; open.className = 'button secondary'; open.dataset.openRun = run.path; open.textContent = 'Ordner';
-    actions.append(follow, open); article.append(actions); elements.history.append(article);
+    if (run.task) article.append(messageElement('user', 'Du', run.task, run.attachments || []));
+    article.append(messageElement('assistant', run.provider || 'AI Project Control', run.response));
+    const summary = document.createElement('div'); summary.className = 'run-summary';
+    for (const value of [run.mode, run.tests, run.filesChanged, run.gate].filter(Boolean)) {
+      const chip = document.createElement('span'); chip.textContent = value; summary.append(chip);
+    }
+    if (summary.childElementCount) article.append(summary);
+    elements.history.append(article);
   }
+  requestAnimationFrame(() => { elements.history.scrollTop = elements.history.scrollHeight; });
 }
 
 async function refreshStatus(force = false) {
@@ -418,6 +610,10 @@ async function refreshJobs() {
   if (!activeProject) return;
   const rows = await api(`/api/jobs?${projectQuery()}`);
   renderJobs(rows);
+  const latestTask = rows.find((job) => job.kind === 'task');
+  if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzter Job fehlgeschlagen. Details stehen im Live-Feed und Verlauf.';
+  else if (latestTask?.status === 'completed') elements.formMessage.textContent = 'Letzter Job abgeschlossen.';
+  else if (latestTask?.status === 'stopped') elements.formMessage.textContent = 'Letzter Job wurde gestoppt.';
   if (rows.some((job) => job.status === 'completed' && job.projectId && !registry.projects.some((project) => project.id === job.projectId))) {
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || activeProject;
@@ -450,20 +646,42 @@ document.querySelector('.view-tabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-view]'); if (button) showView(button.dataset.view);
 });
 
-document.querySelector('.segmented').addEventListener('click', (event) => {
-  const button = event.target.closest('button[data-knowledge]'); if (!button) return;
-  document.querySelectorAll('[data-knowledge]').forEach((candidate) => candidate.classList.toggle('active', candidate === button));
-  document.querySelectorAll('[data-knowledge-panel]').forEach((panel) => panel.classList.toggle('hidden', panel.dataset.knowledgePanel !== button.dataset.knowledge));
-  loadActiveKnowledge();
-});
-
-elements.refresh.addEventListener('click', () => refreshAll(true));
-elements.historyRefresh.addEventListener('click', refreshHistory);
 elements.systemsRefresh.addEventListener('click', () => loadSystems(true));
-elements.graphRefresh.addEventListener('click', loadGraph);
-elements.obsidianRefresh.addEventListener('click', () => loadObsidian());
 elements.addProject.addEventListener('click', () => { showView('projects'); elements.provisionName.focus(); });
 elements.projectSelect.addEventListener('change', () => activateProject(elements.projectSelect.value));
+
+document.querySelector('.feed-filter').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-feed-filter]'); if (!button) return;
+  feedFilter = button.dataset.feedFilter;
+  document.querySelectorAll('[data-feed-filter]').forEach((candidate) => candidate.classList.toggle('active', candidate === button));
+  refreshJobs();
+});
+
+elements.attachmentButton.addEventListener('click', () => elements.attachmentInput.click());
+elements.attachmentInput.addEventListener('change', async () => {
+  const files = Array.from(elements.attachmentInput.files || []);
+  try { await addImageFiles(files); }
+  catch (error) { elements.formMessage.textContent = error.message; }
+  finally { elements.attachmentInput.value = ''; }
+});
+
+elements.task.addEventListener('paste', async (event) => {
+  const files = Array.from(event.clipboardData?.items || []).filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  event.preventDefault();
+  try { await addImageFiles(files); }
+  catch (error) { elements.formMessage.textContent = error.message; }
+});
+
+elements.attachmentPreview.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-remove-attachment]'); if (!button) return;
+  selectedAttachments.splice(Number(button.dataset.removeAttachment), 1); renderAttachmentPreview();
+  elements.formMessage.textContent = selectedAttachments.length ? `${selectedAttachments.length} Bild(er) angehängt.` : '';
+});
+
+elements.task.addEventListener('input', () => {
+  elements.task.style.height = 'auto'; elements.task.style.height = `${Math.min(elements.task.scrollHeight, 180)}px`;
+});
 
 elements.memoryForm.addEventListener('submit', async (event) => {
   event.preventDefault(); elements.memoryMessage.textContent = 'Lernnotiz wird gespeichert…';
@@ -499,12 +717,12 @@ elements.provisionForm.addEventListener('submit', async (event) => {
   } catch (error) { elements.provisionMessage.textContent = error.message; }
 });
 
-elements.graphSearch.addEventListener('input', () => {
-  clearTimeout(graphSearchTimer); graphSearchTimer = setTimeout(loadGraph, 350);
+elements.knowledgeSearch.addEventListener('input', () => {
+  clearTimeout(knowledgeSearchTimer); knowledgeSearchTimer = setTimeout(loadActiveKnowledge, 350);
 });
-elements.obsidianSearch.addEventListener('input', () => {
-  clearTimeout(obsidianSearchTimer); obsidianSearchTimer = setTimeout(() => loadObsidian(), 350);
-});
+elements.graphZoomOut.addEventListener('click', () => { graphZoom = Math.max(0.55, graphZoom - 0.15); drawGraph(); });
+elements.graphZoomFit.addEventListener('click', () => { graphZoom = 1; drawGraph(); });
+elements.graphZoomIn.addEventListener('click', () => { graphZoom = Math.min(2.5, graphZoom + 0.15); drawGraph(); });
 
 elements.graphCanvas.addEventListener('click', (event) => {
   if (!graphData) return;
@@ -527,26 +745,51 @@ elements.form.addEventListener('submit', async (event) => {
     const job = await api('/api/tasks', { method: 'POST', body: JSON.stringify({
       projectId: activeProject.id, task: elements.task.value, provider: elements.provider.value,
       mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
+      attachments: selectedAttachments.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })),
     }) });
-    elements.formMessage.textContent = `Job ${job.id.slice(0, 8)} läuft.`; elements.task.value = ''; await refreshJobs();
+    elements.formMessage.textContent = `Job ${job.id.slice(0, 8)} läuft.`; elements.task.value = ''; elements.task.style.height = ''; clearAttachments(); await refreshJobs();
   } catch (error) { elements.formMessage.textContent = error.message; }
   finally { elements.start.disabled = false; }
+});
+
+document.getElementById('portfolioView').addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-portfolio-project]'); if (!button) return;
+  if (button.dataset.portfolioProject !== activeProject.id) await activateProject(button.dataset.portfolioProject);
+  showView(button.dataset.portfolioTarget || 'tasks');
+});
+
+elements.gitSelectAll.addEventListener('click', () => {
+  const boxes = [...elements.gitFileList.querySelectorAll('input[type="checkbox"]')];
+  const shouldSelect = boxes.some((box) => !box.checked); boxes.forEach((box) => { box.checked = shouldSelect; });
+});
+elements.gitCommit.addEventListener('click', async () => {
+  const paths = [...elements.gitFileList.querySelectorAll('input[type="checkbox"]:checked')].map((box) => box.value);
+  if (!paths.length) { elements.gitMessage.textContent = 'Wähle mindestens eine Datei aus.'; return; }
+  const message = elements.gitCommitMessage.value.trim();
+  if (!message) { elements.gitMessage.textContent = 'Eine Commit-Nachricht ist erforderlich.'; elements.gitCommitMessage.focus(); return; }
+  if (!window.confirm(`${paths.length} Datei(en) im Branch ${gitData?.branch || '—'} committen?`)) return;
+  elements.gitCommit.disabled = true; elements.gitMessage.textContent = 'Commit wird erstellt…';
+  try {
+    const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, paths, message }) });
+    elements.gitCommitMessage.value = ''; renderGitState(result.state); elements.gitMessage.textContent = 'Commit wurde lokal erstellt. Noch nichts wurde gepusht.';
+  } catch (error) { elements.gitMessage.textContent = error.message; }
+  finally { elements.gitCommit.disabled = false; }
+});
+elements.gitPush.addEventListener('click', async () => {
+  if (!gitData?.remote) { elements.gitMessage.textContent = 'Kein origin-Remote konfiguriert.'; return; }
+  if (!window.confirm(`Branch ${gitData.branch} ohne Force-Push zu ${gitData.remote} hochladen?`)) return;
+  elements.gitPush.disabled = true; elements.gitMessage.textContent = 'Branch wird gepusht…';
+  try {
+    const result = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id }) });
+    renderGitState(result.state); elements.gitMessage.textContent = 'Branch wurde erfolgreich hochgeladen.';
+  } catch (error) { elements.gitMessage.textContent = error.message; }
+  finally { elements.gitPush.disabled = false; }
 });
 
 elements.jobs.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-stop-job]'); if (!button) return; button.disabled = true;
   try { await api(`/api/jobs/${button.dataset.stopJob}/stop`, { method: 'POST', body: '{}' }); await refreshJobs(); }
   catch (error) { elements.formMessage.textContent = error.message; }
-});
-
-elements.history.addEventListener('click', async (event) => {
-  const open = event.target.closest('button[data-open-run]');
-  if (open) { open.disabled = true; try { await api('/api/open-run', { method: 'POST', body: JSON.stringify({ path: open.dataset.openRun }) }); } finally { open.disabled = false; } return; }
-  const follow = event.target.closest('button[data-continue-run]');
-  if (follow) {
-    elements.task.value = `Lies zuerst den vorherigen Lauf unter ${follow.dataset.continueRun} und führe danach folgenden Folgeauftrag aus:\n\n`;
-    showView('tasks'); elements.task.focus();
-  }
 });
 
 elements.projectList.addEventListener('click', async (event) => {
@@ -562,6 +805,16 @@ elements.projectList.addEventListener('click', async (event) => {
 });
 
 document.getElementById('systemsView').addEventListener('click', async (event) => {
+  const install = event.target.closest('button[data-install-system]');
+  if (install) {
+    if (!window.confirm(`${install.dataset.installName} über den freigegebenen offiziellen Paketweg installieren? Es werden keine kostenpflichtigen Dienste aktiviert.`)) return;
+    install.disabled = true; elements.systemMessage.textContent = `${install.dataset.installName} wird installiert. Der Fortschritt erscheint im Live-Feed.`;
+    try {
+      await api('/api/systems/install', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, installKey: install.dataset.installSystem }) });
+      showView('tasks'); await refreshJobs();
+    } catch (error) { elements.systemMessage.textContent = error.message; install.disabled = false; }
+    return;
+  }
   const remove = event.target.closest('button[data-remove-system]'); if (!remove) return;
   if (!window.confirm('System nur aus dem Dashboard entfernen? Dateien werden nicht gelöscht.')) return;
   try { await api(`/api/systems/${encodeURIComponent(remove.dataset.removeSystem)}`, { method: 'DELETE' }); await loadSystems(true); }

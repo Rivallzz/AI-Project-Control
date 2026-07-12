@@ -5,9 +5,8 @@ graphify-out/
 *.log
 *.pid.json
 projects.json
-systems.json
+/systems.json
 data/
 provider-state.json
 .DS_Store
 Thumbs.db
-

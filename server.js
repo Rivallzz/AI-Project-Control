@@ -28,10 +28,16 @@ const GRAPHIFY_PYTHON = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'P
 const CC_SWITCH_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'CC-Switch', 'cc-switch.exe');
 const COMFY_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Comfy Desktop', 'Comfy Desktop.exe');
 const COMFY_SETTINGS = path.join(process.env.APPDATA || '', 'Comfy Desktop', 'settings.json');
-const MAX_BODY_BYTES = 1024 * 1024;
+const SYSTEM_CATALOG_PATH = path.join(__dirname, 'config', 'systems.json');
+const MAX_BODY_BYTES = 24 * 1024 * 1024;
 const MAX_JOB_LOG_CHARS = 2 * 1024 * 1024;
 const MAX_KNOWLEDGE_FILE_BYTES = 512 * 1024;
-
+const MAX_ATTACHMENTS = 4;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024;
+const IMAGE_EXTENSIONS = new Map([
+  ['image/png', '.png'], ['image/jpeg', '.jpg'], ['image/webp', '.webp'], ['image/gif', '.gif'],
+]);
 const jobs = new Map();
 let statusCache = null;
 let statusCacheAt = 0;
@@ -86,6 +92,75 @@ async function readJsonBody(request) {
   return text ? JSON.parse(text) : {};
 }
 
+function safeAttachmentName(value, index, mime) {
+  const extension = IMAGE_EXTENSIONS.get(mime);
+  const original = path.basename(String(value || `image-${index + 1}`));
+  const stem = original.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || `image-${index + 1}`;
+  return `${String(index + 1).padStart(2, '0')}-${stem}${extension}`;
+}
+
+async function saveTaskAttachments(taskId, values) {
+  if (values === undefined || values === null) return [];
+  if (!Array.isArray(values)) throw new Error('Attachments must be a list.');
+  if (values.length > MAX_ATTACHMENTS) throw new Error(`No more than ${MAX_ATTACHMENTS} images may be attached.`);
+  const prepared = [];
+  let totalBytes = 0;
+  for (let index = 0; index < values.length; index += 1) {
+    const attachment = values[index] || {};
+    const mime = String(attachment.type || '').toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(mime)) throw new Error('Only PNG, JPEG, WebP and GIF images are supported.');
+    const match = String(attachment.dataUrl || '').match(/^data:([^;,]+);base64,([a-zA-Z0-9+/=\r\n]+)$/);
+    if (!match || match[1].toLowerCase() !== mime) throw new Error('An attachment contains invalid image data.');
+    const data = Buffer.from(match[2].replace(/\s/g, ''), 'base64');
+    if (!data.length || data.length > MAX_ATTACHMENT_BYTES) throw new Error('Each image must be between 1 byte and 5 MB.');
+    totalBytes += data.length;
+    if (totalBytes > MAX_ATTACHMENT_TOTAL_BYTES) throw new Error('Attached images exceed the 15 MB total limit.');
+    prepared.push({ name: String(attachment.name || `image-${index + 1}`).slice(0, 160), file: safeAttachmentName(attachment.name, index, mime), type: mime, data });
+  }
+  if (!prepared.length) return [];
+  const directory = path.join(TASK_ROOT, `${taskId}-attachments`);
+  await fsp.mkdir(directory, { recursive: false });
+  for (const attachment of prepared) await fsp.writeFile(path.join(directory, attachment.file), attachment.data, { flag: 'wx' });
+  const manifest = prepared.map(({ name, file, type, data }) => ({ name, file, type, size: data.length }));
+  await fsp.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  return manifest.map((entry) => ({ ...entry, path: path.join(directory, entry.file), url: `/api/task-attachment?id=${encodeURIComponent(taskId)}&file=${encodeURIComponent(entry.file)}` }));
+}
+
+async function taskAttachmentsFromPackage(taskPackage) {
+  const match = taskPackage.match(/^Attachment-ID:\s*([a-f0-9-]+)$/m);
+  if (!match) return [];
+  const taskId = match[1];
+  const directory = path.join(TASK_ROOT, `${taskId}-attachments`);
+  const manifestPath = path.join(directory, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) return [];
+  try {
+    const manifest = await readJsonFile(manifestPath);
+    return manifest.filter((entry) => IMAGE_EXTENSIONS.has(entry.type) && path.basename(entry.file) === entry.file).map((entry) => ({
+      name: entry.name, type: entry.type, size: entry.size,
+      url: `/api/task-attachment?id=${encodeURIComponent(taskId)}&file=${encodeURIComponent(entry.file)}`,
+    }));
+  } catch { return []; }
+}
+
+async function serveTaskAttachment(url, response) {
+  const taskId = String(url.searchParams.get('id') || '');
+  const file = String(url.searchParams.get('file') || '');
+  if (!/^[a-f0-9-]{36}$/.test(taskId) || !file || path.basename(file) !== file) throw new Error('Invalid attachment path.');
+  const directory = path.join(TASK_ROOT, `${taskId}-attachments`);
+  const manifestPath = path.join(directory, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) throw new Error('Attachment not found.');
+  const manifest = await readJsonFile(manifestPath);
+  const entry = manifest.find((candidate) => candidate.file === file && IMAGE_EXTENSIONS.has(candidate.type));
+  if (!entry) throw new Error('Attachment not found.');
+  const filePath = path.join(directory, file);
+  const data = await fsp.readFile(filePath);
+  response.writeHead(200, {
+    'Content-Type': entry.type, 'Content-Length': data.length, 'Cache-Control': 'private, max-age=3600',
+    'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `inline; filename="${file.replace(/"/g, '')}"`,
+  });
+  response.end(data);
+}
+
 function execFileAsync(file, args, options = {}) {
   return new Promise((resolve) => {
     execFile(file, args, { windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
@@ -104,6 +179,10 @@ function parseJsonOutput(text) {
   return JSON.parse(text.slice(start));
 }
 
+function stripAnsi(value) {
+  return String(value || '').replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
 async function readJsonFile(filePath) {
   const text = await fsp.readFile(filePath, 'utf8');
   return JSON.parse(text.replace(/^\uFEFF/, ''));
@@ -112,6 +191,30 @@ async function readJsonFile(filePath) {
 function safeId(value) {
   const base = String(value || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
   return base || 'project';
+}
+
+function taskIntent(task, mode) {
+  if (mode === 'Write') return /review|prüf|audit/i.test(task) ? 'review-and-fix' : 'implementation';
+  if (/review|prüf|audit/i.test(task)) return 'review';
+  if (/warum|wieso|wie|was|welche|\?$/i.test(task.trim())) return 'question';
+  return 'analysis';
+}
+
+function deterministicTaskStrategy(task, mode, project) {
+  const intent = taskIntent(task, mode);
+  return `Intent: ${intent}\nContext budget: focused\nRetrieval order: AGENTS.md -> Graphify discovery (${project.graphPath}) -> relevant repository originals -> Obsidian working context only when needed\nPrompt policy: preserve the owner's request; do not use a second LLM to rewrite it\nScope policy: avoid broad repository scans when targeted retrieval answers the task`;
+}
+
+function relevantMemoryText(notes, task) {
+  const terms = new Set(String(task).toLowerCase().match(/[a-zäöüß0-9_-]{5,}/g) || []);
+  const ranked = notes.map((note, index) => {
+    const text = String(note.text || '');
+    const score = [...terms].reduce((total, term) => total + (text.toLowerCase().includes(term) ? 1 : 0), 0);
+    return { text, score, index };
+  }).sort((left, right) => right.score - left.score || left.index - right.index);
+  const matched = ranked.filter((entry) => entry.score > 0).slice(0, 4);
+  const selected = matched.length ? matched : ranked.slice(0, 2);
+  return selected.map((entry) => `- ${entry.text}`).join('\n') || '- No reviewed learning notes relevant to this task.';
 }
 
 function normalizedProject(project) {
@@ -170,6 +273,26 @@ async function ensureObsidianProjectArea(project) {
       '- Graphify index: ' + project.graphPath, '',
     ].join('\n');
     await fsp.writeFile(dashboardPath, dashboard, 'utf8');
+  }
+  const indexes = [
+    ['Working Notes', 'Inbox.md', 'Working Notes Inbox', 'Kurze Arbeitsnotizen und ungeklärte Gedanken für das Projekt.'],
+    ['Research', 'Research Index.md', 'Research Index', 'Recherchelinks und noch nicht verbindliche Erkenntnisse.'],
+    ['Design Drafts', 'Draft Index.md', 'Design Drafts', 'Entwürfe, die erst nach bewusster Übernahme ins Repository verbindlich werden.'],
+    ['Review Notes', 'Review Queue.md', 'Review Queue', 'Offene Prüfungen, Findings und Owner-Entscheidungen.'],
+    ['Prompt Library', 'Prompt Library.md', 'Prompt Library', 'Bewährte Aufgabenpakete und projektspezifische Arbeitsabläufe.'],
+    ['Lessons Learned', 'Lessons Learned.md', 'Lessons Learned', 'Bestätigte Erfahrungen für spätere Aufgaben und Projekte.'],
+    ['AI Runs', 'AI Runs Index.md', 'AI Runs', 'Links zu lokalen Run-Artefakten und ihren Ergebnissen.'],
+  ];
+  for (const [directory, file, title, purpose] of indexes) {
+    const target = path.join(project.obsidianPath, directory, file);
+    if (fs.existsSync(target)) continue;
+    const note = [
+      '---', `title: ${title}`, `project: ${project.name}`, 'status: working', '---', '', `# ${title}`, '',
+      '> [!info] Arbeitskontext',
+      `> ${purpose} Das Git-Repository bleibt die verbindliche Quelle.`, '',
+      '## Offen', '', '- ', '', '## Verweise', '', `- Repository: ${project.repository}`, '',
+    ].join('\n');
+    await fsp.writeFile(target, note, 'utf8');
   }
 }
 
@@ -299,9 +422,13 @@ async function getProviderStatus(force = false) {
 }
 
 async function commandSummary(command, args) {
-  const result = await execFileAsync(command, args, { timeout: 15000 });
-  const text = (result.stdout || result.stderr).trim();
-  return { ok: result.exitCode === 0, text: text.split(/\r?\n/).find(Boolean) || 'not available' };
+  try {
+    const result = await execFileAsync(command, args, { timeout: 15000 });
+    const text = (result.stdout || result.stderr).trim();
+    return { ok: result.exitCode === 0, text: text.split(/\r?\n/).find(Boolean) || 'not available' };
+  } catch (error) {
+    return { ok: false, text: error.message || 'not available' };
+  }
 }
 
 async function mcpSummary() {
@@ -389,66 +516,140 @@ async function findMatchingFiles(root, pattern, result = []) {
   return result;
 }
 
-function systemRow(name, category, ok, status, detail, configuredPath = null, scope = 'global') {
-  return { id: `auto-${safeId(name)}`, name, category, ok, status, detail, path: configuredPath, scope, autoDetected: true };
+async function loadSystemCatalog() {
+  const catalog = await readJsonFile(SYSTEM_CATALOG_PATH);
+  if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.systems)) throw new Error('System catalog is invalid.');
+  for (const definition of catalog.systems) {
+    if (!definition.id || !definition.name || !definition.detect || !['required', 'recommended', 'project'].includes(definition.tier)) {
+      throw new Error(`Invalid system definition: ${definition.id || definition.name || 'unknown'}`);
+    }
+  }
+  return catalog.systems;
+}
+
+function expandSystemPath(value) {
+  const variables = {
+    HOME, LOCALAPPDATA: process.env.LOCALAPPDATA || '', APPDATA: process.env.APPDATA || '',
+    PROGRAMFILES: process.env.ProgramFiles || 'C:\\Program Files', OBSIDIAN_VAULT, ECC_ROOT,
+  };
+  return String(value || '').replace(/\{([A-Z_]+)\}/g, (_, key) => variables[key] || '');
+}
+
+async function detectSystem(definition) {
+  const detection = definition.detect;
+  if (detection.type === 'command') return commandSummary(detection.command, detection.args || []);
+  if (detection.type === 'commandOrSearch') {
+    const command = await commandSummary(detection.command, detection.args || []);
+    if (command.ok) return command;
+    let pattern;
+    try { pattern = new RegExp(detection.filePattern, 'i'); } catch { return { ok: false, text: 'Ungültiges Suchmuster im Systemkatalog' }; }
+    for (const rootValue of detection.roots || []) {
+      const matches = await findMatchingFiles(expandSystemPath(rootValue), pattern, []);
+      if (matches.length) return { ok: true, text: matches[0], path: matches[0] };
+    }
+    return command;
+  }
+  if (detection.type === 'pythonModule') {
+    const python = fs.existsSync(GRAPHIFY_PYTHON) ? GRAPHIFY_PYTHON : 'python.exe';
+    return commandSummary(python, ['-m', detection.module, '--version']);
+  }
+  if (detection.type === 'path' || detection.type === 'pathOrCommand') {
+    const found = (detection.paths || []).map(expandSystemPath).find((candidate) => fs.existsSync(candidate));
+    if (found) return { ok: true, text: found, path: found };
+    if (detection.type === 'pathOrCommand') return commandSummary(detection.command, detection.args || []);
+    return { ok: false, text: 'Nicht gefunden' };
+  }
+  if (detection.type === 'mcp') return mcpSummary();
+  if (detection.type === 'ollama') {
+    const summary = await commandSummary('ollama.exe', ['--version']);
+    if (!summary.ok) return summary;
+    const models = await execFileAsync('ollama.exe', ['list']);
+    const names = models.stdout.split(/\r?\n/).slice(1).filter(Boolean).map((line) => line.trim().split(/\s{2,}/)[0]);
+    return { ok: true, text: names.length ? names.join(', ') : summary.text };
+  }
+  if (detection.type === 'comfyCloud') {
+    const installationsPath = path.join(path.dirname(COMFY_SETTINGS), 'installations.json');
+    if (!fs.existsSync(installationsPath)) return { ok: false, text: 'Keine Cloud-Installation erkannt' };
+    try {
+      const entries = JSON.parse(await fsp.readFile(installationsPath, 'utf8'));
+      const ok = entries.some((entry) => entry.sourceId === 'cloud' && entry.status === 'installed');
+      return { ok, text: ok ? 'Cloud-Installation erkannt; wird nicht automatisch verwendet' : 'Keine aktive Cloud-Installation' };
+    } catch { return { ok: false, text: 'Comfy-Konfiguration ist nicht lesbar' }; }
+  }
+  if (detection.type === 'flux') {
+    if (!fs.existsSync(COMFY_SETTINGS)) return { ok: false, text: 'Keine Comfy-Modellordner konfiguriert' };
+    let settings;
+    try { settings = JSON.parse(await fsp.readFile(COMFY_SETTINGS, 'utf8')); } catch { return { ok: false, text: 'Comfy-Konfiguration ist nicht lesbar' }; }
+    const matches = [];
+    for (const root of Array.isArray(settings.modelsDirs) ? settings.modelsDirs : []) await findMatchingFiles(root, /flux|schnell|flux1|flux2/i, matches);
+    return { ok: matches.length > 0, text: matches.length ? matches.join(', ') : 'Keine Flux-Modelldatei gefunden', path: matches[0] || null };
+  }
+  return { ok: false, text: `Unbekannte Erkennung: ${detection.type}` };
+}
+
+async function detectProjectCapabilities(project) {
+  const capabilities = new Set();
+  const direct = (name) => fs.existsSync(path.join(project.repository, name));
+  if (direct('project.godot') || (await findMatchingFiles(project.repository, /^project\.godot$/i, [])).length) capabilities.add('godot');
+  if (direct('package.json')) capabilities.add('node-development');
+  if (direct('pyproject.toml') || direct('requirements.txt')) capabilities.add('python-development');
+  const assetSignals = ['Pics', 'Assets', 'Art', 'art', 'assets'].some(direct)
+    || (await findMatchingFiles(project.repository, /(?:asset|image|texture|sprite).*(?:workflow|pipeline)|(?:workflow|pipeline).*(?:asset|image|texture|sprite)/i, [])).length > 0;
+  if (assetSignals) { capabilities.add('image-generation'); capabilities.add('asset-pipeline'); }
+  const mediaSignals = ['Audio', 'Video', 'Media', 'audio', 'video', 'media'].some(direct)
+    || (await findMatchingFiles(project.repository, /\.(?:mp3|wav|ogg|mp4|webm)$/i, [])).length > 0;
+  if (mediaSignals) capabilities.add('media');
+  return [...capabilities];
+}
+
+function catalogSystemRow(definition, detection, usedByProjects, activeProjectId) {
+  return {
+    id: `auto-${definition.id}`, name: definition.name, category: definition.category,
+    ok: Boolean(detection.ok), status: detection.ok ? 'vorhanden' : 'fehlt', detail: detection.text,
+    path: detection.path || null, scope: 'global', autoDetected: true, tier: definition.tier,
+    installKey: definition.install ? definition.id : null, reason: definition.reason || null,
+    capabilities: definition.capabilities || [], usedByProjects,
+    relevantToCurrentProject: usedByProjects.some((item) => item.id === activeProjectId),
+  };
 }
 
 async function getSystemInventory(project, force = false) {
+  const registry = await loadProjects();
+  const definitions = await loadSystemCatalog();
   if (force || !systemCache || Date.now() - systemCacheAt > 60000) {
-    const graphifyCommand = fs.existsSync(GRAPHIFY_PYTHON) ? GRAPHIFY_PYTHON : 'python.exe';
-    const [codex, claude, hermes, ollama, graphify, node, uv, gh, git, mcp] = await Promise.all([
-      commandSummary('codex.exe', ['--version']), commandSummary('claude.exe', ['--version']),
-      commandSummary('hermes.exe', ['--version']), commandSummary('ollama.exe', ['--version']),
-      commandSummary(graphifyCommand, ['-m', 'graphify', '--version']), commandSummary('node.exe', ['--version']),
-      commandSummary('uv.exe', ['--version']), commandSummary('gh.exe', ['--version']), commandSummary('git.exe', ['--version']), mcpSummary(),
-    ]);
-    let ollamaModels = '';
-    if (ollama.ok) {
-      const result = await execFileAsync('ollama.exe', ['list']);
-      ollamaModels = result.stdout.split(/\r?\n/).slice(1).filter(Boolean).map((line) => line.trim().split(/\s{2,}/)[0]).join(', ');
-    }
-    let comfySettings = null;
-    let comfyCloud = false;
-    if (fs.existsSync(COMFY_SETTINGS)) {
-      try { comfySettings = JSON.parse(await fsp.readFile(COMFY_SETTINGS, 'utf8')); } catch { comfySettings = null; }
-      const installationsPath = path.join(path.dirname(COMFY_SETTINGS), 'installations.json');
-      if (fs.existsSync(installationsPath)) {
-        try { comfyCloud = JSON.parse(await fsp.readFile(installationsPath, 'utf8')).some((entry) => entry.sourceId === 'cloud' && entry.status === 'installed'); } catch { comfyCloud = false; }
-      }
-    }
-    const modelRoots = Array.isArray(comfySettings?.modelsDirs) ? comfySettings.modelsDirs : [];
-    const fluxFiles = [];
-    for (const root of modelRoots) await findMatchingFiles(root, /flux|schnell|flux1|flux2/i, fluxFiles);
-    systemCache = [
-      systemRow('Codex CLI', 'KI-Agent', codex.ok, codex.ok ? 'installiert' : 'fehlt', codex.text),
-      systemRow('Claude Code', 'KI-Agent', claude.ok, claude.ok ? 'installiert' : 'fehlt', claude.text),
-      systemRow('Hermes Agent', 'Orchestrierung', hermes.ok, hermes.ok ? 'installiert' : 'fehlt', hermes.text),
-      systemRow('Ollama', 'Lokale KI', ollama.ok, ollama.ok ? 'bereit' : 'fehlt', ollamaModels || ollama.text),
-      systemRow('Graphify', 'Kontext', graphify.ok, graphify.ok ? 'installiert' : 'fehlt', graphify.text),
-      systemRow('Obsidian', 'Wissen', fs.existsSync(OBSIDIAN_VAULT), fs.existsSync(OBSIDIAN_VAULT) ? 'konfiguriert' : 'fehlt', OBSIDIAN_VAULT, OBSIDIAN_VAULT),
-      systemRow('ECC', 'Kontext', fs.existsSync(ECC_ROOT), fs.existsSync(ECC_ROOT) ? 'installiert' : 'fehlt', ECC_ROOT, ECC_ROOT),
-      systemRow('MCP', 'Werkzeugverbindung', mcp.ok, mcp.ok ? 'aktiv' : 'nicht aktiv', mcp.text),
-      systemRow('CC Switch', 'Provider', fs.existsSync(CC_SWITCH_EXE), fs.existsSync(CC_SWITCH_EXE) ? 'installiert' : 'fehlt', CC_SWITCH_EXE, CC_SWITCH_EXE),
-      systemRow('Comfy Desktop', 'Bildgenerierung', fs.existsSync(COMFY_EXE), fs.existsSync(COMFY_EXE) ? 'installiert' : 'fehlt', fs.existsSync(COMFY_EXE) ? COMFY_EXE : 'Nicht gefunden', COMFY_EXE),
-      systemRow('Comfy Cloud', 'Bildgenerierung', comfyCloud, comfyCloud ? 'konfiguriert' : 'nicht konfiguriert', comfyCloud ? 'Comfy-Cloud-Installation erkannt; wird vom Dashboard nicht automatisch verwendet' : 'Keine aktive Cloud-Installation'),
-      systemRow('Flux lokal', 'Bildmodell', fluxFiles.length > 0, fluxFiles.length > 0 ? 'vorhanden' : 'nicht vorhanden', fluxFiles.length ? fluxFiles.join(', ') : 'Keine Flux-Modelldateien in den konfigurierten ComfyUI-Modellordnern', fluxFiles[0] || null),
-      systemRow('GitHub CLI', 'Entwicklung', gh.ok, gh.ok ? 'installiert' : 'fehlt', gh.text),
-      systemRow('Git', 'Entwicklung', git.ok, git.ok ? 'installiert' : 'fehlt', git.text),
-      systemRow('Node.js', 'Runtime', node.ok, node.ok ? 'installiert' : 'fehlt', node.text),
-      systemRow('uv', 'Runtime', uv.ok, uv.ok ? 'installiert' : 'fehlt', uv.text),
-    ];
+    const projectCapabilities = new Map();
+    await Promise.all(registry.projects.map(async (candidate) => projectCapabilities.set(candidate.id, await detectProjectCapabilities(candidate))));
+    const detections = await Promise.all(definitions.map(detectSystem));
+    systemCache = definitions.map((definition, index) => {
+      const required = definition.capabilities || [];
+      const usedByProjects = required.length ? registry.projects
+        .filter((candidate) => required.some((capability) => projectCapabilities.get(candidate.id).includes(capability)))
+        .map((candidate) => ({ id: candidate.id, name: candidate.name })) : [];
+      return catalogSystemRow(definition, detections[index], usedByProjects, project.id);
+    });
     systemCacheAt = Date.now();
   }
   const registered = (await loadSystems()).systems
     .filter((system) => system.scope === 'global' || system.projectId === project.id)
-    .map((system) => ({ ...system, category: system.type, ok: fs.existsSync(system.path), status: fs.existsSync(system.path) ? 'registriert' : 'Pfad fehlt', detail: system.note || system.path, autoDetected: false }));
+    .map((system) => ({ ...system, category: system.type, ok: fs.existsSync(system.path), status: fs.existsSync(system.path) ? 'registriert' : 'Pfad fehlt', detail: system.note || system.path, autoDetected: false, tier: system.scope === 'project' ? 'project' : 'recommended', usedByProjects: system.scope === 'project' ? [{ id: project.id, name: project.name }] : [] }));
+  const projectCapabilities = await detectProjectCapabilities(project);
+  const projectSystem = (id, name, category, configuredPath, statusOk, reason) => ({
+    id, name, category, ok: statusOk, status: statusOk ? 'verbunden' : 'fehlt', detail: configuredPath,
+    path: configuredPath, scope: 'project', autoDetected: true, tier: 'project', installKey: null, reason,
+    relevantToCurrentProject: true, usedByProjects: [{ id: project.id, name: project.name }],
+  });
   const projectSystems = [
-    systemRow(`${project.name} Repository`, 'Projekt', fs.existsSync(project.repository), 'projektspezifisch', project.repository, project.repository, 'project'),
-    systemRow(`${project.name} Graphify`, 'Projektkontext', fs.existsSync(project.graphPath), fs.existsSync(project.graphPath) ? 'verbunden' : 'Graph fehlt', project.graphPath, project.graphPath, 'project'),
-    systemRow(`${project.name} Obsidian`, 'Projektwissen', fs.existsSync(project.obsidianPath), fs.existsSync(project.obsidianPath) ? 'verbunden' : 'Bereich fehlt', project.obsidianPath, project.obsidianPath, 'project'),
-    systemRow(`${project.name} AGENTS.md`, 'Projektregeln', fs.existsSync(path.join(project.repository, 'AGENTS.md')), fs.existsSync(path.join(project.repository, 'AGENTS.md')) ? 'vorhanden' : 'fehlt', path.join(project.repository, 'AGENTS.md'), path.join(project.repository, 'AGENTS.md'), 'project'),
+    projectSystem(`project-${project.id}-repository`, `${project.name} Repository`, 'Projekt', project.repository, fs.existsSync(project.repository), 'Verbindliche Projektquelle.'),
+    projectSystem(`project-${project.id}-graphify`, `${project.name} Graphify`, 'Projektkontext', project.graphPath, fs.existsSync(project.graphPath), 'Lokaler Discovery-Index; Originaldateien bleiben maßgeblich.'),
+    projectSystem(`project-${project.id}-obsidian`, `${project.name} Obsidian`, 'Arbeitswissen', project.obsidianPath, fs.existsSync(project.obsidianPath), 'Notizen, Runs und Entwürfe für dieses Projekt.'),
+    projectSystem(`project-${project.id}-agents`, `${project.name} AGENTS.md`, 'Projektregeln', path.join(project.repository, 'AGENTS.md'), fs.existsSync(path.join(project.repository, 'AGENTS.md')), 'Verbindliche Agentenregeln des Repositorys.'),
   ];
-  return { global: [...systemCache, ...registered.filter((system) => system.scope === 'global')], project: [...projectSystems, ...registered.filter((system) => system.scope === 'project')] };
+  return {
+    global: [...systemCache.map((system) => ({ ...system, relevantToCurrentProject: system.usedByProjects.some((item) => item.id === project.id) })), ...registered.filter((system) => system.scope === 'global')],
+    project: [...projectSystems, ...registered.filter((system) => system.scope === 'project')],
+    projectCapabilities,
+    catalogPath: SYSTEM_CATALOG_PATH,
+  };
 }
 
 function snapshotJob(job) {
@@ -464,8 +665,10 @@ function snapshotJob(job) {
 }
 
 function appendLog(job, key, chunk) {
-  const text = chunk.toString('utf8');
+  const text = stripAnsi(chunk.toString('utf8'));
   job[key] = (job[key] + text).slice(-MAX_JOB_LOG_CHARS);
+  const runMatch = text.match(/AI_RUN_DIRECTORY\s+(.+)/);
+  if (runMatch) job.runDirectory = runMatch[1].trim();
   const events = [...text.matchAll(/AI_EVENT\s+provider=([^\s]+)\s+state=([^\s]+)/g)];
   if (events.length) {
     const latest = events[events.length - 1];
@@ -522,7 +725,7 @@ async function startTask(payload) {
         if (!fs.existsSync(registeredProject.graphPath)) {
           emitJob(job, 'graphify', 'Graphify-Index wird lokal mit Ollama aufgebaut');
           const graphifyCommand = fs.existsSync(GRAPHIFY_PYTHON) ? GRAPHIFY_PYTHON : 'python.exe';
-          await runStreamingCommand(job, graphifyCommand, ['-m', 'graphify', 'extract', registeredProject.repository, '--backend', 'ollama', '--model', 'polis-coder', '--max-concurrency', '1', '--out', registeredProject.repository], registeredProject.repository, 'graphify');
+          await runStreamingCommand(job, graphifyCommand, ['-m', 'graphify', 'extract', registeredProject.repository, '--backend', 'ollama', '--model', 'polis-coder', '--token-budget', '4096', '--max-concurrency', '1', '--out', registeredProject.repository], registeredProject.repository, 'graphify');
         }
         job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
         emitJob(job, 'complete', 'Projekt, Graphify und Obsidian sind verbunden');
@@ -536,14 +739,19 @@ async function startTask(payload) {
 
   await fsp.mkdir(TASK_ROOT, { recursive: true });
   const memory = await loadMemory(project.id);
-  const memoryText = memory.notes.slice(0, 12).map((note) => `- ${note.text}`).join('\n') || '- No reviewed learning notes yet.';
+  const memoryText = relevantMemoryText(memory.notes, task);
   const registeredSystems = (await loadSystems()).systems.filter((system) => system.scope === 'global' || system.projectId === project.id);
   const systemText = registeredSystems.map((system) => `- ${system.name} (${system.type}): ${system.path}${system.note ? ` — ${system.note}` : ''}`).join('\n') || '- No additional systems registered for agent use.';
   const id = randomUUID();
+  const attachments = await saveTaskAttachments(id, payload.attachments);
   const worktree = mode === 'Write' ? await createTaskWorktree(project, task, id) : { workingDirectory: project.repository, branch: null };
   const workingDirectory = worktree.workingDirectory;
   const taskPath = path.join(TASK_ROOT, `${id}.md`);
-  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
+  const attachmentSection = attachments.length
+    ? `\nAttachment-ID: ${id}\n\n## Attachments\n\n${attachments.map((attachment) => `- ${attachment.name} (${attachment.type}): ${attachment.path}`).join('\n')}\n`
+    : '';
+  const strategy = deterministicTaskStrategy(task, mode, project);
+  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
   await fsp.writeFile(taskPath, taskPackage, 'utf8');
 
   const args = [
@@ -570,6 +778,8 @@ async function startTask(payload) {
     job.status = code === 0 ? 'completed' : job.status === 'stopping' ? 'stopped' : 'failed';
     const match = job.stdout.match(/AI_PROJECT_ROUTER_OK\s+provider=([^\s]+)\s+run=(.+)/);
     if (match) { job.provider = match[1]; job.runDirectory = match[2].trim(); }
+    const runMatch = job.stdout.match(/AI_RUN_DIRECTORY\s+(.+)/);
+    if (!job.runDirectory && runMatch) job.runDirectory = runMatch[1].trim();
     job.child = null; statusCacheAt = 0;
   });
   return snapshotJob(job);
@@ -594,6 +804,36 @@ function runStreamingCommand(job, command, args, cwd, label) {
       else reject(new Error(`${label} failed with exit code ${code}.`));
     });
   });
+}
+
+async function installSystem(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const installKey = String(payload.installKey || '');
+  const definition = (await loadSystemCatalog()).find((candidate) => candidate.id === installKey);
+  const installer = definition?.install;
+  if (!installer) throw new Error('This system has no approved automatic installer.');
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const job = {
+    id, kind: 'install', phase: 'queued', projectId: project.id, projectName: project.name,
+    status: 'running', provider: 'Local setup', mode: 'Install', workingDirectory: project.repository,
+    taskPreview: `${installer.name} installieren`, createdAt: now, startedAt: now, finishedAt: null,
+    exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
+  };
+  jobs.set(id, job);
+  (async () => {
+    try {
+      await runStreamingCommand(job, installer.command, installer.args, project.repository, `Installation ${installer.name}`);
+      job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
+      emitJob(job, 'complete', `${installer.name} wurde installiert. Ein Neustart des Dashboards kann erforderlich sein.`);
+    } catch (error) {
+      job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
+      appendLog(job, 'stderr', `${error.message}\nInstallation wurde nicht als erfolgreich markiert.\n`);
+    } finally {
+      systemCache = null; systemCacheAt = 0; componentCache.clear();
+    }
+  })();
+  return snapshotJob(job);
 }
 
 async function provisionProject(payload) {
@@ -645,7 +885,7 @@ async function provisionProject(payload) {
 
       const graphPath = path.join(repository, 'graphify-out', 'graph.json');
       emitJob(job, 'graphify', 'Lokaler Graphify-Index wird mit Ollama aufgebaut');
-      await runStreamingCommand(job, GRAPHIFY_PYTHON, ['-m', 'graphify', 'extract', repository, '--backend', 'ollama', '--model', 'polis-coder', '--max-concurrency', '1', '--out', repository], repository, 'graphify');
+      await runStreamingCommand(job, GRAPHIFY_PYTHON, ['-m', 'graphify', 'extract', repository, '--backend', 'ollama', '--model', 'polis-coder', '--token-budget', '4096', '--max-concurrency', '1', '--out', repository], repository, 'graphify');
 
       if (createGitHub) {
         emitJob(job, 'github', `GitHub-Repository wird ${visibility} erstellt`);
@@ -697,8 +937,23 @@ function extractGoal(taskPackage) {
   return marker >= 0 ? taskPackage.slice(marker + 7).trim() : taskPackage.trim();
 }
 
+function packageField(taskPackage, name) {
+  const match = taskPackage.match(new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*(.+)$`, 'm'));
+  return match ? match[1].trim() : null;
+}
+
+function runSummary(responseText, result, status) {
+  const testMatch = String(responseText || '').match(/(?:tests?|npm test|pytest|GUT)[^\r\n]{0,100}(?:PASS|passed|green|erfolgreich)/i);
+  const changedFiles = Array.isArray(result?.changed_files) ? result.changed_files.length : Number.isInteger(result?.files_changed) ? result.files_changed : null;
+  return {
+    tests: testMatch ? testMatch[0].slice(0, 120) : null,
+    filesChanged: changedFiles === null ? null : `${changedFiles} Datei(en) geändert`,
+    gate: status === 'PASS' ? 'Ergebnis bereit zur Prüfung' : status === 'FAIL' ? 'Blockiert: Lauf fehlgeschlagen' : null,
+  };
+}
+
 function friendlyOutput(raw) {
-  const text = String(raw || '').trim();
+  const text = stripAnsi(raw).trim();
   if (!text) return '';
   try {
     const parsed = JSON.parse(text);
@@ -713,7 +968,8 @@ function friendlyOutput(raw) {
       if (typeof candidate === 'string') messages.push(candidate);
     } catch {}
   }
-  return (messages.length ? messages.join('\n\n') : text).slice(-120000);
+  const response = messages.length ? messages[messages.length - 1] : text;
+  return response.replace(/\r?\n?AI_PROJECT_TASK_COMPLETE\s*$/m, '').trim().slice(-120000);
 }
 
 async function runRecord(directory, projectId) {
@@ -733,9 +989,13 @@ async function runRecord(directory, projectId) {
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('attempt-'))
     .map((entry) => path.join(directory, entry.name)).sort();
   let responseText = '';
+  let errorText = '';
   if (attemptDirectories.length) {
-    const outputPath = path.join(attemptDirectories[attemptDirectories.length - 1], 'stdout.log');
+    const latestAttempt = attemptDirectories[attemptDirectories.length - 1];
+    const outputPath = path.join(latestAttempt, 'stdout.log');
     if (fs.existsSync(outputPath)) responseText = friendlyOutput(await readBounded(outputPath, 2 * 1024 * 1024));
+    const errorPath = path.join(latestAttempt, 'stderr.log');
+    if (fs.existsSync(errorPath)) errorText = friendlyOutput(await readBounded(errorPath, 2 * 1024 * 1024));
   }
   if (!responseText) {
     for (const fallbackName of ['final-summary.md', 'codex-output.md', 'reviewer-output.md']) {
@@ -746,10 +1006,14 @@ async function runRecord(directory, projectId) {
       }
     }
   }
+  if (!responseText && errorText) responseText = errorText;
+  const status = result ? result.status : errorText ? 'FAIL' : 'external';
+  const summary = runSummary(responseText, result, status);
   return {
     name: path.basename(directory), path: directory, modifiedAt: stat.mtime.toISOString(),
-    status: result ? result.status : 'external', provider: result ? result.selected_provider || null : null,
-    mode: result?.mode || null, task: extractGoal(taskPackage), response: responseText,
+    status, provider: result ? result.selected_provider || null : null,
+    mode: result?.mode || packageField(taskPackage, 'Mode'), task: extractGoal(taskPackage), response: responseText,
+    attachments: await taskAttachmentsFromPackage(taskPackage), ...summary,
   };
 }
 
@@ -760,6 +1024,52 @@ async function listRuns(projectId) {
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith('_'))
     .map((entry) => runRecord(path.join(RUN_ROOT, entry.name), projectId)));
   return records.filter(Boolean).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)).slice(0, 40);
+}
+
+async function portfolioProject(project) {
+  const [components, runs, head] = await Promise.all([
+    getComponents(project), listRuns(project.id), commandSummary('git.exe', ['-C', project.repository, 'rev-parse', 'HEAD']),
+  ]);
+  const latest = runs[0] || null;
+  const running = Array.from(jobs.values()).find((job) => job.projectId === project.id && job.status === 'running');
+  let graphStatus = components.graphify.ok ? 'aktuell' : 'fehlt';
+  if (components.graphify.ok && head.ok) {
+    try {
+      const graph = JSON.parse(await fsp.readFile(project.graphPath, 'utf8'));
+      const builtAt = String(graph.built_at_commit || '');
+      if (builtAt && !head.text.startsWith(builtAt) && !builtAt.startsWith(head.text)) graphStatus = 'veraltet';
+    } catch { graphStatus = 'fehlerhaft'; }
+  }
+  let state = 'Wartet'; let stateClass = 'attention'; let nextAction = 'Neue Aufgabe definieren';
+  if (!components.repository.ok || latest?.status === 'FAIL') {
+    state = 'Blockiert'; stateClass = 'blocked'; nextAction = latest?.status === 'FAIL' ? 'Fehlgeschlagenen Lauf prüfen' : 'Repository-Verbindung prüfen';
+  } else if (running) {
+    state = 'Aktiv'; stateClass = 'active'; nextAction = 'Lauf im Live-Feed beobachten';
+  } else if (latest?.status === 'PASS') {
+    state = 'Bereit zur Prüfung'; stateClass = 'ready'; nextAction = 'Ergebnis prüfen und nächste Entscheidung treffen';
+  } else if (latest) {
+    state = 'Wartet'; stateClass = 'attention'; nextAction = 'Letzten Lauf prüfen';
+  }
+  return {
+    id: project.id, name: project.name, state, stateClass,
+    lastTask: latest ? `${latest.provider || latest.status} · ${String(latest.task || 'Lauf ohne gespeicherten Auftrag').slice(0, 150)}` : null,
+    latestStatus: latest?.status || null, provider: running?.provider || latest?.provider || null,
+    repository: components.repository, graph: { status: graphStatus, ok: graphStatus === 'aktuell' }, nextAction,
+  };
+}
+
+async function getPortfolio() {
+  const registry = await loadProjects();
+  const projects = await Promise.all(registry.projects.map(portfolioProject));
+  const attention = [];
+  for (const project of projects) {
+    if (!project.repository.ok) attention.push({ projectId: project.id, projectName: project.name, severity: 'error', message: 'Repository ist nicht erreichbar.' });
+    if (project.latestStatus === 'FAIL') attention.push({ projectId: project.id, projectName: project.name, severity: 'error', message: 'Der letzte Task ist fehlgeschlagen.' });
+    if (project.repository.ok && !project.repository.clean) attention.push({ projectId: project.id, projectName: project.name, severity: 'warning', message: 'Das Repository enthält noch nicht eingeordnete Änderungen.' });
+    if (project.graph.status === 'fehlt' || project.graph.status === 'fehlerhaft') attention.push({ projectId: project.id, projectName: project.name, severity: 'warning', message: 'Der Graphify-Index fehlt oder ist nicht lesbar.' });
+    if (project.graph.status === 'veraltet') attention.push({ projectId: project.id, projectName: project.name, severity: 'warning', message: 'Der Graphify-Index basiert nicht auf dem aktuellen Commit.' });
+  }
+  return { generatedAt: new Date().toISOString(), activeProjectId: registry.activeProjectId, attention, projects };
 }
 
 function endpointId(value) {
@@ -827,7 +1137,7 @@ function withinRoot(root, candidate) {
 }
 
 async function getObsidian(project, query, selectedFile) {
-  if (!fs.existsSync(project.obsidianPath)) throw new Error('Obsidian project area does not exist.');
+  await ensureObsidianProjectArea(project);
   const files = await walkMarkdown(project.obsidianPath);
   const needle = String(query || '').trim().toLowerCase();
   const filtered = [];
@@ -849,6 +1159,77 @@ async function getObsidian(project, query, selectedFile) {
     note = { path: path.relative(project.obsidianPath, candidate), content: await readBounded(candidate) };
   }
   return { root: project.obsidianPath, files: filtered, total: files.length, note };
+}
+
+function parseGitStatus(output) {
+  const records = output.split('\0');
+  const files = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record || record.length < 4) continue;
+    const staged = record[0]; const working = record[1]; const filePath = record.slice(3);
+    let originalPath = null;
+    if (staged === 'R' || staged === 'C' || working === 'R' || working === 'C') originalPath = records[++index] || null;
+    files.push({ path: filePath, originalPath, staged, working, untracked: staged === '?' && working === '?' });
+  }
+  return files;
+}
+
+async function getGitState(project) {
+  const branch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '--show-current']);
+  const status = await execFileAsync('git.exe', ['-C', project.repository, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  if (status.exitCode !== 0 || branch.exitCode !== 0) throw new Error(status.stderr.trim() || branch.stderr.trim() || 'Git status failed.');
+  const remote = await execFileAsync('git.exe', ['-C', project.repository, 'remote', 'get-url', 'origin']);
+  const head = await execFileAsync('git.exe', ['-C', project.repository, 'log', '-1', '--pretty=format:%h%x00%s%x00%aI']);
+  const upstream = await execFileAsync('git.exe', ['-C', project.repository, 'rev-list', '--left-right', '--count', '@{upstream}...HEAD']);
+  const ghAuth = await execFileAsync('gh.exe', ['auth', 'status', '--active']);
+  const diff = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--no-ext-diff', '--unified=3']);
+  const cachedDiff = await execFileAsync('git.exe', ['-C', project.repository, 'diff', '--cached', '--no-ext-diff', '--unified=3']);
+  const files = parseGitStatus(status.stdout);
+  const [behind = 0, ahead = 0] = upstream.exitCode === 0 ? upstream.stdout.trim().split(/\s+/).map(Number) : [0, 0];
+  const [hash = '', subject = '', committedAt = ''] = head.stdout.split('\0');
+  const diffText = [cachedDiff.stdout && '# Bereits gestaged\n' + cachedDiff.stdout, diff.stdout && '# Arbeitsverzeichnis\n' + diff.stdout].filter(Boolean).join('\n');
+  return {
+    projectId: project.id, projectName: project.name, repository: project.repository,
+    branch: branch.stdout.trim(), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
+    githubAuthenticated: ghAuth.exitCode === 0, clean: files.length === 0, files,
+    ahead, behind, hasUpstream: upstream.exitCode === 0,
+    lastCommit: hash ? { hash, subject, committedAt } : null,
+    diff: diffText.slice(0, 400000), diffTruncated: diffText.length > 400000,
+  };
+}
+
+async function commitGitChanges(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const message = String(payload.message || '').trim();
+  const requestedPaths = [...new Set(Array.isArray(payload.paths) ? payload.paths.map(String) : [])];
+  if (!message || message.length > 200) throw new Error('Commit message must contain between 1 and 200 characters.');
+  if (!requestedPaths.length) throw new Error('Select at least one changed file.');
+  const state = await getGitState(project);
+  const currentPaths = new Set(state.files.map((file) => file.path));
+  if (requestedPaths.some((candidate) => !currentPaths.has(candidate) || path.isAbsolute(candidate) || candidate.split(/[\\/]/).includes('..'))) {
+    throw new Error('A selected path is no longer part of the current Git status. Reload the review.');
+  }
+  const alreadyStaged = state.files.filter((file) => file.staged !== ' ' && file.staged !== '?').map((file) => file.path);
+  if (alreadyStaged.some((candidate) => !requestedPaths.includes(candidate))) {
+    throw new Error('There are already staged files outside the selection. Select them too or unstage them before committing.');
+  }
+  const add = await execFileAsync('git.exe', ['-C', project.repository, 'add', '--', ...requestedPaths], { timeout: 60000 });
+  if (add.exitCode !== 0) throw new Error(add.stderr.trim() || 'Git add failed.');
+  const commit = await execFileAsync('git.exe', ['-C', project.repository, 'commit', '-m', message], { timeout: 120000 });
+  if (commit.exitCode !== 0) throw new Error(commit.stderr.trim() || commit.stdout.trim() || 'Git commit failed.');
+  componentCache.delete(project.id);
+  return { ok: true, output: commit.stdout.trim(), state: await getGitState(project) };
+}
+
+async function pushGitBranch(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const state = await getGitState(project);
+  if (!state.branch || !/^[A-Za-z0-9._\/-]+$/.test(state.branch)) throw new Error('Current branch name is not safe to push.');
+  if (!state.remote) throw new Error('No origin remote is configured.');
+  const push = await execFileAsync('git.exe', ['-C', project.repository, 'push', '-u', 'origin', state.branch], { timeout: 180000 });
+  if (push.exitCode !== 0) throw new Error(push.stderr.trim() || push.stdout.trim() || 'Git push failed.');
+  return { ok: true, output: (push.stdout || push.stderr).trim(), state: await getGitState(project) };
 }
 
 async function openRun(runPath) {
@@ -878,6 +1259,7 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, `http://${HOST}:${PORT}`);
     if (request.method === 'GET' && url.pathname === '/api/health') return sendJson(response, 200, { status: 'ok', pid: process.pid, host: HOST, port: PORT });
     if (request.method === 'GET' && url.pathname === '/api/projects') return sendJson(response, 200, await loadProjects());
+    if (request.method === 'GET' && url.pathname === '/api/portfolio') return sendJson(response, 200, await getPortfolio());
     if (request.method === 'POST' && url.pathname === '/api/projects') return sendJson(response, 201, await addProject(await readJsonBody(request)));
     const selectMatch = url.pathname.match(/^\/api\/projects\/([a-z0-9-]+)\/select$/);
     if (request.method === 'POST' && selectMatch) return sendJson(response, 200, await selectProject(selectMatch[1]));
@@ -892,6 +1274,7 @@ const server = http.createServer(async (request, response) => {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getSystemInventory(project, url.searchParams.get('force') === '1'));
     }
     if (request.method === 'POST' && url.pathname === '/api/systems') return sendJson(response, 201, await addSystem(await readJsonBody(request)));
+    if (request.method === 'POST' && url.pathname === '/api/systems/install') return sendJson(response, 202, await installSystem(await readJsonBody(request)));
     const systemMatch = url.pathname.match(/^\/api\/systems\/([a-f0-9-]+)$/);
     if (request.method === 'DELETE' && systemMatch) return sendJson(response, 200, await removeSystem(systemMatch[1]));
     if (request.method === 'GET' && url.pathname === '/api/memory') {
@@ -906,6 +1289,11 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/obsidian') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getObsidian(project, url.searchParams.get('q'), url.searchParams.get('file')));
     }
+    if (request.method === 'GET' && url.pathname === '/api/git') {
+      const { project } = await getProject(projectId); return sendJson(response, 200, await getGitState(project));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/git/commit') return sendJson(response, 200, await commitGitChanges(await readJsonBody(request)));
+    if (request.method === 'POST' && url.pathname === '/api/git/push') return sendJson(response, 200, await pushGitBranch(await readJsonBody(request)));
     if (request.method === 'GET' && url.pathname === '/api/jobs') {
       const rows = Array.from(jobs.values()).map(snapshotJob).filter((job) => !projectId || job.projectId === projectId || job.kind === 'provision' || job.kind === 'dashboard-command').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       return sendJson(response, 200, rows);
@@ -913,6 +1301,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/runs') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await listRuns(project.id));
     }
+    if (request.method === 'GET' && url.pathname === '/api/task-attachment') return serveTaskAttachment(url, response);
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, { runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT, defaultProjectParent: fs.existsSync('C:\\Repos') ? 'C:\\Repos' : path.join(HOME, 'Documents', 'Projects') });
     if (request.method === 'POST' && url.pathname === '/api/tasks') return sendJson(response, 202, await startTask(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/projects/provision') return sendJson(response, 202, await provisionProject(await readJsonBody(request)));

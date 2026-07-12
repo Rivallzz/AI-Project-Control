@@ -18,6 +18,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$consoleUtf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $consoleUtf8
+[Console]::OutputEncoding = $consoleUtf8
+$OutputEncoding = $consoleUtf8
 
 function Invoke-CapturedProcess {
     param(
@@ -36,6 +40,10 @@ function Invoke-CapturedProcess {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.CreateNoWindow = $true
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $start.StandardInputEncoding = $utf8
+    $start.StandardOutputEncoding = $utf8
+    $start.StandardErrorEncoding = $utf8
     foreach ($argument in $Arguments) {
         [void]$start.ArgumentList.Add($argument)
     }
@@ -105,8 +113,29 @@ if ($Mode -eq 'Write' -and $gitBefore -and -not $AllowDirtyWorkingTree) {
 $taskName = [System.IO.Path]::GetFileNameWithoutExtension($taskPath) -replace '[^A-Za-z0-9_-]', '-'
 $runDir = Join-Path $RunRoot ("{0}_{1}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $taskName)
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+[Console]::Out.WriteLine("AI_RUN_DIRECTORY $runDir")
+[Console]::Out.Flush()
 Copy-Item -LiteralPath $taskPath -Destination (Join-Path $runDir 'task-package.md')
 $status | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'provider-status.json') -Encoding utf8
+
+$contextPolicy = if ($Mode -eq 'ReadOnly') {
+@"
+Read-only context policy:
+- Treat ordinary questions and ideation requests as concise advisory work.
+- Read AGENTS.md, then use Graphify for focused discovery when available.
+- Read only the minimum original files required to answer; do not scan the complete repository or documentation tree by default.
+- Do not run the full test suite for an advisory answer unless the task explicitly requests validation or a repository-wide audit.
+- Broaden context only when the task explicitly requires cross-project, architecture-wide, consistency, security or release analysis.
+"@
+}
+else {
+@"
+Write-task context policy:
+- Follow the complete project workflow and read every owner document required by AGENTS.md.
+- Use Graphify to focus discovery, then verify every changed or decision-owning file directly.
+- Run the validation required for the affected systems.
+"@
+}
 
 $prompt = @"
 You are executing a controlled task for the local project "$ProjectName".
@@ -122,6 +151,8 @@ Mandatory workflow:
 8. End the final response with exactly AI_PROJECT_TASK_COMPLETE only when the task is complete. Otherwise end with AI_PROJECT_TASK_BLOCKED: followed by the reason.
 
 Execution mode: $Mode
+
+$contextPolicy
 
 Task package:
 
@@ -217,7 +248,7 @@ Provider handoff:
     $result.Stdout | Set-Content -LiteralPath (Join-Path $attemptDir 'stdout.log') -Encoding utf8
     $result.Stderr | Set-Content -LiteralPath (Join-Path $attemptDir 'stderr.log') -Encoding utf8
     $combined = $result.Stdout + "`n" + $result.Stderr
-    $limited = Test-UsageLimitFailure -Text $combined
+    $limited = $result.ExitCode -ne 0 -and (Test-UsageLimitFailure -Text $combined)
     $completionConfirmed = $result.ExitCode -eq 0 -and $result.Stdout -match 'AI_PROJECT_TASK_COMPLETE'
 
     $attempt = [pscustomobject]@{
@@ -256,9 +287,25 @@ Provider handoff:
         throw "Provider $candidate changed the worktree during a read-only task. Automatic fallback stopped; inspect $attemptDir."
     }
     if ($result.ExitCode -eq 0 -and -not $completionConfirmed -and -not $limited) {
+        [pscustomobject]@{
+            status = 'FAIL'
+            reason = 'Provider exited without the required completion sentinel.'
+            selected_provider = $candidate
+            mode = $Mode
+            attempts = $attempts
+            handoffs = $handoffs
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         throw "Provider $candidate exited without the required completion sentinel. Automatic fallback stopped; inspect $attemptDir."
     }
     if (-not $limited) {
+        [pscustomobject]@{
+            status = 'FAIL'
+            reason = 'Provider failed for a non-quota reason.'
+            selected_provider = $candidate
+            mode = $Mode
+            attempts = $attempts
+            handoffs = $handoffs
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         throw "Provider $candidate failed for a non-quota reason. Automatic fallback stopped; inspect $attemptDir."
     }
 

@@ -19,7 +19,6 @@
     </div>
     <div class="topbar-actions">
       <span id="connectionState" class="connection pending">Verbindung wird geprüft</span>
-      <button id="refreshButton" class="button secondary" type="button">Aktualisieren</button>
     </div>
   </header>
 
@@ -41,25 +40,42 @@
 
     <div class="workspace">
       <nav class="view-tabs" aria-label="Dashboard-Bereiche">
+        <button class="tab-button" type="button" data-view="portfolio">Portfolio</button>
         <button class="tab-button active" type="button" data-view="tasks">Arbeitsbereich</button>
+        <button class="tab-button" type="button" data-view="git">Prüfen & Git</button>
         <button class="tab-button" type="button" data-view="knowledge">Wissen</button>
         <button class="tab-button" type="button" data-view="systems">Systeme</button>
         <button class="tab-button" type="button" data-view="projects">Projekte</button>
       </nav>
 
       <div class="content">
+        <div id="portfolioView" class="view hidden" data-view-panel="portfolio">
+          <section class="panel portfolio-panel" aria-labelledby="attentionHeading">
+            <div class="section-heading">
+              <div><h2 id="attentionHeading">Aufmerksamkeit erforderlich</h2><p>Nur Abweichungen, Blockaden und wartende Entscheidungen</p></div>
+            </div>
+            <div id="attentionList" class="attention-list" aria-live="polite"></div>
+          </section>
+
+          <section class="panel portfolio-panel" aria-labelledby="portfolioHeading">
+            <div class="section-heading"><div><h2 id="portfolioHeading">Projektportfolio</h2><p>Ein ruhiger Überblick über alle verbundenen Projekte</p></div></div>
+            <div id="portfolioList" class="portfolio-list" aria-live="polite"></div>
+          </section>
+        </div>
+
         <div id="tasksView" class="view" data-view-panel="tasks">
           <div class="activity-grid">
             <section class="panel chat-panel" aria-labelledby="historyHeading">
               <div class="section-heading">
                 <div><h2 id="historyHeading">Aufgabe und Rückmeldung</h2><p id="taskHeading">Projektgespräch</p></div>
-                <button id="historyRefreshButton" class="button secondary" type="button">Aktualisieren</button>
               </div>
               <div id="conversationHistory" class="conversation-history" aria-live="polite"></div>
 
               <form id="taskForm" class="chat-composer">
                 <label for="taskText">Nachricht oder Auftrag</label>
-                <textarea id="taskText" name="task" rows="7" maxlength="200000" required placeholder="Beschreibe eine Aufgabe oder schreibe z. B. 'Projekt C:\Repos\MeinProjekt hinzufügen'."></textarea>
+                <textarea id="taskText" name="task" rows="3" maxlength="200000" required placeholder="Nachricht oder Aufgabe für das ausgewählte Projekt"></textarea>
+
+                <div id="attachmentPreview" class="attachment-preview hidden" aria-live="polite"></div>
 
                 <div class="composer-options">
                   <div>
@@ -80,7 +96,7 @@
                       </details>
                     </div>
                     <select id="modeSelect" name="mode">
-                      <option value="ReadOnly">Nur lesen</option>
+                      <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
                       <option value="Write">Änderungen erlauben</option>
                     </select>
                   </div>
@@ -91,6 +107,8 @@
                 </div>
 
                 <div class="form-actions">
+                  <input id="attachmentInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+                  <button id="attachmentButton" class="button secondary" type="button" title="Bild auswählen oder Screenshot mit Strg+V einfügen">Bild hinzufügen</button>
                   <button id="startButton" class="button primary" type="submit">Senden</button>
                   <span id="formMessage" class="form-message" role="status"></span>
                 </div>
@@ -112,44 +130,77 @@
             <section class="panel live-feed-panel" aria-labelledby="jobsHeading">
               <div class="section-heading">
                 <div><h2 id="jobsHeading">Live-Feed</h2><p>Provider, Übergaben, Tools und Subagent-Ausgabe</p></div>
+                <div class="segmented feed-filter" role="group" aria-label="Live-Feed filtern">
+                  <button class="segment active" type="button" data-feed-filter="important">Wichtig</button>
+                  <button class="segment" type="button" data-feed-filter="errors">Fehler</button>
+                  <button class="segment" type="button" data-feed-filter="all">Alles</button>
+                </div>
               </div>
               <div id="jobList" class="job-list" aria-live="polite"></div>
             </section>
           </div>
         </div>
 
+        <div id="gitView" class="view hidden" data-view-panel="git">
+          <section class="panel git-panel" aria-labelledby="gitHeading">
+            <div class="section-heading">
+              <div><h2 id="gitHeading">Änderungen prüfen</h2><p id="gitProjectName">Lokaler Repository-Zustand</p></div>
+              <span id="gitState" class="status warn">wird geprüft</span>
+            </div>
+            <div id="gitSummary" class="git-summary" aria-live="polite"></div>
+            <div class="git-review-layout">
+              <section class="git-files" aria-labelledby="gitFilesHeading">
+                <div class="source-heading"><div><span class="source-badge authority">Git</span><h3 id="gitFilesHeading">Geänderte Dateien</h3></div><button id="gitSelectAll" class="button secondary table-button" type="button">Alle auswählen</button></div>
+                <div id="gitFileList" class="git-file-list"></div>
+              </section>
+              <section class="git-diff" aria-labelledby="gitDiffHeading">
+                <div class="source-heading"><div><span class="source-badge authority">Repository</span><h3 id="gitDiffHeading">Schreibgeschützter Diff</h3></div></div>
+                <pre id="gitDiffContent">Keine Änderungen geladen.</pre>
+              </section>
+            </div>
+            <div class="git-actions">
+              <div class="git-commit-control"><label for="gitCommitMessage">Commit-Nachricht</label><input id="gitCommitMessage" maxlength="200" placeholder="Kurze, konkrete Zusammenfassung"></div>
+              <button id="gitCommitButton" class="button primary" type="button">Auswahl committen</button>
+              <button id="gitPushButton" class="button secondary" type="button">Aktuellen Branch pushen</button>
+              <span id="gitMessage" class="form-message" role="status"></span>
+            </div>
+          </section>
+        </div>
+
         <div id="knowledgeView" class="view hidden" data-view-panel="knowledge">
           <section class="panel knowledge-panel" aria-labelledby="knowledgeHeading">
             <div class="section-heading">
               <div><h2 id="knowledgeHeading">Projektwissen</h2><p id="knowledgeProjectName"></p></div>
-              <div class="segmented" role="group" aria-label="Wissensquelle">
-                <button class="segment active" type="button" data-knowledge="graphify">Graphify</button>
-                <button class="segment" type="button" data-knowledge="obsidian">Obsidian</button>
-              </div>
+              <div class="knowledge-legend"><span class="source-badge authority">Repository maßgeblich</span><span class="source-badge working">Obsidian Arbeitskontext</span></div>
             </div>
-
-            <div id="graphifyPanel" data-knowledge-panel="graphify">
-              <div class="knowledge-toolbar">
-                <input id="graphSearch" type="search" placeholder="Knoten, Datei oder Community suchen" aria-label="Graphify durchsuchen">
-                <button id="graphRefreshButton" class="button secondary" type="button">Graph laden</button>
-              </div>
-              <div id="graphStats" class="knowledge-stats"></div>
-              <div class="graph-layout">
-                <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Graphify-Beziehungsübersicht"></canvas>
-                <aside id="graphDetails" class="knowledge-details"><p class="empty">Wähle einen Knoten im Graphen.</p></aside>
-              </div>
+            <div class="knowledge-toolbar">
+              <input id="knowledgeSearch" type="search" placeholder="Graph, Repository-Verweise und Arbeitsnotizen durchsuchen" aria-label="Projektwissen durchsuchen">
+              <span id="knowledgeLoadState" class="knowledge-load-state" aria-live="polite"></span>
             </div>
-
-            <div id="obsidianPanel" class="hidden" data-knowledge-panel="obsidian">
-              <div class="knowledge-toolbar">
-                <input id="obsidianSearch" type="search" placeholder="Notizen durchsuchen" aria-label="Obsidian durchsuchen">
-                <button id="obsidianRefreshButton" class="button secondary" type="button">Notizen laden</button>
-              </div>
-              <div id="obsidianStats" class="knowledge-stats"></div>
-              <div class="notes-layout">
-                <div id="noteList" class="note-list" aria-label="Obsidian-Notizen"></div>
-                <article class="note-reader"><h3 id="noteTitle">Keine Notiz ausgewählt</h3><pre id="noteContent">Wähle links eine Notiz aus.</pre></article>
-              </div>
+            <div class="knowledge-unified-grid">
+              <section class="knowledge-source graph-source" aria-labelledby="graphSourceHeading">
+                <div class="source-heading">
+                  <div><span class="source-badge discovery">Graphify</span><h3 id="graphSourceHeading">Zusammenhänge</h3></div>
+                  <div class="graph-controls" role="group" aria-label="Graph-Zoom">
+                    <button id="graphZoomOut" class="icon-button" type="button" title="Verkleinern" aria-label="Graph verkleinern">−</button>
+                    <button id="graphZoomFit" class="icon-button fit-button" type="button" title="Einpassen" aria-label="Graph einpassen">Fit</button>
+                    <button id="graphZoomIn" class="icon-button" type="button" title="Vergrößern" aria-label="Graph vergrößern">+</button>
+                  </div>
+                </div>
+                <div id="graphStats" class="knowledge-stats"></div>
+                <div class="graph-layout">
+                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Graphify-Beziehungsübersicht"></canvas>
+                  <aside id="graphDetails" class="knowledge-details"><p class="empty">Wähle einen Knoten im Graphen.</p></aside>
+                </div>
+              </section>
+              <section class="knowledge-source notes-source" aria-labelledby="notesSourceHeading">
+                <div class="source-heading"><div><span class="source-badge working">Obsidian</span><h3 id="notesSourceHeading">Arbeitsnotizen</h3></div></div>
+                <div id="obsidianStats" class="knowledge-stats"></div>
+                <div class="notes-layout">
+                  <div id="noteList" class="note-list" aria-label="Obsidian-Notizen"></div>
+                  <article class="note-reader"><h3 id="noteTitle">Keine Notiz ausgewählt</h3><pre id="noteContent">Wähle eine Notiz aus.</pre></article>
+                </div>
+              </section>
             </div>
           </section>
         </div>
@@ -157,9 +208,10 @@
         <div id="systemsView" class="view hidden" data-view-panel="systems">
           <section class="panel" aria-labelledby="systemsHeading">
             <div class="section-heading">
-              <div><h2 id="systemsHeading">Systeminventar</h2><p>Globale und projektspezifische KI-Werkzeuge</p></div>
+              <div><h2 id="systemsHeading">Systeminventar</h2><p>Basis, empfohlener Workflow und projektspezifische Werkzeuge</p></div>
               <button id="systemsRefreshButton" class="button secondary" type="button">Neu prüfen</button>
             </div>
+            <div id="systemSetupSummary" class="setup-summary" aria-live="polite"></div>
             <h3 class="subheading">Für dieses Projekt</h3>
             <div id="projectSystems" class="system-grid"></div>
             <h3 class="subheading">Auf diesem PC</h3>
@@ -215,6 +267,13 @@
       </div>
     </div>
   </main>
+
+  <div id="busyOverlay" class="busy-overlay hidden" role="status" aria-live="assertive" aria-busy="true">
+    <div class="busy-dialog">
+      <span class="busy-spinner" aria-hidden="true"></span>
+      <div><h2 id="busyTitle">Bitte warten</h2><p id="busyMessage">Der lokale Projektzustand wird geladen.</p></div>
+    </div>
+  </div>
 
   <script src="/app.js" defer></script>
 </body>
