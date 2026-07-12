@@ -25,7 +25,7 @@
       <div id="providerList" class="provider-list" aria-live="polite"></div>
     </section>
     <div class="topbar-actions">
-      <span id="backgroundActivity" class="background-activity hidden"></span>
+      <button id="backgroundActivity" class="background-activity hidden" type="button"></button>
       <span id="connectionState" class="connection pending">Verbindung wird geprüft</span>
     </div>
   </header>
@@ -79,7 +79,10 @@
               <div class="section-heading">
                 <div><h2 id="historyHeading">Aufgabe und Rückmeldung</h2><p id="taskHeading">Projektgespräch</p></div>
               </div>
-              <div id="conversationHistory" class="conversation-history" aria-live="polite"></div>
+              <div class="conversation-history-wrap">
+                <div id="conversationHistory" class="conversation-history" aria-live="polite"></div>
+                <button id="historyJumpLatest" class="jump-latest hidden" type="button">Neueste Nachricht</button>
+              </div>
 
               <form id="taskForm" class="chat-composer">
                 <label for="taskText">Nachricht oder Auftrag</label>
@@ -169,6 +172,10 @@
               </section>
               <section class="git-diff" aria-labelledby="gitDiffHeading">
                 <div class="source-heading"><div><span class="source-badge authority">Repository</span><h3 id="gitDiffHeading">Dateiänderungen</h3></div><span id="gitDiffFileName" class="git-diff-file">Keine Datei ausgewählt</span></div>
+                <figure id="gitImagePreview" class="git-image-preview hidden">
+                  <img id="gitImagePreviewImage" alt="">
+                  <figcaption id="gitImagePreviewCaption"></figcaption>
+                </figure>
                 <pre id="gitDiffContent">Klicke auf eine Dateizeile, um ausschließlich deren Änderungen zu sehen.</pre>
               </section>
             </div>
@@ -177,6 +184,7 @@
               <button id="gitCommitButton" class="button secondary" type="button">Nur committen</button>
               <button id="gitCommitPushButton" class="button secondary" type="button">Committen & Branch pushen</button>
               <button id="gitIntegrateButton" class="button primary hidden" type="button">In Integrationsbranch übernehmen</button>
+              <button id="gitCleanupMergedButton" class="button secondary hidden" type="button">Abgeschlossene Aufgaben aufräumen</button>
               <button id="gitPushButton" class="button secondary hidden" type="button">Ausstehende Commits pushen</button>
               <span id="gitMessage" class="form-message" role="status"></span>
             </div>

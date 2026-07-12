@@ -9,3 +9,5 @@ After a successful fast-forward, the dashboard removes the task worktree and saf
 Provider results now distinguish completed, controlled blocked and failed runs. A valid blocked sentinel keeps the task non-successful while preserving its concrete reason in the dashboard instead of reporting a missing completion marker.
 
 Project switching now reloads the currently visible project view. In particular, `Prüfen & Git` clears and disables the previous repository state before loading the selected project's worktrees and changes.
+
+Git review now separates uncommitted status from ancestry, previews changed image files and offers confirmed bulk cleanup only for clean task worktrees already contained in the integration branch. Cross-project activity reports recent completion as an actionable review state. Chat and live-feed auto-follow stop when the owner intentionally scrolls away from the newest content.

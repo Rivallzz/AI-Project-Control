@@ -64,3 +64,7 @@
 - Reloaded the active Portfolio, Knowledge, Git or Systems view after project switching and disabled stale Git actions while the new repository state is loading.
 - Rendered the no-`develop` publication path as `Aufgabe → main` instead of duplicating `main` in the Git review header.
 - Prioritized uncommitted task changes over commit ancestry so a dirty branch is never described as already integrated.
+- Added safe bulk cleanup for legacy task worktrees that Git proves are clean and already integrated, while preserving dirty and divergent branches.
+- Added bounded local previews for changed PNG, JPEG, WebP and GIF files in the Git review surface.
+- Made recent cross-project completion, blockade and failure visible as actionable global activity instead of silently disappearing when a run ends.
+- Stopped chat and live-feed auto-follow when the operator intentionally scrolls upward, with an explicit return-to-latest control for conversation updates.

@@ -38,6 +38,10 @@ const MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Map([
   ['image/png', '.png'], ['image/jpeg', '.jpg'], ['image/webp', '.webp'], ['image/gif', '.gif'],
 ]);
+const GIT_IMAGE_TYPES = new Map([
+  ['.png', 'image/png'], ['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'], ['.webp', 'image/webp'], ['.gif', 'image/gif'],
+]);
+const MAX_GIT_IMAGE_BYTES = 20 * 1024 * 1024;
 const jobs = new Map();
 const liveClients = new Set();
 let statusCache = null;
@@ -1348,13 +1352,20 @@ async function getGitState(project, requestedWorktree = null) {
     integrationTarget && !target.mainCheckout && target.branch && target.branch !== 'detached HEAD'
     && target.branch !== integrationBranch && files.length === 0 && alreadyIntegrated
   );
+  const cleanupCandidates = [];
+  for (const candidate of targets) {
+    if (!candidate.available || candidate.mainCheckout || !candidate.clean || candidate.path === workingDirectory
+      || !candidate.branch?.startsWith('ai/') || candidate.branch === integrationBranch) continue;
+    const integrated = await execFileAsync('git.exe', ['-C', project.repository, 'merge-base', '--is-ancestor', candidate.branch, integrationBranch]);
+    if (integrated.exitCode === 0) cleanupCandidates.push({ path: candidate.path, branch: candidate.branch });
+  }
   return {
     projectId: project.id, projectName: project.name, repository: project.repository,
     worktree: workingDirectory, worktreeKind: target.kind, mainCheckout: target.mainCheckout, targets,
     branch: branch.stdout.trim(), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
     githubAuthenticated: ghAuth.exitCode === 0, clean: files.length === 0, files,
     ahead, behind, hasUpstream: upstream.exitCode === 0,
-    lastCommit: hash ? { hash, subject, committedAt } : null,
+    lastCommit: hash ? { hash, subject, committedAt } : null, cleanupCandidates,
     integration: {
       branch: integrationBranch, worktree: integrationTarget?.path || null,
       selectedIsIntegration: target.branch === integrationBranch,
@@ -1371,6 +1382,19 @@ async function getGitState(project, requestedWorktree = null) {
   };
 }
 
+async function removeIntegratedTaskWorktree(project, state) {
+  const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${state.branch}`]);
+  if (remoteBranch.exitCode === 0) {
+    const remoteDelete = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'push', 'origin', '--delete', state.branch], { timeout: 180000 });
+    if (remoteDelete.exitCode !== 0) throw new Error(`Deleting remote task branch ${state.branch} failed: ${remoteDelete.stderr.trim() || remoteDelete.stdout.trim()}`);
+  }
+  const removeWorktree = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'remove', state.worktree], { timeout: 120000 });
+  if (removeWorktree.exitCode !== 0) throw new Error(`Removing task worktree ${state.worktree} failed: ${removeWorktree.stderr.trim() || removeWorktree.stdout.trim()}`);
+  const deleteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '-d', state.branch]);
+  if (deleteBranch.exitCode !== 0) throw new Error(`Deleting local task branch ${state.branch} failed: ${deleteBranch.stderr.trim() || deleteBranch.stdout.trim()}`);
+  return { branch: state.branch, remoteDeleted: remoteBranch.exitCode === 0 };
+}
+
 async function integrateGitWorktree(payload) {
   const { project } = await getProject(String(payload.projectId || ''));
   const state = await getGitState(project, payload.worktree);
@@ -1381,30 +1405,34 @@ async function integrateGitWorktree(payload) {
     ? await execFileAsync('git.exe', ['-C', state.integration.worktree, 'merge', '--ff-only', state.branch], { timeout: 120000 })
     : { exitCode: 0, stdout: `Branch ${state.branch} is already contained in ${state.integration.branch}.`, stderr: '' };
   if (merge.exitCode !== 0) throw new Error(merge.stderr.trim() || merge.stdout.trim() || `Fast-forward into ${state.integration.branch} failed.`);
-  const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${state.branch}`]);
-  if (remoteBranch.exitCode === 0) {
-    const remoteDelete = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'push', 'origin', '--delete', state.branch], { timeout: 180000 });
-    if (remoteDelete.exitCode !== 0) {
-      throw new Error(`Fast-forward succeeded, but deleting remote task branch ${state.branch} failed: ${remoteDelete.stderr.trim() || remoteDelete.stdout.trim()}`);
-    }
-  }
-  const removeWorktree = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'remove', state.worktree], { timeout: 120000 });
-  if (removeWorktree.exitCode !== 0) {
-    throw new Error(`Fast-forward succeeded, but removing task worktree ${state.worktree} failed: ${removeWorktree.stderr.trim() || removeWorktree.stdout.trim()}`);
-  }
-  const deleteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '-d', state.branch]);
-  if (deleteBranch.exitCode !== 0) {
-    throw new Error(`Fast-forward succeeded, but deleting local task branch ${state.branch} failed: ${deleteBranch.stderr.trim() || deleteBranch.stdout.trim()}`);
-  }
+  const cleanup = await removeIntegratedTaskWorktree(project, state);
   componentCache.delete(project.id);
   return {
     ok: true,
     output: (merge.stdout || merge.stderr).trim(),
-    deletedBranch: state.branch,
-    deletedRemoteBranch: remoteBranch.exitCode === 0,
+    deletedBranch: cleanup.branch,
+    deletedRemoteBranch: cleanup.remoteDeleted,
     alreadyIntegrated: state.integration.alreadyIntegrated,
     state: await getGitState(project, state.integration.worktree),
   };
+}
+
+async function cleanupMergedGitWorktrees(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const requested = [...new Set(Array.isArray(payload.worktrees) ? payload.worktrees.map((entry) => path.resolve(String(entry))) : [])];
+  if (!requested.length || requested.length > 20) throw new Error('Select between 1 and 20 completed task worktrees for cleanup.');
+  const integrationBranch = await getIntegrationBranch(project);
+  const integrationTargets = await getProjectWorktrees(project);
+  const integrationWorktree = integrationTargets.find((candidate) => candidate.branch === integrationBranch && candidate.available)?.path;
+  if (!integrationWorktree) throw new Error(`No available checkout for ${integrationBranch}.`);
+  const cleaned = [];
+  for (const worktree of requested) {
+    const state = await getGitState(project, worktree);
+    if (!state.integration.canCleanup) throw new Error(`${state.branch} is not a clean, already-integrated task branch.`);
+    cleaned.push(await removeIntegratedTaskWorktree(project, state));
+  }
+  componentCache.delete(project.id);
+  return { ok: true, cleaned, state: await getGitState(project, integrationWorktree) };
 }
 
 async function getGitFileDiff(project, requestedPath, requestedWorktree = null) {
@@ -1412,14 +1440,17 @@ async function getGitFileDiff(project, requestedPath, requestedWorktree = null) 
   const state = await getGitState(project, requestedWorktree);
   const file = state.files.find((candidate) => candidate.path === filePath);
   if (!file || path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) throw new Error('Requested file is no longer part of the current Git status.');
+  const imageType = GIT_IMAGE_TYPES.get(path.extname(filePath).toLowerCase());
+  const imageUrl = imageType && file.staged !== 'D' && file.working !== 'D'
+    ? `/api/git/image?projectId=${encodeURIComponent(project.id)}&worktree=${encodeURIComponent(state.worktree)}&path=${encodeURIComponent(filePath)}` : null;
   const limit = 400000;
   let text = '';
   if (file.untracked) {
     const absolute = path.join(state.worktree, filePath);
     const stat = await fsp.stat(absolute);
-    if (stat.size > limit) return { path: filePath, diff: `Neue Datei · ${stat.size} Bytes\n\nVorschau wegen Dateigröße nicht geladen.`, truncated: true, binary: false };
+    if (stat.size > limit) return { path: filePath, diff: `Neue Datei · ${stat.size} Bytes`, truncated: false, binary: Boolean(imageType), imageUrl };
     const buffer = await fsp.readFile(absolute);
-    if (buffer.includes(0)) return { path: filePath, diff: `Neue Binärdatei · ${stat.size} Bytes`, truncated: false, binary: true };
+    if (buffer.includes(0)) return { path: filePath, diff: `Neue Binärdatei · ${stat.size} Bytes`, truncated: false, binary: true, imageUrl };
     text = `--- /dev/null\n+++ b/${filePath.replace(/\\/g, '/')}\n@@ Neue Datei @@\n` + buffer.toString('utf8').split(/\r?\n/).map((line) => `+${line}`).join('\n');
   } else {
     const cached = await execFileAsync('git.exe', ['-C', state.worktree, 'diff', '--cached', '--no-ext-diff', '--unified=3', '--', filePath]);
@@ -1427,7 +1458,22 @@ async function getGitFileDiff(project, requestedPath, requestedWorktree = null) 
     text = [cached.stdout && '# Bereits gestaged\n' + cached.stdout, working.stdout && '# Arbeitsverzeichnis\n' + working.stdout].filter(Boolean).join('\n');
     if (!text && file.originalPath) text = `Umbenannt: ${file.originalPath} -> ${filePath}`;
   }
-  return { path: filePath, diff: text.slice(0, limit) || 'Für diese Datei ist kein Text-Diff verfügbar.', truncated: text.length > limit, binary: false };
+  return { path: filePath, diff: text.slice(0, limit) || (imageUrl ? 'Bilddatei · Vorschau oben' : 'Für diese Datei ist kein Text-Diff verfügbar.'), truncated: text.length > limit, binary: Boolean(imageType), imageUrl };
+}
+
+async function serveGitFileImage(project, requestedPath, requestedWorktree, response) {
+  const filePath = String(requestedPath || '');
+  const state = await getGitState(project, requestedWorktree);
+  const file = state.files.find((candidate) => candidate.path === filePath);
+  const mime = GIT_IMAGE_TYPES.get(path.extname(filePath).toLowerCase());
+  if (!file || !mime || file.staged === 'D' || file.working === 'D' || path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes('..')) throw new Error('Requested image is not an available changed file.');
+  const root = await fsp.realpath(state.worktree);
+  const absolute = await fsp.realpath(path.resolve(state.worktree, filePath));
+  if (!withinRoot(root, absolute)) throw new Error('Requested image resolves outside the selected worktree.');
+  const stat = await fsp.stat(absolute);
+  if (!stat.isFile() || stat.size > MAX_GIT_IMAGE_BYTES) throw new Error('Changed image is unavailable or exceeds the 20 MB preview limit.');
+  response.writeHead(200, { 'Content-Type': mime, 'Content-Length': stat.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  fs.createReadStream(absolute).pipe(response);
 }
 
 async function commitGitChanges(payload) {
@@ -1527,9 +1573,13 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/git/diff') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getGitFileDiff(project, url.searchParams.get('path'), url.searchParams.get('worktree')));
     }
+    if (request.method === 'GET' && url.pathname === '/api/git/image') {
+      const { project } = await getProject(projectId); return serveGitFileImage(project, url.searchParams.get('path'), url.searchParams.get('worktree'), response);
+    }
     if (request.method === 'POST' && url.pathname === '/api/git/commit') return sendJson(response, 200, await commitGitChanges(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/push') return sendJson(response, 200, await pushGitBranch(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/integrate') return sendJson(response, 200, await integrateGitWorktree(await readJsonBody(request)));
+    if (request.method === 'POST' && url.pathname === '/api/git/cleanup-merged') return sendJson(response, 200, await cleanupMergedGitWorktrees(await readJsonBody(request)));
     if (request.method === 'GET' && url.pathname === '/api/jobs') {
       const rows = Array.from(jobs.values()).map(snapshotJob).filter((job) => !projectId || job.projectId === projectId || job.kind === 'provision' || job.kind === 'dashboard-command').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       return sendJson(response, 200, rows);

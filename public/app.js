@@ -16,7 +16,7 @@ const elements = {
   graphCanvas: document.getElementById('graphCanvas'), graphDetails: document.getElementById('graphDetails'),
   obsidianStats: document.getElementById('obsidianStats'), noteList: document.getElementById('noteList'),
   noteTitle: document.getElementById('noteTitle'), noteContent: document.getElementById('noteContent'),
-  history: document.getElementById('conversationHistory'),
+  history: document.getElementById('conversationHistory'), historyJumpLatest: document.getElementById('historyJumpLatest'),
   memoryForm: document.getElementById('memoryForm'), memoryText: document.getElementById('memoryText'), memoryMessage: document.getElementById('memoryMessage'),
   systemsRefresh: document.getElementById('systemsRefreshButton'), systemSetupSummary: document.getElementById('systemSetupSummary'), projectSystems: document.getElementById('projectSystems'),
   globalSystems: document.getElementById('globalSystems'), systemForm: document.getElementById('systemForm'),
@@ -32,9 +32,10 @@ const elements = {
   portfolioLastRun: document.getElementById('portfolioLastRun'), portfolioRepository: document.getElementById('portfolioRepository'), portfolioKnowledge: document.getElementById('portfolioKnowledge'),
   gitProjectName: document.getElementById('gitProjectName'), gitTarget: document.getElementById('gitTargetSelect'), gitState: document.getElementById('gitState'), gitSummary: document.getElementById('gitSummary'),
   gitFileList: document.getElementById('gitFileList'), gitDiff: document.getElementById('gitDiffContent'), gitSelectAll: document.getElementById('gitSelectAll'),
+  gitImagePreview: document.getElementById('gitImagePreview'), gitImagePreviewImage: document.getElementById('gitImagePreviewImage'), gitImagePreviewCaption: document.getElementById('gitImagePreviewCaption'),
   gitDiffFileName: document.getElementById('gitDiffFileName'), gitCommitMessage: document.getElementById('gitCommitMessage'),
   gitBranchFlow: document.getElementById('gitBranchFlow'), gitCommit: document.getElementById('gitCommitButton'), gitCommitPush: document.getElementById('gitCommitPushButton'),
-  gitIntegrate: document.getElementById('gitIntegrateButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
+  gitIntegrate: document.getElementById('gitIntegrateButton'), gitCleanupMerged: document.getElementById('gitCleanupMergedButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
   busyOverlay: document.getElementById('busyOverlay'), busyTitle: document.getElementById('busyTitle'), busyMessage: document.getElementById('busyMessage'),
 };
 
@@ -59,6 +60,10 @@ let liveJobs = new Map();
 let jobEventSource = null;
 let jobRenderPending = false;
 let componentStatus = null;
+let historyFollow = true;
+let historyLatestVersion = null;
+const feedScrollState = new Map();
+const acknowledgedActivityJobs = new Set(JSON.parse(sessionStorage.getItem('acknowledgedActivityJobs') || '[]'));
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
@@ -163,16 +168,21 @@ function renderComponents(data) {
 }
 
 function renderJobActivity() {
-  const running = Array.from(liveJobs.values()).filter((job) => job.kind === 'task' && job.status === 'running');
+  const allTasks = Array.from(liveJobs.values()).filter((job) => job.kind === 'task');
+  const running = allTasks.filter((job) => job.status === 'running');
   const background = running.filter((job) => job.projectId !== activeProject?.id);
   const current = running.find((job) => job.projectId === activeProject?.id);
-  const visible = background.length ? background : current ? [current] : [];
-  elements.backgroundActivity.classList.toggle('hidden', visible.length === 0);
-  if (!visible.length) { elements.backgroundActivity.textContent = ''; elements.backgroundActivity.removeAttribute('title'); return; }
-  elements.backgroundActivity.textContent = background.length
-    ? `${background[0].projectName}${background.length > 1 ? ` +${background.length - 1}` : ''} läuft im Hintergrund`
-    : `${current.projectName} · Aufgabe läuft`;
+  const recentTerminal = allTasks.filter((job) => job.projectId !== activeProject?.id && ['completed', 'failed', 'blocked'].includes(job.status)
+    && !acknowledgedActivityJobs.has(job.id) && job.finishedAt && Date.now() - new Date(job.finishedAt).getTime() < 30 * 60 * 1000)
+    .sort((left, right) => String(right.finishedAt).localeCompare(String(left.finishedAt)));
+  const visible = background.length ? background : current ? [current] : recentTerminal.slice(0, 1);
+  const primary = visible[0];
+  elements.backgroundActivity.className = `background-activity${primary ? ` ${primary.status}` : ' hidden'}`;
+  if (!primary) { elements.backgroundActivity.textContent = ''; elements.backgroundActivity.removeAttribute('title'); delete elements.backgroundActivity.dataset.jobId; delete elements.backgroundActivity.dataset.projectId; return; }
+  const statusText = primary.status === 'running' ? 'läuft' : primary.status === 'completed' ? 'abgeschlossen · prüfen' : primary.status === 'blocked' ? 'blockiert · prüfen' : 'fehlgeschlagen · prüfen';
+  elements.backgroundActivity.textContent = background.length > 1 ? `${primary.projectName} +${background.length - 1} · ${statusText}` : `${primary.projectName} · ${statusText}`;
   elements.backgroundActivity.title = visible.map((job) => `${job.projectName}: ${job.taskPreview}`).join('\n');
+  elements.backgroundActivity.dataset.jobId = primary.id; elements.backgroundActivity.dataset.projectId = primary.projectId;
 }
 
 function formatTime(value) {
@@ -182,10 +192,10 @@ function formatTime(value) {
 
 function renderJobs(jobs) {
   const outerScrollTop = elements.jobs.scrollTop;
-  const feedScroll = new Map(Array.from(elements.jobs.querySelectorAll('[data-job-id]')).map((node) => {
+  Array.from(elements.jobs.querySelectorAll('[data-job-id]')).forEach((node) => {
     const feed = node.querySelector('.feed-log');
-    return [node.dataset.jobId, feed ? { top: feed.scrollTop, atBottom: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24 } : null];
-  }));
+    if (feed) feedScrollState.set(node.dataset.jobId, { top: feed.scrollTop, follow: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24 });
+  });
   elements.jobs.replaceChildren();
   if (!jobs.length) {
     const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Noch keine Jobs in dieser Dashboard-Sitzung.';
@@ -236,9 +246,12 @@ function renderJobs(jobs) {
       }
     }
     container.append(feed); elements.jobs.append(container);
-    const previous = feedScroll.get(job.id);
-    if (previous?.atBottom || (!previous && job.status === 'running')) feed.scrollTop = feed.scrollHeight;
+    const previous = feedScrollState.get(job.id);
+    const follow = previous ? previous.follow : job.status === 'running';
+    if (follow) feed.scrollTop = feed.scrollHeight;
     else if (previous) feed.scrollTop = previous.top;
+    feedScrollState.set(job.id, { top: feed.scrollTop, follow });
+    feed.addEventListener('scroll', () => feedScrollState.set(job.id, { top: feed.scrollTop, follow: feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24 }));
   }
   elements.jobs.scrollTop = outerScrollTop;
 }
@@ -424,10 +437,11 @@ function renderGitState(data) {
   elements.gitProjectName.textContent = `${data.projectName} · ${data.worktreeKind}`;
   elements.gitBranchFlow.textContent = data.integration.branch === 'main' ? 'Aufgabe → main' : `Aufgabe → ${data.integration.branch} → main`;
   elements.gitTarget.replaceChildren();
+  const cleanupBranches = new Set((data.cleanupCandidates || []).map((candidate) => candidate.branch));
   for (const target of data.targets) {
     const option = document.createElement('option'); option.value = target.path;
     const state = target.clean ? 'sauber' : `${target.changedCount} Änderung(en)`;
-    const role = target.branch === data.integration.branch ? 'Integrationsbranch' : target.kind;
+    const role = target.branch === data.integration.branch ? 'Integrationsbranch' : cleanupBranches.has(target.branch) ? 'Abgeschlossen · aufräumbar' : target.kind;
     option.textContent = `${role} · ${target.branch || 'ohne Branch'} · ${state}`;
     option.selected = target.path.toLowerCase() === data.worktree.toLowerCase();
     option.disabled = !target.available;
@@ -460,6 +474,7 @@ function renderGitState(data) {
     }
   }
   if (!selectedGitFile) {
+    elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src'); elements.gitImagePreviewImage.alt = '';
     elements.gitDiffFileName.textContent = 'Keine Datei ausgewählt';
     elements.gitDiff.textContent = data.clean ? 'Keine lokalen Änderungen.' : 'Klicke auf eine Dateizeile, um ausschließlich deren Änderungen zu sehen.';
   }
@@ -469,10 +484,15 @@ function renderGitState(data) {
   elements.gitIntegrate.disabled = !canFinalizeTask;
   elements.gitIntegrate.classList.toggle('hidden', !canFinalizeTask);
   elements.gitIntegrate.textContent = data.integration.canCleanup ? 'Aufgabenbranch aufräumen' : `In ${data.integration.branch} übernehmen`;
+  elements.gitCleanupMerged.classList.toggle('hidden', !data.cleanupCandidates?.length);
+  elements.gitCleanupMerged.disabled = !data.cleanupCandidates?.length;
+  elements.gitCleanupMerged.textContent = data.cleanupCandidates?.length === 1 ? '1 abgeschlossene Aufgabe aufräumen'
+    : data.cleanupCandidates?.length ? `${data.cleanupCandidates.length} abgeschlossene Aufgaben aufräumen` : 'Abgeschlossene Aufgaben aufräumen';
   elements.gitPush.disabled = !data.remote || !data.clean || (data.hasUpstream && data.ahead === 0);
   elements.gitPush.classList.toggle('hidden', elements.gitPush.disabled);
-  elements.gitMessage.textContent = data.clean && !data.integration.selectedIsIntegration && data.integration.alreadyIntegrated && !data.integration.canCleanup
-    ? `Dieser Aufgabenstand ist bereits in ${data.integration.branch} enthalten.` : '';
+  elements.gitMessage.textContent = !data.clean ? 'Änderungen sind noch nicht committed. Prüfe und wähle zuerst die gewünschten Dateien aus.'
+    : data.integration.canCleanup ? `Dieser saubere Aufgabenbranch ist bereits in ${data.integration.branch} enthalten und kann aufgeräumt werden.`
+      : data.integration.canFastForward ? `Dieser Aufgabenbranch ist committed und kann in ${data.integration.branch} übernommen werden.` : '';
 }
 
 async function loadGitState(worktree = elements.gitTarget.value) {
@@ -488,10 +508,16 @@ async function loadGitFileDiff(filePath) {
   selectedGitFile = filePath;
   elements.gitFileList.querySelectorAll('.git-file-row').forEach((row) => row.classList.toggle('active', row.querySelector('[data-git-file]')?.dataset.gitFile === filePath));
   elements.gitDiffFileName.textContent = filePath; elements.gitDiff.textContent = 'Dateiänderungen werden geladen…';
+  elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src'); elements.gitImagePreviewImage.alt = '';
   try {
     const result = await api(`/api/git/diff?${projectQuery()}&worktree=${encodeURIComponent(gitData.worktree)}&path=${encodeURIComponent(filePath)}`);
     elements.gitDiff.textContent = result.diff;
-    elements.gitMessage.textContent = result.truncated ? 'Die Dateiansicht wurde bei 400.000 Zeichen gekürzt.' : result.binary ? 'Binärdateien besitzen keinen Text-Diff.' : '';
+    if (result.imageUrl) {
+      elements.gitImagePreviewImage.src = result.imageUrl; elements.gitImagePreviewImage.alt = `Vorschau von ${filePath}`;
+      elements.gitImagePreviewCaption.textContent = `${filePath} · aktuelle Datei im ausgewählten Arbeitsstand`;
+      elements.gitImagePreview.classList.remove('hidden');
+    }
+    elements.gitMessage.textContent = result.truncated ? 'Die Dateiansicht wurde bei 400.000 Zeichen gekürzt.' : result.binary && !result.imageUrl ? 'Für diese Binärdatei ist keine Vorschau verfügbar.' : '';
   } catch (error) { elements.gitDiff.textContent = error.message; }
 }
 
@@ -503,8 +529,9 @@ async function activateProject(projectId) {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
-    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; elements.gitTarget.replaceChildren();
+    graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; historyFollow = true; historyLatestVersion = null; elements.gitTarget.replaceChildren();
     elements.gitFileList.replaceChildren(); elements.gitDiffFileName.textContent = 'Projekt wird gewechselt'; elements.gitDiff.textContent = 'Der Git-Zustand des neuen Projekts wird geladen.';
+    elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src');
     elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitIntegrate.disabled = true; elements.gitPush.disabled = true;
     renderProjectSelector(); resetKnowledge();
     await refreshAll(true);
@@ -708,6 +735,11 @@ function messageElement(role, label, text, attachments = []) {
 }
 
 function renderHistory(runs) {
+  const hadContent = elements.history.childElementCount > 0;
+  const previousTop = elements.history.scrollTop;
+  const shouldFollow = !hadContent || historyFollow;
+  const nextVersion = runs[0] ? `${runs[0].name}:${runs[0].modifiedAt}` : null;
+  const hasNewContent = Boolean(historyLatestVersion && nextVersion && historyLatestVersion !== nextVersion);
   elements.history.replaceChildren();
   if (!runs.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Noch kein Lauf für dieses Projekt.'; elements.history.append(empty); return; }
   for (const run of [...runs].reverse()) {
@@ -726,7 +758,12 @@ function renderHistory(runs) {
     if (summary.childElementCount) article.append(summary);
     elements.history.append(article);
   }
-  requestAnimationFrame(() => { elements.history.scrollTop = elements.history.scrollHeight; });
+  requestAnimationFrame(() => {
+    if (shouldFollow) { elements.history.scrollTop = elements.history.scrollHeight; elements.historyJumpLatest.classList.add('hidden'); }
+    else { elements.history.scrollTop = previousTop; elements.historyJumpLatest.classList.toggle('hidden', !hasNewContent); }
+    historyFollow = shouldFollow;
+  });
+  historyLatestVersion = nextVersion;
 }
 
 async function refreshStatus(force = false) {
@@ -784,6 +821,13 @@ document.querySelector('.view-tabs').addEventListener('click', (event) => {
 elements.systemsRefresh.addEventListener('click', () => loadSystems(true));
 elements.addProject.addEventListener('click', () => { showView('projects'); elements.provisionName.focus(); });
 elements.projectSelect.addEventListener('change', () => activateProject(elements.projectSelect.value));
+elements.backgroundActivity.addEventListener('click', async () => {
+  const { jobId, projectId } = elements.backgroundActivity.dataset;
+  if (!projectId) return;
+  if (jobId) { acknowledgedActivityJobs.add(jobId); sessionStorage.setItem('acknowledgedActivityJobs', JSON.stringify([...acknowledgedActivityJobs])); }
+  if (projectId !== activeProject?.id) await activateProject(projectId);
+  showView('tasks'); renderJobActivity();
+});
 elements.provider.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
 elements.mode.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
 elements.useSubscriptionTokens.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
@@ -820,6 +864,14 @@ elements.attachmentPreview.addEventListener('click', (event) => {
 
 elements.task.addEventListener('input', () => {
   elements.task.style.height = 'auto'; elements.task.style.height = `${Math.min(elements.task.scrollHeight, 180)}px`;
+});
+
+elements.history.addEventListener('scroll', () => {
+  historyFollow = elements.history.scrollHeight - elements.history.scrollTop - elements.history.clientHeight < 32;
+  if (historyFollow) elements.historyJumpLatest.classList.add('hidden');
+});
+elements.historyJumpLatest.addEventListener('click', () => {
+  historyFollow = true; elements.history.scrollTop = elements.history.scrollHeight; elements.historyJumpLatest.classList.add('hidden');
 });
 
 elements.memoryForm.addEventListener('submit', async (event) => {
@@ -970,6 +1022,21 @@ elements.gitIntegrate.addEventListener('click', async () => {
     elements.gitMessage.textContent = `${completion}; ${result.deletedBranch} wurde lokal${remoteCleanup} gelöscht. ${nextStep}`;
   } catch (error) { elements.gitMessage.textContent = error.message; }
   finally { elements.gitIntegrate.disabled = !(gitData?.integration?.canFastForward || gitData?.integration?.canCleanup); }
+});
+elements.gitCleanupMerged.addEventListener('click', async () => {
+  const candidates = gitData?.cleanupCandidates || [];
+  if (!candidates.length) return;
+  const branchList = candidates.map((candidate) => `- ${candidate.branch}`).join('\n');
+  if (!window.confirm(`${candidates.length} saubere, bereits in ${gitData.integration.branch} enthaltene Aufgaben-Worktrees entfernen?\n\n${branchList}\n\nNicht integrierte oder geänderte Branches bleiben erhalten.`)) return;
+  elements.gitCleanupMerged.disabled = true; elements.gitMessage.textContent = 'Abgeschlossene Aufgaben werden sicher aufgeräumt…';
+  try {
+    const result = await api('/api/git/cleanup-merged', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktrees: candidates.map((candidate) => candidate.path) }) });
+    selectedGitFile = null; renderGitState(result.state);
+    elements.gitMessage.textContent = result.cleaned.length === 1
+      ? '1 abgeschlossene Aufgabe wurde entfernt. Nicht integrierte Branches blieben unverändert.'
+      : `${result.cleaned.length} abgeschlossene Aufgaben wurden entfernt. Nicht integrierte Branches blieben unverändert.`;
+  } catch (error) { elements.gitMessage.textContent = error.message; }
+  finally { elements.gitCleanupMerged.disabled = !(gitData?.cleanupCandidates?.length); }
 });
 elements.gitPush.addEventListener('click', async () => {
   if (!gitData?.remote) { elements.gitMessage.textContent = 'Kein origin-Remote konfiguriert.'; return; }

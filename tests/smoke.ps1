@@ -89,6 +89,9 @@ try {
     if ($appSource -notmatch 'Remote-Branch löschen') { throw 'Task integration does not disclose remote branch cleanup.' }
     if ($appSource -notmatch 'Aufgabenbranch aufräumen' -or $appSource -notmatch 'kein separater Integrationsbranch' -or $appSource -notmatch "data.integration.branch === 'main' \? 'Aufgabe → main'") { throw 'Main fallback or already-integrated task cleanup is not clearly disclosed.' }
     if ($appSource -notmatch "visibleView === 'git'.*loadGitState" -or $appSource -notmatch 'Der Git-Zustand des neuen Projekts wird geladen') { throw 'Project switching can leave stale Git data visible.' }
+    if ($indexSource -notmatch 'id="gitImagePreview"' -or $indexSource -notmatch 'id="gitCleanupMergedButton"') { throw 'Git image preview or merged-worktree cleanup controls are missing.' }
+    if ($indexSource -notmatch 'id="historyJumpLatest"' -or $appSource -notmatch 'historyFollow' -or $appSource -notmatch 'feedScrollState') { throw 'User-controlled chat or live-feed scroll tracking is missing.' }
+    if ($appSource -notmatch 'abgeschlossen · prüfen' -or $appSource -notmatch 'acknowledgedActivityJobs') { throw 'Cross-project completion tracking is not actionable.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
@@ -98,6 +101,7 @@ try {
     $nodeSystem = $inventory.global | Where-Object { $_.name -eq 'Node.js' }
     if ($null -eq $nodeSystem -or $nodeSystem.tier -ne 'required') { throw 'System inventory does not classify required foundations.' }
     $serverSource = Get-Content -Raw -LiteralPath (Join-Path $root 'server.js')
+    if ($serverSource -notmatch '/api/git/image' -or $serverSource -notmatch '/api/git/cleanup-merged') { throw 'Git image preview or merged-worktree cleanup endpoints are missing.' }
     if ($serverSource -match 'SYSTEM_METADATA|INSTALL_CATALOG') { throw 'System definitions are still hardcoded in server.js.' }
     $catalog = Get-Content -Raw -LiteralPath (Join-Path $root 'config\systems.json') | ConvertFrom-Json
     if ($catalog.schemaVersion -ne 1 -or $catalog.systems.Count -lt 10) { throw 'Versioned system catalog is invalid.' }
@@ -112,11 +116,21 @@ try {
     if ($gitState.branch -ne 'main' -or -not $gitState.clean) { throw 'Git review endpoint did not report the clean test repository.' }
     Set-Content -LiteralPath (Join-Path $testRepository 'review-me.txt') -Value 'review only' -Encoding utf8
     Set-Content -LiteralPath (Join-Path $testRepository 'other.txt') -Value 'must not appear' -Encoding utf8
+    $previewPng = Join-Path $testRepository 'preview.png'
+    [System.IO.File]::WriteAllBytes($previewPng, [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='))
     $dirtyGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
     if ($dirtyGitState.clean -or -not ($dirtyGitState.files | Where-Object { $_.path -eq 'review-me.txt' })) { throw 'Git review endpoint did not expose the changed file.' }
     if ($dirtyGitState.PSObject.Properties.Name -contains 'diff') { throw 'Git status endpoint still exposes a combined repository diff.' }
     $fileDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=review-me.txt" -TimeoutSec 10
     if ($fileDiff.diff -notmatch 'review only' -or $fileDiff.diff -match 'must not appear') { throw 'Git file diff did not isolate the requested file.' }
+    $imageDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=preview.png" -TimeoutSec 10
+    if (-not $imageDiff.imageUrl -or -not $imageDiff.binary) { throw 'Changed image did not expose a local preview URL.' }
+    $imageClient = [System.Net.WebClient]::new()
+    try {
+        $imageBytes = $imageClient.DownloadData("http://127.0.0.1:$Port$($imageDiff.imageUrl)")
+        if ($imageClient.ResponseHeaders['Content-Type'] -ne 'image/png' -or $imageBytes.Length -lt 60) { throw 'Changed image preview endpoint did not return the PNG.' }
+    }
+    finally { $imageClient.Dispose() }
     $reviewWorktree = Join-Path $dataRoot 'review-worktree'
     $worktreeErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -132,7 +146,7 @@ try {
     $encodedWorktree = [uri]::EscapeDataString($reviewWorktree)
     $worktreeDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&worktree=$encodedWorktree&path=task-change.txt" -TimeoutSec 10
     if ($worktreeDiff.diff -notmatch 'task worktree change') { throw 'Git worktree file diff did not use the selected task worktree.' }
-    Remove-Item -LiteralPath (Join-Path $testRepository 'review-me.txt'), (Join-Path $testRepository 'other.txt') -Force
+    Remove-Item -LiteralPath (Join-Path $testRepository 'review-me.txt'), (Join-Path $testRepository 'other.txt'), $previewPng -Force
     & git.exe -C $reviewWorktree add task-change.txt
     & git.exe -C $reviewWorktree -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Add task worktree change' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not commit the test worktree change.' }
@@ -157,6 +171,21 @@ try {
     if (Test-Path -LiteralPath $cleanupWorktree) { throw 'Already-integrated task worktree was not removed.' }
     & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/already-integrated-test
     if ($LASTEXITCODE -eq 0) { throw 'Already-integrated local task branch was not deleted.' }
+    $bulkCleanupA = Join-Path $dataRoot 'bulk-cleanup-a'
+    $bulkCleanupB = Join-Path $dataRoot 'bulk-cleanup-b'
+    & git.exe -C $testRepository worktree add -b ai/bulk-cleanup-a $bulkCleanupA main | Out-Null
+    & git.exe -C $testRepository worktree add -b ai/bulk-cleanup-b $bulkCleanupB main | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create bulk cleanup worktrees.' }
+    $encodedMainWorktree = [uri]::EscapeDataString($testRepository)
+    $bulkReady = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedMainWorktree" -TimeoutSec 10
+    if ($bulkReady.cleanupCandidates.Count -ne 2) { throw 'Merged cleanup candidates were not detected accurately.' }
+    $bulkBody = @{ projectId = $project.id; worktrees = @($bulkCleanupA, $bulkCleanupB) } | ConvertTo-Json -Depth 4
+    $bulkCleaned = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/cleanup-merged" -ContentType 'application/json' -Body $bulkBody -TimeoutSec 20
+    if ($bulkCleaned.cleaned.Count -ne 2 -or (Test-Path -LiteralPath $bulkCleanupA) -or (Test-Path -LiteralPath $bulkCleanupB)) { throw 'Bulk cleanup did not remove all safe merged worktrees.' }
+    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/bulk-cleanup-a
+    if ($LASTEXITCODE -eq 0) { throw 'First bulk-cleaned branch still exists.' }
+    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/bulk-cleanup-b
+    if ($LASTEXITCODE -eq 0) { throw 'Second bulk-cleaned branch still exists.' }
     if ($serverSource -notmatch "'push', 'origin', '--delete', state.branch") { throw 'Integrated remote task branch cleanup is missing.' }
     if ($serverSource -notmatch "state = 'Aufgabe abgeschlossen'" -or $serverSource -notmatch 'canCleanup') { throw 'Completed-task feedback or already-integrated branch cleanup is missing.' }
     if ($serverSource -notmatch "controlledBlocked \? 'BLOCKED'") { throw 'Historical controlled-blocked runs are not normalized in the dashboard.' }

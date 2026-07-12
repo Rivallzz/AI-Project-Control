@@ -24,6 +24,8 @@ Read-only mode uses the registered repository. Write mode automatically creates 
 
 Open `Prüfen & Git`. The left-aligned `Arbeitsstand` selector defaults to the latest changed task worktree. Click a file name to inspect only that file; its checkbox independently controls whether it belongs to the next commit. Commit the intended files locally. When the task branch is clean, based directly on the target branch and not yet integrated, `In <branch> übernehmen` performs a conflict-free fast-forward into its clean checkout. The target is `develop` when available and otherwise `main`; the confirmation calls out a direct `main` update. After that succeeds, the dashboard removes the task worktree and safely deletes the integrated local branch; when the branch was pushed to `origin`, it deletes that remote branch too. If the branch was already merged by another path, `Aufgabenbranch aufräumen` performs only this cleanup. If either side diverged or contains local changes, the dashboard stops without modifying the target checkout.
 
+`Abgeschlossene Aufgaben aufräumen` removes multiple legacy worktrees only after Git confirms each clean `ai/*` branch is already contained in the target branch and the owner confirms the exact branch list. Image changes can be inspected directly in the file view; previews are limited to supported local image types and 20 MB.
+
 Push the target branch separately after review. When `develop` exists, only that integration branch should be proposed to `main`; without a separate integration branch, the reviewed task is fast-forwarded directly to `main`. Existing staged files outside the selection remain a hard block and push never uses force.
 
 ## System inventory

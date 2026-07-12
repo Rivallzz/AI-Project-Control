@@ -107,7 +107,12 @@ h3 { margin-bottom: 4px; font-size: 14px; }
   text-overflow: ellipsis;
   white-space: nowrap;
   position: relative;
+  cursor: pointer;
+  text-align: left;
 }
+.background-activity.completed { border-color: #3d584a; background: #18251e; color: #bde4cc; }
+.background-activity.blocked, .background-activity.failed { border-color: #6d4747; background: #2a1d1d; color: #efb1b1; }
+.background-activity.blocked::before, .background-activity.failed::before { background: var(--red); }
 .background-activity::before {
   content: "";
   position: absolute;
@@ -440,11 +445,17 @@ td { overflow-wrap: anywhere; }
 .git-file-path { overflow-wrap: anywhere; }
 .git-diff-file { max-width: 55%; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-diff pre { min-height: 420px; max-height: 560px; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 5px; background: #111415; overflow: auto; white-space: pre; color: #cdd3d0; font: 12px/1.55 Consolas, monospace; }
-.git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(260px, 1fr) auto auto auto auto; align-items: end; gap: 9px; }
+.git-image-preview { margin: 0 0 12px; padding: 12px; border: 1px solid #303536; border-radius: 5px; background: #111415; text-align: center; }
+.git-image-preview img { display: block; width: auto; max-width: 100%; max-height: 58vh; margin: 0 auto; object-fit: contain; background: repeating-conic-gradient(#25292a 0 25%, #1d2021 0 50%) 50% / 18px 18px; }
+.git-image-preview figcaption { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(260px, 1fr) repeat(5, auto); align-items: end; gap: 9px; }
 .git-commit-control label { margin-top: 0; }
 .git-actions .form-message { grid-column: 1 / -1; }
 
-.conversation-history { flex: 1; min-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 30px; padding: 4px 10px 24px 0; scrollbar-gutter: stable; scroll-behavior: smooth; }
+.conversation-history-wrap { position: relative; flex: 1; min-height: 220px; overflow: hidden; }
+.conversation-history { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 30px; padding: 4px 10px 24px 0; scrollbar-gutter: stable; }
+.jump-latest { position: absolute; right: 20px; bottom: 14px; min-height: 36px; padding: 7px 12px; border: 1px solid #4b6658; border-radius: 18px; background: #213129; color: #d8eee1; cursor: pointer; box-shadow: 0 4px 14px #0008; }
+.jump-latest:hover { background: #293c31; }
 .conversation-run { border-top: 1px solid var(--border); padding-top: 18px; display: flex; flex-direction: column; }
 .conversation-run:first-child { border-top: 0; padding-top: 0; }
 .conversation-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
