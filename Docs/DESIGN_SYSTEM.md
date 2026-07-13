@@ -27,6 +27,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Knowledge search updates Graphify and Obsidian together; source badges keep discovery, working context and authority distinct.
 - Graph canvas, node list and direct relationship buttons share one selection state. List and relationship selection centers the node; graph selection reveals the matching list item; direct relationships use text as well as color.
 - Git checkboxes select commit scope; opening a row controls only the inspected file diff.
+- In Git review, the commit-message field and its available actions share one 44-pixel row when space allows. The action group wraps as balanced rows on narrower surfaces instead of shifting buttons against the field helper text or causing horizontal overflow.
 - Execution state and delivery state use separate labels; a completed analysis is not displayed as unpublished code.
 - The graph uses direct manipulation: wheel zooms around the pointer and pointer drag pans the view.
 

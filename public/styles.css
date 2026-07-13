@@ -666,9 +666,9 @@ td { overflow-wrap: anywhere; }
 .git-image-preview figcaption { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .git-actions > label { margin-top: 0; }
-.git-action-row { display: grid; grid-template-columns: minmax(260px, 1fr) repeat(5, auto); align-items: stretch; gap: 9px; }
-.git-action-row input { min-width: 0; }
-.git-action-row .button { height: 44px; }
+.git-action-row { display: flex; align-items: stretch; flex-wrap: wrap; gap: 9px; }
+.git-action-row input { width: auto; min-width: 260px; flex: 1 1 260px; }
+.git-action-row .button { height: 44px; flex: 0 0 auto; }
 .git-actions > small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .git-actions .form-message { display: block; margin-top: 9px; }
 
@@ -897,9 +897,9 @@ td { overflow-wrap: anywhere; }
   .git-panel > .section-heading { flex-direction: column; }
   .git-context-bar { grid-template-columns: 1fr; gap: 10px; }
   .git-file-list { max-height: 300px; }
-  .git-action-row { grid-template-columns: 1fr 1fr; }
   .delivery-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .git-action-row input { grid-column: 1 / -1; }
+  .git-action-row input { min-width: 100%; flex-basis: 100%; }
+  .git-action-row .button { flex: 1 1 calc(50% - 5px); }
   .chat-panel { min-height: 680px; }
   .conversation-history { max-height: none; }
   .system-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -950,10 +950,9 @@ td { overflow-wrap: anywhere; }
   .portfolio-project-heading { align-items: flex-start; }
   .portfolio-facts { grid-template-columns: 1fr; gap: 2px; }
   .portfolio-facts dd { margin-bottom: 8px; }
-  .git-action-row { grid-template-columns: 1fr; }
   .delivery-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .git-action-row input { grid-column: auto; }
-  .git-action-row .button { width: 100%; }
+  .git-action-row input { min-width: 0; }
+  .git-action-row .button { width: 100%; flex-basis: 100%; }
   .message { max-width: 92%; }
   .message-attachments { grid-template-columns: minmax(120px, 1fr); }
   .project-row { grid-template-columns: 1fr; }

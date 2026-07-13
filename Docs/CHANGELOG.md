@@ -2,6 +2,7 @@
 
 ## 2026-07-13
 
+- Aligned the Git review commit field and action buttons on one shared control row, with dynamic two-column and single-column wrapping for narrower viewports.
 - Linked the Graphify canvas, node list and direct-relationship controls through one accessible selection state with node centering, synchronized highlighting and clickable related nodes.
 - Kept execution and chat at the same dynamic desktop height, added contained scrolling for overflowing execution controls and expanded the 2000-plus-pixel workspace while preserving the chat as the dominant surface.
 - Reduced the mode information indicator to a compact secondary glyph aligned at the label-row edge while preserving its 44-pixel target, keyboard focus and accessible name.
