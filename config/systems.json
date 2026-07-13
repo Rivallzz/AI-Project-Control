@@ -1,5 +1,163 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
+  "sources": [
+    {
+      "id": "ecc-upstream",
+      "type": "git",
+      "official": true,
+      "url": "https://github.com/affaan-m/everything-claude-code.git"
+    },
+    {
+      "id": "npm",
+      "type": "npm",
+      "official": true,
+      "url": "https://registry.npmjs.org/"
+    },
+    {
+      "id": "pypi",
+      "type": "uv",
+      "official": true,
+      "url": "https://pypi.org/simple/"
+    },
+    {
+      "id": "winget",
+      "type": "winget",
+      "official": true,
+      "url": "https://cdn.winget.microsoft.com/cache",
+      "channel": "winget"
+    }
+  ],
+  "packages": [
+    {
+      "id": "7zip",
+      "source": "winget",
+      "displayName": "7-Zip",
+      "identifier": "7zip.7zip",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "claude",
+      "source": "npm",
+      "displayName": "Claude Code",
+      "name": "@anthropic-ai/claude-code",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "cli-continues",
+      "source": "npm",
+      "displayName": "cli-continues",
+      "name": "continues",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "codex",
+      "source": "npm",
+      "displayName": "Codex CLI",
+      "name": "@openai/codex",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "ecc",
+      "source": "ecc-upstream",
+      "displayName": "ECC",
+      "path": "{ECC_ROOT}",
+      "remote": "origin",
+      "guards": ["cleanWorkingTree"],
+      "operations": ["check", "update"]
+    },
+    {
+      "id": "ffmpeg",
+      "source": "winget",
+      "displayName": "FFmpeg",
+      "identifier": "Gyan.FFmpeg",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "git",
+      "source": "winget",
+      "displayName": "Git",
+      "identifier": "Git.Git",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "github-cli",
+      "source": "winget",
+      "displayName": "GitHub CLI",
+      "identifier": "GitHub.cli",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "imagemagick",
+      "source": "winget",
+      "displayName": "ImageMagick",
+      "identifier": "ImageMagick.ImageMagick",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "jq",
+      "source": "winget",
+      "displayName": "jq",
+      "identifier": "jqlang.jq",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "node-lts",
+      "source": "winget",
+      "displayName": "Node.js LTS",
+      "identifier": "OpenJS.NodeJS.LTS",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "obsidian",
+      "source": "winget",
+      "displayName": "Obsidian",
+      "identifier": "Obsidian.Obsidian",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "ollama",
+      "source": "winget",
+      "displayName": "Ollama",
+      "identifier": "Ollama.Ollama",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "powershell",
+      "source": "winget",
+      "displayName": "PowerShell 7",
+      "identifier": "Microsoft.PowerShell",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "python-3-12",
+      "source": "winget",
+      "displayName": "Python 3.12",
+      "identifier": "Python.Python.3.12",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "ripgrep",
+      "source": "winget",
+      "displayName": "ripgrep",
+      "identifier": "BurntSushi.ripgrep.MSVC",
+      "operations": ["install", "check", "update"]
+    },
+    {
+      "id": "serena",
+      "source": "pypi",
+      "displayName": "Serena",
+      "name": "serena-agent",
+      "python": "3.13",
+      "operations": ["install"]
+    },
+    {
+      "id": "uv",
+      "source": "winget",
+      "displayName": "uv",
+      "identifier": "astral-sh.uv",
+      "operations": ["install", "check", "update"]
+    }
+  ],
   "systems": [
     {
       "id": "node",
@@ -8,9 +166,7 @@
       "tier": "required",
       "reason": "Laufzeit des lokalen Dashboards.",
       "detect": { "type": "command", "command": "node.exe", "args": ["--version"] },
-      "install": { "name": "Node.js LTS", "command": "winget.exe", "args": ["install", "--id", "OpenJS.NodeJS.LTS", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "OpenJS.NodeJS.LTS" },
-      "update": { "name": "Node.js LTS", "command": "winget.exe", "args": ["upgrade", "--id", "OpenJS.NodeJS.LTS", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "node-lts"
     },
     {
       "id": "git",
@@ -19,9 +175,7 @@
       "tier": "required",
       "reason": "Versionskontrolle, Branches und sichere Worktrees.",
       "detect": { "type": "command", "command": "git.exe", "args": ["--version"] },
-      "install": { "name": "Git", "command": "winget.exe", "args": ["install", "--id", "Git.Git", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "Git.Git" },
-      "update": { "name": "Git", "command": "winget.exe", "args": ["upgrade", "--id", "Git.Git", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "git"
     },
     {
       "id": "powershell",
@@ -30,9 +184,7 @@
       "tier": "required",
       "reason": "Führt Router, Statusprüfungen und lokale Übergaben aus.",
       "detect": { "type": "command", "command": "pwsh.exe", "args": ["--version"] },
-      "install": { "name": "PowerShell 7", "command": "winget.exe", "args": ["install", "--id", "Microsoft.PowerShell", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "Microsoft.PowerShell" },
-      "update": { "name": "PowerShell 7", "command": "winget.exe", "args": ["upgrade", "--id", "Microsoft.PowerShell", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "powershell"
     },
     {
       "id": "codex",
@@ -41,9 +193,7 @@
       "tier": "recommended",
       "reason": "Primärer Coding-Agent mit bestehendem ChatGPT-Kontingent.",
       "detect": { "type": "command", "command": "codex.exe", "args": ["--version"] },
-      "install": { "name": "Codex CLI", "command": "npm.cmd", "args": ["install", "--global", "@openai/codex"] },
-      "updateCheck": { "type": "npm", "package": "@openai/codex" },
-      "update": { "name": "Codex CLI", "command": "npm.cmd", "args": ["install", "--global", "@openai/codex@latest"] }
+      "package": "codex"
     },
     {
       "id": "claude",
@@ -52,9 +202,7 @@
       "tier": "recommended",
       "reason": "Zweiter Coding-Agent und Provider-Fallback.",
       "detect": { "type": "command", "command": "claude.exe", "args": ["--version"] },
-      "install": { "name": "Claude Code", "command": "npm.cmd", "args": ["install", "--global", "@anthropic-ai/claude-code"] },
-      "updateCheck": { "type": "npm", "package": "@anthropic-ai/claude-code" },
-      "update": { "name": "Claude Code", "command": "npm.cmd", "args": ["install", "--global", "@anthropic-ai/claude-code@latest"] }
+      "package": "claude"
     },
     {
       "id": "hermes",
@@ -71,9 +219,7 @@
       "tier": "recommended",
       "reason": "Kostenloser lokaler Fallback ohne Abo-Tokens.",
       "detect": { "type": "ollama" },
-      "install": { "name": "Ollama", "command": "winget.exe", "args": ["install", "--id", "Ollama.Ollama", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "Ollama.Ollama" },
-      "update": { "name": "Ollama", "command": "winget.exe", "args": ["upgrade", "--id", "Ollama.Ollama", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "ollama"
     },
     {
       "id": "python",
@@ -82,9 +228,7 @@
       "tier": "recommended",
       "reason": "Basis für Graphify, lokale Analyse und Automatisierung.",
       "detect": { "type": "command", "command": "python.exe", "args": ["--version"] },
-      "install": { "name": "Python 3.12", "command": "winget.exe", "args": ["install", "--id", "Python.Python.3.12", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "Python.Python.3.12" },
-      "update": { "name": "Python 3.12", "command": "winget.exe", "args": ["upgrade", "--id", "Python.Python.3.12", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "python-3-12"
     },
     {
       "id": "uv",
@@ -93,9 +237,7 @@
       "tier": "recommended",
       "reason": "Reproduzierbare, schnelle Python-Umgebungen.",
       "detect": { "type": "command", "command": "uv.exe", "args": ["--version"] },
-      "install": { "name": "uv", "command": "winget.exe", "args": ["install", "--id", "astral-sh.uv", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "astral-sh.uv" },
-      "update": { "name": "uv", "command": "winget.exe", "args": ["upgrade", "--id", "astral-sh.uv", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "uv"
     },
     {
       "id": "graphify",
@@ -112,9 +254,7 @@
       "tier": "recommended",
       "reason": "Persönliches Arbeitswissen ohne die Repository-Wahrheit zu duplizieren.",
       "detect": { "type": "path", "paths": ["{OBSIDIAN_VAULT}"] },
-      "install": { "name": "Obsidian", "command": "winget.exe", "args": ["install", "--id", "Obsidian.Obsidian", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "Obsidian.Obsidian" },
-      "update": { "name": "Obsidian", "command": "winget.exe", "args": ["upgrade", "--id", "Obsidian.Obsidian", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "obsidian"
     },
     {
       "id": "ecc",
@@ -123,8 +263,7 @@
       "tier": "recommended",
       "reason": "Reduziert dauerhaften Agentenkontext und unterstützt gezielte Retrieval-Muster.",
       "detect": { "type": "path", "paths": ["{ECC_ROOT}"] },
-      "updateCheck": { "type": "gitRemote", "path": "{ECC_ROOT}", "remote": "origin" },
-      "update": { "name": "ECC", "command": "git.exe", "args": ["-C", "{ECC_ROOT}", "pull", "--ff-only"], "preflight": { "type": "cleanGit", "path": "{ECC_ROOT}" } }
+      "package": "ecc"
     },
     {
       "id": "mcp",
@@ -144,7 +283,7 @@
       "activation": "Nur bei Codeanalyse, Refactoring und symbolbezogenen Änderungen; aktiviert das aktuelle Arbeitsverzeichnis.",
       "costPolicy": "Lokal und Open Source; nutzt das bereits gewählte LLM und erzeugt kein eigenes Abo.",
       "detect": { "type": "command", "command": "serena.exe", "args": ["--version"] },
-      "install": { "name": "Serena", "command": "uv.exe", "args": ["tool", "install", "-p", "3.13", "serena-agent"] }
+      "package": "serena"
     },
     {
       "id": "cli-continues",
@@ -156,9 +295,7 @@
       "activation": "Nur nach einem erkannten Codex- oder Claude-Kontingentlimit; niemals als stiller Sitzungswähler.",
       "costPolicy": "Lokal und Open Source; startet keinen kostenpflichtigen Provider selbstständig.",
       "detect": { "type": "pathOrCommand", "paths": ["{APPDATA}\\npm\\continues.cmd"], "command": "continues.cmd", "args": ["--version"] },
-      "install": { "name": "cli-continues", "command": "npm.cmd", "args": ["install", "--global", "continues"] },
-      "updateCheck": { "type": "npm", "package": "continues" },
-      "update": { "name": "cli-continues", "command": "npm.cmd", "args": ["install", "--global", "continues@latest"] }
+      "package": "cli-continues"
     },
     {
       "id": "github-cli",
@@ -167,9 +304,7 @@
       "tier": "recommended",
       "reason": "Kontrollierte GitHub-Aktionen aus dem Dashboard.",
       "detect": { "type": "command", "command": "gh.exe", "args": ["--version"] },
-      "install": { "name": "GitHub CLI", "command": "winget.exe", "args": ["install", "--id", "GitHub.cli", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "GitHub.cli" },
-      "update": { "name": "GitHub CLI", "command": "winget.exe", "args": ["upgrade", "--id", "GitHub.cli", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "github-cli"
     },
     {
       "id": "ripgrep",
@@ -178,9 +313,7 @@
       "tier": "recommended",
       "reason": "Schnelle, tokenarme Dateisuche.",
       "detect": { "type": "command", "command": "rg.exe", "args": ["--version"] },
-      "install": { "name": "ripgrep", "command": "winget.exe", "args": ["install", "--id", "BurntSushi.ripgrep.MSVC", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "BurntSushi.ripgrep.MSVC" },
-      "update": { "name": "ripgrep", "command": "winget.exe", "args": ["upgrade", "--id", "BurntSushi.ripgrep.MSVC", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "ripgrep"
     },
     {
       "id": "jq",
@@ -189,9 +322,7 @@
       "tier": "recommended",
       "reason": "Strukturierte JSON-Auswertung ohne LLM-Aufruf.",
       "detect": { "type": "command", "command": "jq.exe", "args": ["--version"] },
-      "install": { "name": "jq", "command": "winget.exe", "args": ["install", "--id", "jqlang.jq", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "jqlang.jq" },
-      "update": { "name": "jq", "command": "winget.exe", "args": ["upgrade", "--id", "jqlang.jq", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "jq"
     },
     {
       "id": "cc-switch",
@@ -225,11 +356,11 @@
       "category": "Bildmodell",
       "tier": "project",
       "capabilities": ["image-generation"],
-      "reason": "Lokales Bildmodell für Projekte mit Assetpipeline; Polis nutzt den vorhandenen Flux-Schnell-Checkpoint über ComfyUI.",
+      "reason": "Lokales Bildmodell für Projekte mit Assetpipeline; Modellpfade werden aus Comfy Desktop, AI_PROJECT_CONTROL_COMFY_ROOT und registrierten Projektwurzeln ermittelt.",
       "detect": {
         "type": "flux",
         "roots": [
-          "C:\\Repos\\ComfyUI\\models",
+          "{COMFY_ROOT}\\models",
           "{LOCALAPPDATA}\\Programs\\Comfy Desktop\\resources\\ComfyUI\\models"
         ]
       }
@@ -242,9 +373,7 @@
       "capabilities": ["media"],
       "reason": "Audio-, Video- und Medienverarbeitung für passende Projekte.",
       "detect": { "type": "command", "command": "ffmpeg.exe", "args": ["-version"] },
-      "install": { "name": "FFmpeg", "command": "winget.exe", "args": ["install", "--id", "Gyan.FFmpeg", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "Gyan.FFmpeg" },
-      "update": { "name": "FFmpeg", "command": "winget.exe", "args": ["upgrade", "--id", "Gyan.FFmpeg", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "ffmpeg"
     },
     {
       "id": "imagemagick",
@@ -254,9 +383,7 @@
       "capabilities": ["image-generation"],
       "reason": "Automatische Bildverarbeitung für Projekte mit Assetpipeline.",
       "detect": { "type": "command", "command": "magick.exe", "args": ["-version"] },
-      "install": { "name": "ImageMagick", "command": "winget.exe", "args": ["install", "--id", "ImageMagick.ImageMagick", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "ImageMagick.ImageMagick" },
-      "update": { "name": "ImageMagick", "command": "winget.exe", "args": ["upgrade", "--id", "ImageMagick.ImageMagick", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "imagemagick"
     },
     {
       "id": "7zip",
@@ -266,9 +393,7 @@
       "capabilities": ["asset-pipeline"],
       "reason": "Archive und Assetpakete für passende Projekte.",
       "detect": { "type": "pathOrCommand", "paths": ["{PROGRAMFILES}\\7-Zip\\7z.exe"], "command": "7z.exe", "args": ["i"] },
-      "install": { "name": "7-Zip", "command": "winget.exe", "args": ["install", "--id", "7zip.7zip", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements"] },
-      "updateCheck": { "type": "winget", "id": "7zip.7zip" },
-      "update": { "name": "7-Zip", "command": "winget.exe", "args": ["upgrade", "--id", "7zip.7zip", "--exact", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"] }
+      "package": "7zip"
     },
     {
       "id": "godot",

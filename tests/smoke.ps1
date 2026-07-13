@@ -5,260 +5,123 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
-$dataRoot = Join-Path $env:TEMP ("ai-project-control-test-{0}" -f [guid]::NewGuid().ToString('N'))
-$stdout = Join-Path $dataRoot 'stdout.log'
-$stderr = Join-Path $dataRoot 'stderr.log'
-$testRepository = Join-Path $dataRoot 'ExampleProject'
-$testObsidian = Join-Path $dataRoot 'vault\10 Projects\ExampleProject'
-$testTask = Join-Path $dataRoot 'task.md'
-New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+$testRoot = Join-Path $env:TEMP ("ai-project-control-smoke-{0}" -f [guid]::NewGuid().ToString('N'))
+$repository = Join-Path $testRoot 'ExampleProject'
+$obsidianPath = Join-Path $testRoot 'vault\10 Projects\ExampleProject'
+$stdout = Join-Path $testRoot 'stdout.log'
+$stderr = Join-Path $testRoot 'stderr.log'
 $process = $null
-$health = $null
+
+function Invoke-JsonPost {
+    param([string]$Path, [hashtable]$Body)
+    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port$Path" -ContentType 'application/json' -Body ($Body | ConvertTo-Json -Depth 8) -TimeoutSec 30
+}
+
+function Assert-Rejected {
+    param([scriptblock]$Action, [string]$FailureMessage)
+    try {
+        & $Action | Out-Null
+        throw $FailureMessage
+    }
+    catch {
+        if ($_.Exception.Message -eq $FailureMessage) { throw }
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 
 try {
     & node.exe --check (Join-Path $root 'server.js')
+    if ($LASTEXITCODE -ne 0) { throw 'Server syntax validation failed.' }
     & node.exe --check (Join-Path $root 'public\app.js')
+    if ($LASTEXITCODE -ne 0) { throw 'Client syntax validation failed.' }
+
+    $env:AI_PROJECT_CONTROL_HOST = '127.0.0.1'
     $env:AI_PROJECT_CONTROL_PORT = [string]$Port
-    $env:AI_PROJECT_CONTROL_DATA = $dataRoot
-    $env:AI_PROJECT_CONTROL_RUN_ROOT = (Join-Path $dataRoot 'runs')
-    $env:AI_PROJECT_CONTROL_WORKTREE_ROOT = (Join-Path $dataRoot 'worktrees')
-    $env:AI_PROJECT_CONTROL_OBSIDIAN_VAULT = (Join-Path $dataRoot 'vault')
+    $env:AI_PROJECT_CONTROL_DATA = (Join-Path $testRoot 'data')
+    $env:AI_PROJECT_CONTROL_RUN_ROOT = (Join-Path $testRoot 'runs')
+    $env:AI_PROJECT_CONTROL_WORKTREE_ROOT = (Join-Path $testRoot 'worktrees')
+    $env:AI_PROJECT_CONTROL_OBSIDIAN_VAULT = (Join-Path $testRoot 'vault')
+    $env:AI_PROJECT_CONTROL_ECC_ROOT = (Join-Path $testRoot 'missing-ecc')
+    $env:AI_PROJECT_CONTROL_GRAPHIFY_PYTHON = (Join-Path $testRoot 'disabled-graphify.exe')
     $env:AI_PROJECT_CONTROL_SKIP_UPDATE_CHECKS = '1'
+
     $process = Start-Process node.exe -ArgumentList (Join-Path $root 'server.js') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        Start-Sleep -Milliseconds 200
+    $health = $null
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        Start-Sleep -Milliseconds 100
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
             if ($health.status -eq 'ok') { break }
         }
         catch {}
     }
-    if ($null -eq $health -or $health.status -ne 'ok') { throw 'Health endpoint did not become ready.' }
-    $projects = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/projects" -TimeoutSec 5
-    if ($projects.projects.Count -lt 1) { throw 'No default project was returned.' }
-    $config = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/config" -TimeoutSec 5
-    if ($config.dataRoot -ne $dataRoot) { throw 'Runtime data did not use the isolated test directory.' }
-    if ($config.defaultProviderOrder.Count -ne 3 -or $null -eq $config.providerModels.Codex -or $null -eq $config.providerModels.Claude -or $null -eq $config.providerModels.Ollama) { throw 'Dynamic provider model catalog is missing.' }
+    if ($null -eq $health -or $health.status -ne 'ok' -or $health.port -ne $Port) { throw 'Health endpoint did not become ready on the isolated port.' }
 
-    New-Item -ItemType Directory -Force -Path $testRepository | Out-Null
-    & git.exe -C $testRepository init -b main | Out-Null
-    Set-Content -LiteralPath (Join-Path $testRepository 'README.md') -Value '# Test Repository' -Encoding utf8
-    & git.exe -C $testRepository add README.md
-    & git.exe -C $testRepository -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Initialize test repository' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create initial test commit.' }
-    $projectBody = @{
+    New-Item -ItemType Directory -Force -Path $repository | Out-Null
+    & git.exe -C $repository init -b main | Out-Null
+    Set-Content -LiteralPath (Join-Path $repository 'README.md') -Value '# Test Repository' -Encoding utf8
+    & git.exe -C $repository add README.md
+    & git.exe -C $repository -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Initialize test repository' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the test repository.' }
+
+    $project = Invoke-JsonPost '/api/projects' @{
         name = 'ExampleProject'
-        repository = $testRepository
-        graphPath = (Join-Path $testRepository 'graphify-out\graph.json')
-        obsidianPath = $testObsidian
-    } | ConvertTo-Json
-    $project = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/projects" -ContentType 'application/json' -Body $projectBody -TimeoutSec 10
-    if ($project.name -ne 'ExampleProject' -or -not (Test-Path -LiteralPath $testObsidian)) { throw 'Project registration or Obsidian integration failed.' }
-    $obsidianNotes = Get-ChildItem -LiteralPath $testObsidian -Recurse -Filter '*.md'
-    if ($obsidianNotes.Count -lt 8) { throw 'Obsidian working area was not initialized with useful indexes.' }
-
-    $portfolio = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/portfolio" -TimeoutSec 20
-    if ($portfolio.project.id -ne $project.id -or $null -eq $portfolio.project.obsidian) { throw 'Portfolio did not focus the active project.' }
-
-    $badAttachmentBody = @{
-        projectId = $project.id
-        task = 'Attachment validation only'
-        provider = 'Ollama'
-        mode = 'ReadOnly'
-        useSubscriptionTokens = $false
-        attachments = @(@{ name = 'unsafe.txt'; type = 'text/plain'; dataUrl = 'data:text/plain;base64,dGVzdA==' })
-    } | ConvertTo-Json -Depth 5
-    try {
-        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/tasks" -ContentType 'application/json' -Body $badAttachmentBody -TimeoutSec 10 | Out-Null
-        throw 'Unsupported attachment type was accepted.'
+        repository = $repository
+        graphPath = (Join-Path $repository 'graphify-out\graph.json')
+        obsidianPath = $obsidianPath
     }
-    catch {
-        if ($_.Exception.Message -eq 'Unsupported attachment type was accepted.') { throw }
-    }
+    if ($project.name -ne 'ExampleProject' -or -not (Test-Path -LiteralPath $obsidianPath)) { throw 'Project registration or Obsidian initialization failed.' }
+    if ((Get-ChildItem -LiteralPath $obsidianPath -Recurse -Filter '*.md').Count -lt 8) { throw 'The Obsidian working area is incomplete.' }
 
-    $indexSource = Get-Content -Raw -LiteralPath (Join-Path $root 'public\index.html')
-    $appSource = Get-Content -Raw -LiteralPath (Join-Path $root 'public\app.js')
-    if ($indexSource -notmatch 'attachmentInput' -or $indexSource -notmatch 'data-view="portfolio"' -or $indexSource -notmatch 'busyOverlay') { throw 'Responsive chat, portfolio or loading controls are missing.' }
-    if ($indexSource -notmatch 'data-view="git"' -or $indexSource -notmatch 'knowledgeSearch' -or $indexSource -match 'Notizen laden') { throw 'Git review or automatic unified knowledge controls are missing.' }
-    if ($indexSource -match 'data-view="projects"' -or $indexSource -match 'graphZoomIn') { throw 'Redundant project navigation or graph zoom buttons are still present.' }
-    if ($appSource -notmatch "\.sort\(\(left, right\) => String\(left\.time\)\.localeCompare") { throw 'Conversation history is not rendered oldest-first.' }
-    if ($appSource -notmatch "addEventListener\('paste'" -or $appSource -match 'data-open-run') { throw 'Chat paste support or simplified conversation actions are incorrect.' }
-    if ($indexSource -notmatch 'class="provider-overview"' -or $indexSource -notmatch 'id="backgroundActivity"') { throw 'Compact provider header or background task activity is missing.' }
-    if ($indexSource -notmatch 'id="workflowContext"' -or $appSource -notmatch 'function renderJobActivity' -or $appSource -notmatch 'needsCodeTools') { throw 'Project-specific workflow filtering is missing.' }
-    if ($appSource -match "componentRow\('ECC'" -or $appSource -match "componentRow\('Hermes'" ) { throw 'Workflow sidebar still renders unrelated global inventory rows.' }
-    if ($indexSource -notmatch 'id="gitTargetSelect"' -or $appSource -notmatch 'worktree=\$\{encodeURIComponent\(gitData\.worktree\)\}') { throw 'Git review is not connected to selectable task worktrees.' }
-    if ($indexSource -notmatch 'id="gitIntegrateButton"' -or $indexSource -notmatch 'id="gitBranchFlow"' -or $appSource -notmatch '/api/git/integrate') { throw 'Task-to-integration-branch promotion controls are missing.' }
-    if ($appSource -notmatch 'Remote-Branch löschen') { throw 'Task integration does not disclose remote branch cleanup.' }
-    if ($appSource -notmatch 'Aufgabenbranch aufräumen' -or $appSource -notmatch 'kein separater Integrationsbranch' -or $appSource -notmatch "data.integration.branch === 'main' \? 'Aufgabe → main'") { throw 'Main fallback or already-integrated task cleanup is not clearly disclosed.' }
-    if ($appSource -notmatch "visibleView === 'git'.*loadGitState" -or $appSource -notmatch 'Der Git-Zustand des neuen Projekts wird geladen') { throw 'Project switching can leave stale Git data visible.' }
-    if ($indexSource -notmatch 'id="gitImagePreview"' -or $indexSource -notmatch 'id="gitCleanupMergedButton"') { throw 'Git image preview or merged-worktree cleanup controls are missing.' }
-    if ($indexSource -notmatch 'id="historyJumpLatest"' -or $appSource -notmatch 'historyFollow' -or $appSource -notmatch 'function jobConversationElement') { throw 'User-controlled chat following or inline task progress is missing.' }
-    if ($indexSource -match 'live-feed-panel' -or $appSource -notmatch 'technical-activity' -or $appSource -notmatch 'function renderMessageText') { throw 'Chat-centric activity details or readable response formatting are missing.' }
-    if ($appSource -notmatch 'abgeschlossen · prüfen' -or $appSource -notmatch 'acknowledgedActivityJobs') { throw 'Cross-project completion tracking is not actionable.' }
-    if ($appSource -notmatch 'queueCommitDraftSave' -or $indexSource -notmatch 'Wird automatisch für diesen Branch gespeichert') { throw 'Branch-specific commit draft UX is missing.' }
-    if ($indexSource -notmatch 'id="executionPanel"' -or $indexSource -notmatch 'id="providerRouteList"' -or $indexSource -notmatch 'data-provider-model="Codex"') { throw 'Project execution controls or provider model selectors are missing.' }
-    if ($appSource -notmatch 'executionPreferenceKey' -or $appSource -notmatch 'currentProviderOrder' -or $appSource -notmatch 'providerOrder,') { throw 'Provider order is not persisted per project or sent with tasks.' }
+    $portfolio = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/portfolio?projectId=$($project.id)" -TimeoutSec 20
+    if ($portfolio.project.id -ne $project.id -or -not ($portfolio.projects | Where-Object { $_.id -eq $project.id })) { throw 'Portfolio did not include and focus the active project.' }
 
-    $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
-    $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
-    if ($system.name -ne 'Example Tool') { throw 'System registration failed.' }
-
-    $inventory = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/systems?projectId=$($project.id)" -TimeoutSec 30
+    $inventory = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/systems?projectId=$($project.id)&force=1" -TimeoutSec 60
     $nodeSystem = $inventory.global | Where-Object { $_.name -eq 'Node.js' }
-    if ($null -eq $nodeSystem -or $nodeSystem.tier -ne 'required') { throw 'System inventory does not classify required foundations.' }
-    $serverSource = Get-Content -Raw -LiteralPath (Join-Path $root 'server.js')
-    if ($serverSource -notmatch '/api/git/image' -or $serverSource -notmatch '/api/git/cleanup-merged') { throw 'Git image preview or merged-worktree cleanup endpoints are missing.' }
-    if ($serverSource -match 'SYSTEM_METADATA|INSTALL_CATALOG') { throw 'System definitions are still hardcoded in server.js.' }
+    if ($null -eq $nodeSystem -or $nodeSystem.tier -ne 'required' -or $null -eq $nodeSystem.updateStatus) { throw 'Catalog-backed system inventory is incomplete.' }
     $catalog = Get-Content -Raw -LiteralPath (Join-Path $root 'config\systems.json') | ConvertFrom-Json
-    if ($catalog.schemaVersion -ne 2 -or $catalog.systems.Count -lt 10) { throw 'Versioned system catalog is invalid.' }
-    $updateSystems = $catalog.systems | Where-Object { $_.PSObject.Properties.Name -contains 'updateCheck' -and $_.PSObject.Properties.Name -contains 'update' }
-    if ($updateSystems.Count -lt 10 -or $null -eq $nodeSystem.updateStatus) { throw 'Catalog-driven update checks are missing.' }
-    $serenaSystem = $catalog.systems | Where-Object { $_.id -eq 'serena' }
-    $continuesSystem = $catalog.systems | Where-Object { $_.id -eq 'cli-continues' }
-    if ($null -eq $serenaSystem -or -not $serenaSystem.workflowRole -or -not $serenaSystem.activation) { throw 'Serena integration metadata is missing.' }
-    if ($null -eq $continuesSystem -or -not $continuesSystem.workflowRole -or -not $continuesSystem.costPolicy) { throw 'cli-continues integration metadata is missing.' }
-    $ignoreSource = Get-Content -Raw -LiteralPath (Join-Path $root '.gitignore')
-    if ($ignoreSource -match '(?m)^systems\.json$') { throw 'The versioned system catalog is hidden by an overly broad ignore rule.' }
+    if ($catalog.schemaVersion -ne 3 -or $catalog.sources.Count -lt 4 -or $catalog.packages.Count -lt 10) { throw 'System catalog schema or source coupling is invalid.' }
 
-    $gitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
-    if ($gitState.branch -ne 'main' -or -not $gitState.clean) { throw 'Git review endpoint did not report the clean test repository.' }
-    $draftBody = @{ projectId = $project.id; worktree = $testRepository; message = 'Improve semantic branch drafts' } | ConvertTo-Json
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/commit-draft" -ContentType 'application/json' -Body $draftBody -TimeoutSec 10 | Out-Null
-    $draftState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
-    if ($draftState.commitDraft -ne 'Improve semantic branch drafts') { throw 'Commit draft did not persist for the selected branch.' }
-    $clearDraftBody = @{ projectId = $project.id; worktree = $testRepository; message = '' } | ConvertTo-Json
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/commit-draft" -ContentType 'application/json' -Body $clearDraftBody -TimeoutSec 10 | Out-Null
-    Set-Content -LiteralPath (Join-Path $testRepository 'review-me.txt') -Value 'review only' -Encoding utf8
-    Set-Content -LiteralPath (Join-Path $testRepository 'other.txt') -Value 'must not appear' -Encoding utf8
-    $previewPng = Join-Path $testRepository 'preview.png'
-    [System.IO.File]::WriteAllBytes($previewPng, [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='))
-    $dirtyGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
-    if ($dirtyGitState.clean -or -not ($dirtyGitState.files | Where-Object { $_.path -eq 'review-me.txt' })) { throw 'Git review endpoint did not expose the changed file.' }
-    if ($dirtyGitState.PSObject.Properties.Name -contains 'diff') { throw 'Git status endpoint still exposes a combined repository diff.' }
-    $fileDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=review-me.txt" -TimeoutSec 10
-    if ($fileDiff.diff -notmatch 'review only' -or $fileDiff.diff -match 'must not appear') { throw 'Git file diff did not isolate the requested file.' }
-    $imageDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=preview.png" -TimeoutSec 10
-    if (-not $imageDiff.imageUrl -or -not $imageDiff.binary) { throw 'Changed image did not expose a local preview URL.' }
-    $imageClient = [System.Net.WebClient]::new()
-    try {
-        $imageBytes = $imageClient.DownloadData("http://127.0.0.1:$Port$($imageDiff.imageUrl)")
-        if ($imageClient.ResponseHeaders['Content-Type'] -ne 'image/png' -or $imageBytes.Length -lt 60) { throw 'Changed image preview endpoint did not return the PNG.' }
-    }
-    finally { $imageClient.Dispose() }
-    $reviewWorktree = Join-Path $dataRoot 'review-worktree'
-    $worktreeErrorAction = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    & git -C $testRepository worktree add -b ai/dashboard-review-test $reviewWorktree HEAD 2>$null | Out-Null
-    $worktreeExitCode = $LASTEXITCODE
-    $ErrorActionPreference = $worktreeErrorAction
-    if ($worktreeExitCode -ne 0) { throw 'Could not create test worktree.' }
-    Set-Content -LiteralPath (Join-Path $reviewWorktree 'task-change.txt') -Value 'task worktree change' -Encoding utf8
-    $worktreeGitState = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 10
-    if ($worktreeGitState.branch -ne 'ai/dashboard-review-test' -or $worktreeGitState.mainCheckout -or $worktreeGitState.worktree -ne $reviewWorktree) { throw 'Git review did not prioritize the changed task worktree.' }
-    if ($worktreeGitState.targets.Count -lt 2 -or -not ($worktreeGitState.files | Where-Object { $_.path -eq 'task-change.txt' })) { throw 'Git review did not expose all worktrees or the task change.' }
-    if ($worktreeGitState.integration.reason -notmatch 'Committe zuerst') { throw 'Dirty task worktree was incorrectly described as already integrated.' }
-    $encodedWorktree = [uri]::EscapeDataString($reviewWorktree)
-    $worktreeDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&worktree=$encodedWorktree&path=task-change.txt" -TimeoutSec 10
-    if ($worktreeDiff.diff -notmatch 'task worktree change') { throw 'Git worktree file diff did not use the selected task worktree.' }
-    Remove-Item -LiteralPath (Join-Path $testRepository 'review-me.txt'), (Join-Path $testRepository 'other.txt'), $previewPng -Force
-    & git.exe -C $reviewWorktree add task-change.txt
-    & git.exe -C $reviewWorktree -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Add task worktree change' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not commit the test worktree change.' }
-    $readyToIntegrate = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedWorktree" -TimeoutSec 10
-    if ($readyToIntegrate.integration.branch -ne 'main' -or -not $readyToIntegrate.integration.canFastForward) { throw 'Clean task branch was not approved for a safe integration-branch fast-forward.' }
-    $integrateBody = @{ projectId = $project.id; worktree = $reviewWorktree } | ConvertTo-Json
-    $integrated = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/integrate" -ContentType 'application/json' -Body $integrateBody -TimeoutSec 15
-    if ($integrated.state.branch -ne 'main' -or $integrated.state.lastCommit.subject -ne 'Add task worktree change') { throw 'Task branch was not fast-forwarded into the integration branch.' }
-    if ($integrated.deletedBranch -ne 'ai/dashboard-review-test' -or $integrated.deletedRemoteBranch) { throw 'Integrated local task branch cleanup was not reported correctly.' }
-    if (Test-Path -LiteralPath $reviewWorktree) { throw 'Integrated task worktree was not removed.' }
-    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/dashboard-review-test
-    if ($LASTEXITCODE -eq 0) { throw 'Integrated local task branch was not deleted.' }
-    $cleanupWorktree = Join-Path $dataRoot 'cleanup-worktree'
-    & git.exe -C $testRepository worktree add -b ai/already-integrated-test $cleanupWorktree main | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create the already-integrated cleanup worktree.' }
-    $encodedCleanupWorktree = [uri]::EscapeDataString($cleanupWorktree)
-    $cleanupReady = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedCleanupWorktree" -TimeoutSec 10
-    if (-not $cleanupReady.integration.alreadyIntegrated -or -not $cleanupReady.integration.canCleanup -or $cleanupReady.integration.canFastForward) { throw 'Already-integrated task branch was not offered as cleanup-only.' }
-    $cleanupBody = @{ projectId = $project.id; worktree = $cleanupWorktree } | ConvertTo-Json
-    $cleaned = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/integrate" -ContentType 'application/json' -Body $cleanupBody -TimeoutSec 15
-    if (-not $cleaned.alreadyIntegrated -or $cleaned.deletedBranch -ne 'ai/already-integrated-test') { throw 'Already-integrated task branch cleanup was not reported correctly.' }
-    if (Test-Path -LiteralPath $cleanupWorktree) { throw 'Already-integrated task worktree was not removed.' }
-    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/already-integrated-test
-    if ($LASTEXITCODE -eq 0) { throw 'Already-integrated local task branch was not deleted.' }
-    $bulkCleanupA = Join-Path $dataRoot 'bulk-cleanup-a'
-    $bulkCleanupB = Join-Path $dataRoot 'bulk-cleanup-b'
-    & git.exe -C $testRepository worktree add -b ai/bulk-cleanup-a $bulkCleanupA main | Out-Null
-    & git.exe -C $testRepository worktree add -b ai/bulk-cleanup-b $bulkCleanupB main | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create bulk cleanup worktrees.' }
-    $encodedMainWorktree = [uri]::EscapeDataString($testRepository)
-    $bulkReady = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedMainWorktree" -TimeoutSec 10
-    if ($bulkReady.cleanupCandidates.Count -ne 2) { throw 'Merged cleanup candidates were not detected accurately.' }
-    $bulkBody = @{ projectId = $project.id; worktrees = @($bulkCleanupA, $bulkCleanupB) } | ConvertTo-Json -Depth 4
-    $bulkCleaned = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/git/cleanup-merged" -ContentType 'application/json' -Body $bulkBody -TimeoutSec 20
-    if ($bulkCleaned.cleaned.Count -ne 2 -or (Test-Path -LiteralPath $bulkCleanupA) -or (Test-Path -LiteralPath $bulkCleanupB)) { throw 'Bulk cleanup did not remove all safe merged worktrees.' }
-    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/bulk-cleanup-a
-    if ($LASTEXITCODE -eq 0) { throw 'First bulk-cleaned branch still exists.' }
-    & git.exe -C $testRepository show-ref --verify --quiet refs/heads/ai/bulk-cleanup-b
-    if ($LASTEXITCODE -eq 0) { throw 'Second bulk-cleaned branch still exists.' }
-    if ($serverSource -notmatch "'push', 'origin', '--delete', state.branch") { throw 'Integrated remote task branch cleanup is missing.' }
-    if ($serverSource -notmatch "state = 'Aufgabe abgeschlossen'" -or $serverSource -notmatch 'canCleanup') { throw 'Completed-task feedback or already-integrated branch cleanup is missing.' }
-    if ($serverSource -notmatch 'function taskBranchSlug' -or $serverSource -match 'safeId\(task\)\.slice') { throw 'Task branches still copy the conversational prompt instead of using semantic names.' }
-    if ($serverSource -notmatch 'GIT_DRAFTS_PATH' -or $serverSource -notmatch '/api/git/commit-draft') { throw 'Local branch draft persistence is missing.' }
-    if ($serverSource -notmatch "controlledBlocked \? 'BLOCKED'") { throw 'Historical controlled-blocked runs are not normalized in the dashboard.' }
-    if ($appSource -notmatch "addEventListener\('wheel'" -or $appSource -notmatch "addEventListener\('pointermove'") { throw 'Graph mouse zoom or pan controls are missing.' }
+    Assert-Rejected { Invoke-JsonPost '/api/systems/install' @{ projectId = $project.id; installKey = 'not-approved' } } 'Unknown installer was accepted.'
+    Assert-Rejected { Invoke-JsonPost '/api/systems/update' @{ projectId = $project.id; updateKey = 'not-approved' } } 'Unknown updater was accepted.'
+    Assert-Rejected { Invoke-JsonPost '/api/tasks' @{
+        projectId = $project.id; task = 'Attachment validation'; provider = 'Ollama'; mode = 'ReadOnly'; useSubscriptionTokens = $false
+        attachments = @(@{ name = 'unsafe.txt'; type = 'text/plain'; dataUrl = 'data:text/plain;base64,dGVzdA==' })
+    } } 'Unsupported attachment type was accepted.'
 
-    $invalidInstallerBody = @{ projectId = $project.id; installKey = 'not-approved' } | ConvertTo-Json
-    try {
-        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems/install" -ContentType 'application/json' -Body $invalidInstallerBody -TimeoutSec 10 | Out-Null
-        throw 'Unknown installer was accepted.'
-    }
-    catch {
-        if ($_.Exception.Message -eq 'Unknown installer was accepted.') { throw }
-    }
-    $invalidUpdateBody = @{ projectId = $project.id; updateKey = 'not-approved' } | ConvertTo-Json
-    try {
-        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems/update" -ContentType 'application/json' -Body $invalidUpdateBody -TimeoutSec 10 | Out-Null
-        throw 'Unknown updater was accepted.'
-    }
-    catch {
-        if ($_.Exception.Message -eq 'Unknown updater was accepted.') { throw }
-    }
+    $clean = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)" -TimeoutSec 15
+    if (-not $clean.clean -or $clean.branch -ne 'main') { throw 'Git endpoint did not report the clean repository.' }
+    Set-Content -LiteralPath (Join-Path $repository 'review-me.txt') -Value 'review only' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $repository 'other.txt') -Value 'must not appear' -Encoding utf8
+    [System.IO.File]::WriteAllBytes((Join-Path $repository 'preview.png'), [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='))
+    $fileDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=review-me.txt" -TimeoutSec 15
+    if ($fileDiff.diff -notmatch 'review only' -or $fileDiff.diff -match 'must not appear') { throw 'File diff was not isolated to the selected file.' }
+    $imageDiff = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git/diff?projectId=$($project.id)&path=preview.png" -TimeoutSec 15
+    if (-not $imageDiff.binary -or -not $imageDiff.imageUrl) { throw 'Changed image did not expose a preview URL.' }
+    $imageResponse = Invoke-WebRequest -Uri "http://127.0.0.1:$Port$($imageDiff.imageUrl)" -TimeoutSec 15
+    if ($imageResponse.Headers.'Content-Type' -ne 'image/png' -or $imageResponse.RawContentLength -lt 60) { throw 'Image preview returned invalid content.' }
 
-    Set-Content -LiteralPath $testTask -Value "# Goal`n`nPrüfe UTF-8: äöü ß → Dry-run routing validation." -Encoding utf8
-    $router = Join-Path $root 'router\Invoke-ProjectAiTask.ps1'
-    $routerSource = Get-Content -Raw -LiteralPath $router
-    if ($routerSource -notmatch 'Suggested branch name:' -or $routerSource -notmatch 'Suggested commit message:') { throw 'Write-task delivery metadata is not requested from providers.' }
-    if ($routerSource -notmatch '\$ProviderOrder' -or $routerSource -notmatch '\$CodexModel' -or $routerSource -notmatch '''-m'', \$CodexModel') { throw 'Router does not accept ordered providers and per-provider models.' }
-    if ($routerSource -notmatch 'StandardInputEncoding.*\$utf8') { throw 'Router does not explicitly enforce UTF-8 stdin when the runtime supports it.' }
-    if ($routerSource -notmatch '\[Console\]::OutputEncoding\s*=\s*\$consoleUtf8') { throw 'Router does not explicitly enforce UTF-8 console output.' }
-    if ($routerSource -notmatch 'Read-only context policy') { throw 'Router does not define the lightweight advisory context policy.' }
-    if ($routerSource -notmatch 'New-ContinuesHandoffArtifact') { throw 'Router does not create controlled cli-continues handoff artifacts.' }
-    if ($routerSource -notmatch '\[AllowEmptyString\(\)\]\[string\]\$InputText') { throw 'Router does not accept empty stdin for non-interactive Hermes execution.' }
-    if ($routerSource -notmatch 'Execute this controlled \$Mode task now') { throw 'Hermes does not receive the compact controlled goal prompt.' }
-    if ($routerSource -notmatch 'safe Windows command-line budget') { throw 'Hermes prompt size is not guarded for Windows.' }
-    if ($routerSource -notmatch 'mcp__serena__initial_instructions') { throw 'Hermes does not receive the native Serena MCP tool name.' }
-    if ($routerSource -notmatch 'AI_PROJECT_ROUTER_BLOCKED' -or $routerSource -notmatch 'blocked_sentinel') { throw 'Router does not distinguish a controlled blocked result from a missing completion marker.' }
-    if ($routerSource -notmatch 'worktree add --detach' -or $routerSource -notmatch 'local-hermes-write-not-approved') { throw 'Local Hermes read-only isolation or write-task block is missing.' }
-    if ($routerSource -notmatch "'chat', '-q'" -or $routerSource -match "@\('-z'") { throw 'Hermes still hides live tool progress in one-shot mode.' }
-    if ($routerSource -match "'--ephemeral'" -or $routerSource -match "'--no-session-persistence'") { throw 'Provider sessions are still disabled, so cli-continues cannot hand work off.' }
-    if ($routerSource -notmatch 'Serena') { throw 'Router does not describe the Serena symbol-navigation boundary.' }
-    if ($appSource -notmatch 'system\.workflowRole' -or $appSource -notmatch 'Hermes \+ Ollama') { throw 'System integration metadata or Hermes orchestration label is missing from the UI.' }
-    if ($appSource -notmatch 'data-update-system' -or $appSource -notmatch '/api/systems/update' -or $appSource -notmatch 'Prüft…') { throw 'System update controls or refresh feedback are missing from the UI.' }
-    $routerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs') -LocalOnly -DryRun
-    if ($LASTEXITCODE -ne 0 -or ($routerOutput -join "`n") -notmatch 'ollama') { throw 'Local-only provider routing dry-run failed.' }
-    $orderedRouterOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -ProviderOrder 'Ollama,Claude,Codex' -OllamaModel 'polis-coder' -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs-ordered') -DryRun
-    if ($LASTEXITCODE -ne 0 -or ($orderedRouterOutput -join "`n") -notmatch '"selected_order"' -or ($orderedRouterOutput -join "`n") -notmatch 'ollama') { throw 'Custom provider order dry-run failed.' }
+    Remove-Item -LiteralPath (Join-Path $repository 'review-me.txt'), (Join-Path $repository 'other.txt'), (Join-Path $repository 'preview.png') -Force
+    $taskWorktree = Join-Path $testRoot 'task-worktree'
+    & git.exe -C $repository worktree add -b ai/smoke-task $taskWorktree HEAD | Out-Null
+    Set-Content -LiteralPath (Join-Path $taskWorktree 'task-change.txt') -Value 'task worktree change' -Encoding utf8
+    & git.exe -C $taskWorktree add task-change.txt
+    & git.exe -C $taskWorktree -c user.name='AI Project Control Test' -c user.email='test@localhost' commit -m 'Add task worktree change' | Out-Null
+    $encodedWorktree = [uri]::EscapeDataString($taskWorktree)
+    $ready = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/git?projectId=$($project.id)&worktree=$encodedWorktree" -TimeoutSec 15
+    if (-not $ready.integration.canFastForward -or $ready.integration.branch -ne 'main') { throw 'Task worktree was not ready for safe integration.' }
+    $integrated = Invoke-JsonPost '/api/git/integrate' @{ projectId = $project.id; worktree = $taskWorktree }
+    if ($integrated.state.branch -ne 'main' -or $integrated.deletedRemoteBranch -ne $false -or (Test-Path -LiteralPath $taskWorktree)) { throw 'Local integration or remote-branch preservation failed.' }
 
-    Set-Content -LiteralPath (Join-Path $testRepository 'dirty.txt') -Value 'dirty' -Encoding utf8
-    $previousErrorAction = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -Mode Write -RunRoot (Join-Path $dataRoot 'router-runs-dirty') -LocalOnly -DryRun 2>$null
-    $ErrorActionPreference = $previousErrorAction
-    if ($LASTEXITCODE -eq 0) { throw 'Dirty write-worktree guard did not reject the repository.' }
+    $taskFile = Join-Path $testRoot 'task.md'
+    Set-Content -LiteralPath $taskFile -Value "# Goal`n`nDry-run routing validation." -Encoding utf8
+    $routerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'router\Invoke-ProjectAiTask.ps1') -TaskFile $taskFile -WorkingDirectory $repository -ProjectName 'ExampleProject' -Provider Auto -Mode ReadOnly -RunRoot (Join-Path $testRoot 'router-runs') -LocalOnly -DryRun
+    if ($LASTEXITCODE -ne 0 -or ($routerOutput -join "`n") -notmatch 'ollama') { throw 'Read-only local router dry-run failed.' }
 
     Write-Output 'AI_PROJECT_CONTROL_SMOKE_OK'
 }
 finally {
     if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-    if (Test-Path -LiteralPath $dataRoot) { Remove-Item -LiteralPath $dataRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
 }

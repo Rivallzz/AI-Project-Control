@@ -1,8 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Target = 'C:\Repos\AI-Project-Control',
-    [string]$Vault = (Join-Path $env:USERPROFILE 'Documents\Obsidian\Project-Knowledge'),
-    [bool]$RegisterPolis = $true
+    [string]$Target = (Join-Path $env:USERPROFILE 'Documents\Projects\AI-Project-Control'),
+    [string]$Vault = (Join-Path $env:USERPROFILE 'Documents\Obsidian\Project-Knowledge')
 )
 
 Set-StrictMode -Version Latest
@@ -62,18 +61,8 @@ $projects = @(
         obsidianPath = $obsidianPath
     }
 )
-$polisPath = 'C:\Repos\Polis'
-if ($RegisterPolis -and (Test-Path -LiteralPath $polisPath)) {
-    $projects += [ordered]@{
-        id = 'polis'
-        name = 'Polis'
-        repository = $polisPath
-        graphPath = (Join-Path $polisPath 'graphify-out\graph.json')
-        obsidianPath = (Join-Path $Vault '10 Projects\Polis')
-    }
-}
 [ordered]@{
-    activeProjectId = if ($projects.id -contains 'polis') { 'polis' } else { 'ai-project-control' }
+    activeProjectId = 'ai-project-control'
     projects = $projects
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $projectsPath -Encoding utf8
 

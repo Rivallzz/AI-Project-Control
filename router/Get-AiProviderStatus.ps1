@@ -2,7 +2,8 @@
 param(
     [switch]$Json,
     [string]$CodexHome = (Join-Path $env:USERPROFILE '.codex'),
-    [string]$StatePath = (Join-Path (Join-Path $env:LOCALAPPDATA 'AI Project Control') 'provider-state.json')
+    [string]$StatePath = (Join-Path (Join-Path $env:LOCALAPPDATA 'AI Project Control') 'provider-state.json'),
+    [string]$OllamaModel = 'default'
 )
 
 Set-StrictMode -Version Latest
@@ -106,6 +107,15 @@ function Get-LatestCodexRateLimit {
 }
 
 function Get-CodexStatus {
+    if ([bool]$env:OPENAI_API_KEY) {
+        return [pscustomobject]@{
+            available = $false
+            authenticated_with_chatgpt = $false
+            paid_api_guard = 'BLOCKED'
+            reason = 'OPENAI_API_KEY is set; subscription-only routing refuses this configuration.'
+        }
+    }
+
     $command = Get-Command codex -ErrorAction SilentlyContinue
     if ($null -eq $command) {
         return [pscustomobject]@{ available = $false; reason = 'codex command not found' }
@@ -125,6 +135,7 @@ function Get-CodexStatus {
         return [pscustomobject]@{
             available = $chatGptAuth
             authenticated_with_chatgpt = $chatGptAuth
+            paid_api_guard = 'PASS'
             quota_known = $false
             reason = 'No recent Codex rate-limit event was found.'
         }
@@ -151,6 +162,7 @@ function Get-CodexStatus {
     return [pscustomobject]@{
         available = $available
         authenticated_with_chatgpt = $chatGptAuth
+        paid_api_guard = 'PASS'
         quota_known = $true
         primary_used_percent = $primaryUsed
         primary_window_minutes = Get-ObjectPropertyValue -Object $primary -Name 'window_minutes'
@@ -214,18 +226,46 @@ function Get-ClaudeStatus {
 }
 
 function Get-OllamaStatus {
-    $command = Get-Command ollama -ErrorAction SilentlyContinue
-    if ($null -eq $command) {
-        return [pscustomobject]@{ available = $false; reason = 'ollama command not found' }
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$RequestedModel)
+
+    $requestedModelName = $RequestedModel.Trim()
+    if (-not $requestedModelName) {
+        return [pscustomobject]@{ available = $false; model = $requestedModelName; local_only = $true; reason = 'No Ollama model was selected.' }
     }
 
-    $models = (& ollama list 2>$null | Out-String)
-    $hasModel = $models -match '(?m)^polis-coder(?::latest)?\s'
+    $command = Get-Command ollama -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        return [pscustomobject]@{ available = $false; model = $requestedModelName; local_only = $true; reason = 'ollama command not found' }
+    }
+
+    try {
+        $models = (& ollama list 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0) { throw 'ollama list failed' }
+    }
+    catch {
+        return [pscustomobject]@{ available = $false; model = $requestedModelName; local_only = $true; reason = 'Installed Ollama models could not be read.' }
+    }
+
+    $installedModels = @(
+        foreach ($line in ($models -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if (-not $trimmed -or $trimmed -match '^NAME\s+') { continue }
+            @($trimmed -split '\s+')[0]
+        }
+    )
+    if ($requestedModelName -eq 'default') {
+        $fallbackModels = @($installedModels | Where-Object { $_ -notmatch '(?i)embed' } | Select-Object -First 1)
+        $requestedModelName = if ($fallbackModels.Count) { [string]$fallbackModels[0] } else { '' }
+    }
+    $hasModel = [bool]$requestedModelName -and @($installedModels | Where-Object {
+        $_ -ieq $requestedModelName -or $_ -ieq ($requestedModelName + ':latest')
+    }).Count -gt 0
     return [pscustomobject]@{
         available = $hasModel
-        model = 'polis-coder'
+        model = $requestedModelName
+        installed_models = $installedModels
         local_only = $true
-        reason = if ($hasModel) { $null } else { 'polis-coder model not found' }
+        reason = if ($hasModel) { $null } else { "Selected Ollama model not found: $requestedModelName" }
     }
 }
 
@@ -235,7 +275,7 @@ $result = [pscustomobject]@{
     subscription_only = $true
     codex = Get-CodexStatus
     claude = Get-ClaudeStatus
-    ollama = Get-OllamaStatus
+    ollama = Get-OllamaStatus -RequestedModel $OllamaModel
 }
 
 if ($Json) {

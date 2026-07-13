@@ -2,6 +2,23 @@
 
 ## 2026-07-13
 
+- Consolidated the system-update branch with the current `main` implementation without committing or publishing the merge.
+- Bound the local HTTP service to loopback, rejected foreign-origin mutations and required JSON for mutating API requests.
+- Moved request validation, atomic JSON state, project metadata, system catalog behavior and project-scoped UI state into focused modules.
+- Persisted bounded job history across restarts and marked interrupted work explicitly instead of leaving it falsely active.
+- Scoped job lists and server-sent events by project while keeping task, dashboard, install, update and provisioning jobs visible in the same conversation.
+- Isolated every read-only provider in a disposable current-content snapshot, added before/after content manifests and guaranteed cleanup on success or failure.
+- Replaced free-form update commands with a schema-v3 source/package/system catalog, strict SemVer and Git relation checks, fingerprinted one-use authorization and serialized maintenance.
+- Added same-origin API, recovery, SSE, Git path, remote-lease, UI race, job visibility, router isolation and update authorization tests.
+- Replaced source-pattern smoke assertions with a behavioral product test covering project registration, Obsidian, Portfolio, systems, per-file Git review, image preview, worktree integration and routing.
+- Preserved remote task branches during local integration and cleanup; remote deletion now requires a separate unchanged-OID authorization contract.
+- Added project-scoped chat drafts and attachments, generation-safe async requests, keyed conversation rendering and all-job-type progress cards.
+- Added automatic, local-only and custom provider presets while preserving detailed per-provider order and model controls.
+- Restored a compact multi-project Portfolio with separate execution and delivery states, attention items and one next action per project.
+- Added a keyboard-accessible graph node list, accessible tab behavior, larger touch targets and responsive layouts down to 320 pixels.
+- Moved project execution controls out of the global sidebar into the workspace directly left of the chat.
+- Replaced repeated provider move buttons with one explicit primary-provider choice and a visible numbered fallback chain.
+- Added an in-place model-catalog refresh so Codex cache entries, Claude CLI aliases and installed Ollama chat models are recognized without restarting the dashboard.
 - Added project-scoped provider ordering, enablement, execution mode and per-provider model selection beside the chat.
 - Discovered Codex models from its local cache and Ollama chat models from the current machine instead of hardcoding UI choices.
 - Passed the exact route and model map through task packages, server validation and quota handoffs without an additional LLM call.

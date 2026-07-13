@@ -1,11 +1,16 @@
 'use strict';
 
+import { api, createRequestState } from './modules/request-state.js';
+import { createProjectUiState, jobBelongsInConversation } from './modules/project-ui-state.js';
+
 const elements = {
   connection: document.getElementById('connectionState'),
   backgroundActivity: document.getElementById('backgroundActivity'),
   projectSelect: document.getElementById('projectSelect'), addProject: document.getElementById('addProjectButton'),
   providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'), workflowContext: document.getElementById('workflowContext'),
   executionPanel: document.getElementById('executionPanel'), providerRoute: document.getElementById('providerRouteList'), routeSummary: document.getElementById('routeSummary'),
+  providerPreset: document.getElementById('providerPresetControl'), providerDetails: document.getElementById('providerDetails'),
+  primaryProvider: document.getElementById('primaryProviderSelect'), refreshModels: document.getElementById('refreshModelsButton'), modelCatalogState: document.getElementById('modelCatalogState'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
   attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
   attachmentPreview: document.getElementById('attachmentPreview'),
@@ -14,7 +19,7 @@ const elements = {
   start: document.getElementById('startButton'), formMessage: document.getElementById('formMessage'),
   knowledgeProjectName: document.getElementById('knowledgeProjectName'), knowledgeSearch: document.getElementById('knowledgeSearch'),
   knowledgeLoadState: document.getElementById('knowledgeLoadState'), graphStats: document.getElementById('graphStats'),
-  graphCanvas: document.getElementById('graphCanvas'), graphDetails: document.getElementById('graphDetails'),
+  graphCanvas: document.getElementById('graphCanvas'), graphNodeList: document.getElementById('graphNodeList'), graphDetails: document.getElementById('graphDetails'),
   obsidianStats: document.getElementById('obsidianStats'), noteList: document.getElementById('noteList'),
   noteTitle: document.getElementById('noteTitle'), noteContent: document.getElementById('noteContent'),
   history: document.getElementById('conversationHistory'), historyJumpLatest: document.getElementById('historyJumpLatest'),
@@ -27,14 +32,12 @@ const elements = {
   provisionSlug: document.getElementById('provisionSlug'), provisionParent: document.getElementById('provisionParent'),
   provisionDescription: document.getElementById('provisionDescription'), provisionGitHub: document.getElementById('provisionGitHub'),
   provisionVisibility: document.getElementById('provisionVisibility'), provisionMessage: document.getElementById('provisionMessage'),
-  attentionList: document.getElementById('attentionList'),
-  portfolioProjectName: document.getElementById('portfolioProjectName'), portfolioState: document.getElementById('portfolioState'),
-  portfolioNextAction: document.getElementById('portfolioNextAction'), portfolioCurrentTask: document.getElementById('portfolioCurrentTask'),
-  portfolioLastRun: document.getElementById('portfolioLastRun'), portfolioRepository: document.getElementById('portfolioRepository'), portfolioKnowledge: document.getElementById('portfolioKnowledge'),
+  portfolioSummary: document.getElementById('portfolioSummary'), portfolioProjects: document.getElementById('portfolioProjects'),
   gitProjectName: document.getElementById('gitProjectName'), gitTarget: document.getElementById('gitTargetSelect'), gitState: document.getElementById('gitState'), gitSummary: document.getElementById('gitSummary'),
   gitFileList: document.getElementById('gitFileList'), gitDiff: document.getElementById('gitDiffContent'), gitSelectAll: document.getElementById('gitSelectAll'),
   gitImagePreview: document.getElementById('gitImagePreview'), gitImagePreviewImage: document.getElementById('gitImagePreviewImage'), gitImagePreviewCaption: document.getElementById('gitImagePreviewCaption'),
   gitDiffFileName: document.getElementById('gitDiffFileName'), gitCommitMessage: document.getElementById('gitCommitMessage'),
+  gitDeliverySteps: document.getElementById('gitDeliverySteps'),
   gitBranchFlow: document.getElementById('gitBranchFlow'), gitCommit: document.getElementById('gitCommitButton'), gitCommitPush: document.getElementById('gitCommitPushButton'),
   gitIntegrate: document.getElementById('gitIntegrateButton'), gitCleanupMerged: document.getElementById('gitCleanupMergedButton'), gitPush: document.getElementById('gitPushButton'), gitMessage: document.getElementById('gitMessage'),
   busyOverlay: document.getElementById('busyOverlay'), busyTitle: document.getElementById('busyTitle'), busyMessage: document.getElementById('busyMessage'),
@@ -43,7 +46,6 @@ const elements = {
 let config = null;
 let registry = null;
 let activeProject = null;
-let refreshing = false;
 let graphData = null;
 let graphPositions = new Map();
 let selectedGraphNodeId = null;
@@ -59,6 +61,7 @@ let visibleGitDraftKey = null;
 let visibleGitDraftValue = null;
 const gitDraftSaveTimers = new Map();
 let selectedAttachments = [];
+const projectUiState = createProjectUiState();
 let liveJobs = new Map();
 let jobEventSource = null;
 let jobRenderPending = false;
@@ -66,17 +69,41 @@ let componentStatus = null;
 let historyFollow = true;
 let historyLatestVersion = null;
 let runHistory = [];
+const conversationNodes = new Map();
 const submittedTaskText = new Map();
 const submittedTaskAttachments = new Map();
 const terminalHistoryRefreshes = new Set();
 const acknowledgedActivityJobs = new Set(JSON.parse(sessionStorage.getItem('acknowledgedActivityJobs') || '[]'));
 const PROVIDERS = ['Codex', 'Claude', 'Ollama'];
+const JOB_KINDS = new Set(['task', 'dashboard-command', 'install', 'update', 'provision']);
 
-async function api(path, options = {}) {
-  const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Request failed: ${response.status}`);
-  return data;
+const requestState = createRequestState(() => activeProject?.id || null);
+const beginRequest = (...args) => requestState.begin(...args);
+const requestIsCurrent = (token) => requestState.isCurrent(token);
+const invalidateProjectRequests = () => requestState.invalidateProject();
+
+function storeComposerDraft(projectId = activeProject?.id) {
+  if (!projectId) return;
+  projectUiState.saveComposer(projectId, elements.task.value, selectedAttachments);
+}
+
+function restoreComposerDraft(projectId) {
+  const draft = projectUiState.loadComposer(projectId);
+  elements.task.value = draft.text;
+  selectedAttachments = draft.attachments;
+  elements.task.style.height = '';
+  if (elements.task.value) elements.task.style.height = `${Math.min(elements.task.scrollHeight, 180)}px`;
+  renderAttachmentPreview();
+  elements.formMessage.textContent = selectedAttachments.length ? `${selectedAttachments.length} Bild(er) für ${activeProject?.name || 'dieses Projekt'} vorgemerkt.` : '';
+}
+
+function clearComposerDraft(projectId) {
+  projectUiState.clearComposer(projectId);
+  if (activeProject?.id === projectId) {
+    elements.task.value = '';
+    elements.task.style.height = '';
+    clearAttachments(false);
+  }
 }
 
 function executionPreferenceKey() {
@@ -93,15 +120,15 @@ function providerModelSelect(provider) {
 
 function defaultModel(provider) {
   const catalog = config?.providerModels?.[provider] || [];
-  if (provider === 'Ollama' && catalog.some((model) => model.value === 'polis-coder:latest')) return 'polis-coder:latest';
-  if (provider === 'Ollama' && catalog.some((model) => model.value === 'polis-coder')) return 'polis-coder';
   return catalog[0]?.value || 'default';
 }
 
 function populateProviderModel(provider, selectedValue = null) {
   const select = providerModelSelect(provider);
   const catalog = config?.providerModels?.[provider] || [];
-  const requested = selectedValue || defaultModel(provider);
+  const requested = selectedValue === 'default' && !catalog.some((model) => model.value === 'default')
+    ? defaultModel(provider)
+    : selectedValue || defaultModel(provider);
   select.replaceChildren();
   for (const model of catalog) {
     const option = document.createElement('option'); option.value = model.value; option.textContent = model.label; select.append(option);
@@ -112,9 +139,53 @@ function populateProviderModel(provider, selectedValue = null) {
   select.value = requested;
 }
 
+function renderModelCatalogState(message = '') {
+  if (message) { elements.modelCatalogState.textContent = message; return; }
+  const codexCount = (config?.providerModels?.Codex || []).filter((model) => model.value !== 'default').length;
+  const ollamaCount = (config?.providerModels?.Ollama || []).length;
+  elements.modelCatalogState.textContent = `${codexCount} Codex · ${ollamaCount} Ollama erkannt`;
+}
+
+function makeProviderPrimary(provider) {
+  const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
+  if (!row) return;
+  row.querySelector('.provider-enabled input').checked = true;
+  elements.providerRoute.prepend(row);
+  elements.primaryProvider.value = provider;
+}
+
 function readExecutionPreferences() {
   try { return JSON.parse(localStorage.getItem(executionPreferenceKey()) || '{}'); }
   catch { return {}; }
+}
+
+function selectedProviderPreset() {
+  return elements.providerPreset.querySelector('input[name="providerPreset"]:checked')?.value || 'automatic';
+}
+
+function setProviderOrder(order) {
+  for (const provider of order) {
+    const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
+    if (row) elements.providerRoute.append(row);
+  }
+}
+
+function applyProviderPreset(preset, persist = true, revealDetails = false) {
+  const radio = elements.providerPreset.querySelector(`input[value="${preset}"]`);
+  if (radio) radio.checked = true;
+  if (preset === 'automatic') {
+    setProviderOrder(PROVIDERS);
+    for (const row of providerRows()) row.querySelector('.provider-enabled input').checked = true;
+    elements.primaryProvider.value = 'Codex';
+    elements.useSubscriptionTokens.checked = true;
+  } else if (preset === 'local') {
+    setProviderOrder(['Ollama', 'Codex', 'Claude']);
+    for (const row of providerRows()) row.querySelector('.provider-enabled input').checked = row.dataset.provider === 'Ollama';
+    elements.primaryProvider.value = 'Ollama';
+    elements.useSubscriptionTokens.checked = false;
+  }
+  if (revealDetails || preset === 'custom') elements.providerDetails.open = true;
+  renderExecutionControls(persist);
 }
 
 function currentProviderOrder() {
@@ -134,12 +205,14 @@ function saveExecutionPreferences() {
   const value = {
     order: providerRows().map((row) => row.dataset.provider),
     enabled: Object.fromEntries(providerRows().map((row) => [row.dataset.provider, row.querySelector('.provider-enabled input').checked])),
-    models: selectedProviderModels(), mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
+    preset: selectedProviderPreset(), models: selectedProviderModels(), mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
   };
   localStorage.setItem(executionPreferenceKey(), JSON.stringify(value));
 }
 
 function renderExecutionControls(persist = true) {
+  const preset = selectedProviderPreset();
+  const custom = preset === 'custom';
   if (!elements.useSubscriptionTokens.checked) {
     elements.providerRoute.querySelector('[data-provider="Ollama"] .provider-enabled input').checked = true;
   }
@@ -150,12 +223,14 @@ function renderExecutionControls(persist = true) {
     const unavailableForTokens = !elements.useSubscriptionTokens.checked && provider !== 'Ollama';
     const unavailableForMode = elements.mode.value === 'Write' && provider === 'Ollama';
     row.classList.toggle('route-disabled', !enabled || unavailableForTokens || unavailableForMode);
-    row.querySelector('.provider-enabled input').disabled = unavailableForTokens || unavailableForMode;
-    providerModelSelect(provider).disabled = !enabled || unavailableForTokens || unavailableForMode;
-    row.querySelector('[data-route-move="up"]').disabled = index === 0;
-    row.querySelector('[data-route-move="down"]').disabled = index === rows.length - 1;
+    row.querySelector('.provider-enabled input').disabled = !custom || unavailableForTokens || unavailableForMode;
+    providerModelSelect(provider).disabled = !custom || !enabled || unavailableForTokens || unavailableForMode;
   });
+  elements.primaryProvider.disabled = !custom;
+  elements.useSubscriptionTokens.disabled = !custom;
+  elements.providerDetails.classList.toggle('preset-managed', !custom);
   const route = currentProviderOrder();
+  if (route.length && !route.includes(elements.primaryProvider.value)) elements.primaryProvider.value = route[0];
   const names = route.map((provider) => provider === 'Ollama' ? 'Hermes + Ollama' : provider === 'Claude' ? 'Claude Code' : provider);
   elements.routeSummary.innerHTML = route.length
     ? `<strong>${names.join(' &rarr; ')}</strong><br>${elements.mode.value === 'Write' ? 'Getrennter Task-Worktree; lokaler Schreibpfad gesperrt.' : 'Bei einem Kontingentlimit übernimmt der nächste Provider.'}`
@@ -172,6 +247,7 @@ function loadExecutionPreferences() {
   const requestedOrder = Array.isArray(value.order) ? value.order.filter((provider) => PROVIDERS.includes(provider)) : [];
   const order = [...requestedOrder, ...PROVIDERS.filter((provider) => !requestedOrder.includes(provider))];
   for (const provider of order) elements.providerRoute.append(elements.providerRoute.querySelector(`[data-provider="${provider}"]`));
+  elements.primaryProvider.value = order[0] || 'Codex';
   for (const provider of PROVIDERS) {
     const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
     row.querySelector('.provider-enabled input').checked = value.enabled?.[provider] !== false;
@@ -179,11 +255,15 @@ function loadExecutionPreferences() {
   }
   elements.mode.value = ['ReadOnly', 'Write'].includes(value.mode) ? value.mode : 'ReadOnly';
   elements.useSubscriptionTokens.checked = value.useSubscriptionTokens !== false;
-  renderExecutionControls(false);
+  const preset = ['automatic', 'local', 'custom'].includes(value.preset)
+    ? value.preset
+    : Object.keys(value).length ? 'custom' : 'automatic';
+  renderModelCatalogState();
+  applyProviderPreset(preset, false, false);
 }
 
-function projectQuery() {
-  return `projectId=${encodeURIComponent(activeProject.id)}`;
+function projectQuery(projectId = activeProject?.id) {
+  return `projectId=${encodeURIComponent(projectId)}`;
 }
 
 function setBusy(active, title = 'Bitte warten', message = 'Lokaler Projektzustand wird geladen.') {
@@ -282,11 +362,12 @@ function renderComponents(data) {
 }
 
 function renderJobActivity() {
-  const allTasks = Array.from(liveJobs.values()).filter((job) => job.kind === 'task');
-  const running = allTasks.filter((job) => job.status === 'running');
-  const background = running.filter((job) => job.projectId !== activeProject?.id);
-  const current = running.find((job) => job.projectId === activeProject?.id);
-  const recentTerminal = allTasks.filter((job) => job.projectId !== activeProject?.id && ['completed', 'failed', 'blocked'].includes(job.status)
+  const allTasks = Array.from(liveJobs.values()).filter((job) => JOB_KINDS.has(job.kind || 'task'));
+  const running = allTasks.filter((job) => ['running', 'stopping'].includes(job.status));
+  const projectForJob = (job) => projectUiState.jobOrigin(job.id) || job.projectId;
+  const background = running.filter((job) => projectForJob(job) !== activeProject?.id);
+  const current = running.find((job) => projectForJob(job) === activeProject?.id);
+  const recentTerminal = allTasks.filter((job) => projectForJob(job) !== activeProject?.id && ['completed', 'failed', 'blocked'].includes(job.status)
     && !acknowledgedActivityJobs.has(job.id) && job.finishedAt && Date.now() - new Date(job.finishedAt).getTime() < 30 * 60 * 1000)
     .sort((left, right) => String(right.finishedAt).localeCompare(String(left.finishedAt)));
   const visible = background.length ? background : current ? [current] : recentTerminal.slice(0, 1);
@@ -296,7 +377,7 @@ function renderJobActivity() {
   const statusText = primary.status === 'running' ? 'läuft' : primary.status === 'completed' ? 'abgeschlossen · prüfen' : primary.status === 'blocked' ? 'blockiert · prüfen' : 'fehlgeschlagen · prüfen';
   elements.backgroundActivity.textContent = background.length > 1 ? `${primary.projectName} +${background.length - 1} · ${statusText}` : `${primary.projectName} · ${statusText}`;
   elements.backgroundActivity.title = visible.map((job) => `${job.projectName}: ${job.taskPreview}`).join('\n');
-  elements.backgroundActivity.dataset.jobId = primary.id; elements.backgroundActivity.dataset.projectId = primary.projectId;
+  elements.backgroundActivity.dataset.jobId = primary.id; elements.backgroundActivity.dataset.projectId = projectForJob(primary);
 }
 
 function formatTime(value) {
@@ -307,7 +388,7 @@ function formatTime(value) {
 function visibleLiveJobs() {
   if (!activeProject) return [];
   return Array.from(liveJobs.values())
-    .filter((job) => job.projectId === activeProject.id && job.kind === 'task')
+    .filter((job) => jobBelongsInConversation(job, activeProject.id, projectUiState.jobOrigin(job.id)))
     .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
@@ -330,10 +411,15 @@ function connectJobEvents() {
       const job = JSON.parse(event.data);
       liveJobs.set(job.id, job);
       scheduleLiveJobRender();
-      if (job.projectId === activeProject?.id && ['completed', 'failed', 'blocked', 'stopped'].includes(job.status) && !terminalHistoryRefreshes.has(job.id)) {
+      const jobProjectId = projectUiState.jobOrigin(job.id) || job.projectId;
+      if (jobProjectId === activeProject?.id && ['completed', 'failed', 'blocked', 'stopped'].includes(job.status) && !terminalHistoryRefreshes.has(job.id)) {
         terminalHistoryRefreshes.add(job.id);
-        setTimeout(() => refreshHistory(), 250);
-        setTimeout(() => refreshHistory(), 1500);
+        if (['task', 'dashboard-command'].includes(job.kind || 'task')) {
+          setTimeout(() => refreshHistory(), 250);
+          setTimeout(() => refreshHistory(), 1500);
+        }
+        if (['install', 'update'].includes(job.kind)) setTimeout(() => loadSystems(false, true), 500);
+        if (job.kind === 'provision') setTimeout(() => refreshProjectRegistry(), 500);
       }
     } catch {}
   });
@@ -386,66 +472,144 @@ function importantJobEntries(job) {
   return unique.slice(-6);
 }
 
+function jobKindLabel(job) {
+  if (job.kind === 'install') return 'Installation';
+  if (job.kind === 'update') return 'Update';
+  if (job.kind === 'provision') return 'Projektaufbau';
+  if (job.kind === 'dashboard-command') return 'Projekteinrichtung';
+  return 'Agent';
+}
+
 function jobStatus(job) {
-  if (job.status === 'running') return { label: 'läuft', className: 'info', title: 'Ich arbeite an deiner Aufgabe' };
-  if (job.status === 'stopping') return { label: 'wird gestoppt', className: 'warn', title: 'Die Aufgabe wird kontrolliert gestoppt' };
-  if (job.status === 'completed') return { label: 'abgeschlossen', className: 'ok', title: 'Die Aufgabe wurde abgeschlossen' };
-  if (job.status === 'blocked') return { label: 'blockiert', className: 'warn', title: 'Die Aufgabe benötigt eine Entscheidung' };
-  if (job.status === 'stopped') return { label: 'gestoppt', className: 'warn', title: 'Die Aufgabe wurde gestoppt' };
-  return { label: 'fehlgeschlagen', className: 'fail', title: 'Die Aufgabe konnte nicht abgeschlossen werden' };
+  const kind = jobKindLabel(job);
+  if (job.status === 'running') return { label: 'läuft', className: 'info', title: `${kind} läuft` };
+  if (job.status === 'stopping') return { label: 'wird gestoppt', className: 'warn', title: `${kind} wird kontrolliert gestoppt` };
+  if (job.status === 'completed') return {
+    label: (job.kind || 'task') === 'task' ? 'Agent fertig' : 'abgeschlossen', className: 'ok',
+    title: (job.kind || 'task') === 'task' ? 'Agent fertig, Review offen' : `${kind} abgeschlossen`,
+  };
+  if (job.status === 'blocked') return { label: 'blockiert', className: 'warn', title: `${kind} benötigt eine Entscheidung` };
+  if (job.status === 'stopped') return { label: 'gestoppt', className: 'warn', title: `${kind} wurde gestoppt` };
+  return { label: 'fehlgeschlagen', className: 'fail', title: `${kind} ist fehlgeschlagen` };
+}
+
+function deliveryStep(label, state, detail) {
+  const item = document.createElement('li'); item.className = `delivery-step ${state}`;
+  const name = document.createElement('span'); name.textContent = label;
+  const value = document.createElement('strong'); value.textContent = detail;
+  item.append(name, value); return item;
+}
+
+function executionDeliveryElement(mode, status, branch = null, deliveryState = null) {
+  if (mode !== 'Write') return null;
+  const completed = status === 'completed' || status === 'PASS';
+  const failed = ['failed', 'blocked', 'stopped', 'FAIL', 'BLOCKED'].includes(status);
+  const running = ['running', 'stopping'].includes(status);
+  const list = document.createElement('ol'); list.className = 'delivery-steps compact'; list.setAttribute('aria-label', 'Ausführung und Freigabe');
+  list.append(
+    deliveryStep('Agent', completed ? 'done' : failed ? 'blocked' : 'active', completed ? 'fertig' : failed ? 'nicht fertig' : 'arbeitet'),
+    deliveryStep('Review', deliveryState === 'review-required' || completed ? 'ready' : failed ? 'blocked' : 'waiting', deliveryState === 'review-required' || completed ? 'offen' : failed ? 'blockiert' : 'wartet'),
+    deliveryStep('Commit', 'unknown', branch ? 'im Git-Bereich' : 'keine Laufdaten'),
+    deliveryStep('Integration', 'unknown', running ? 'wartet' : 'im Git-Bereich'),
+    deliveryStep('Push', 'unknown', running ? 'wartet' : 'im Git-Bereich'),
+  );
+  return list;
 }
 
 function jobConversationElement(job) {
   const article = document.createElement('article'); article.className = 'conversation-run live-conversation-run'; article.dataset.jobId = job.id;
-  const status = jobStatus(job);
   const meta = document.createElement('div'); meta.className = 'conversation-meta';
-  const identity = document.createElement('span'); identity.textContent = `${formatTime(job.createdAt || job.startedAt)} · ${job.provider || 'AI Project Control'}`;
-  const state = document.createElement('span'); state.className = `status ${status.className}`; state.textContent = status.label;
-  meta.append(identity, state); article.append(meta);
-  article.append(messageElement('user', 'Du', submittedTaskText.get(job.id) || job.taskPreview, submittedTaskAttachments.get(job.id) || []));
-
+  const identity = document.createElement('span'); identity.dataset.jobIdentity = '';
+  const state = document.createElement('span'); state.dataset.jobState = '';
+  meta.append(identity, state);
+  const user = messageElement('user', 'Du', '', []); user.dataset.jobPrompt = '';
   const assistant = document.createElement('div'); assistant.className = 'message assistant live-response';
-  const label = document.createElement('div'); label.className = 'message-label'; label.textContent = job.provider || 'AI Project Control';
+  const label = document.createElement('div'); label.className = 'message-label'; label.dataset.jobProvider = '';
   const body = document.createElement('div'); body.className = 'message-body';
-  const progress = document.createElement('div'); progress.className = `agent-progress ${job.status}`;
+  const progress = document.createElement('div'); progress.className = 'agent-progress'; progress.dataset.jobProgress = '';
   const marker = document.createElement('span'); marker.className = 'agent-progress-marker'; marker.setAttribute('aria-hidden', 'true');
   const progressText = document.createElement('div');
-  const title = document.createElement('strong'); title.textContent = status.title;
-  const phase = document.createElement('span'); phase.textContent = `${job.provider || 'Provider'} · ${job.phase || 'Auftrag wird vorbereitet'}`;
-  progressText.append(title, phase); progress.append(marker, progressText); body.append(progress);
+  const title = document.createElement('strong'); title.dataset.jobTitle = '';
+  const phase = document.createElement('span'); phase.dataset.jobPhase = '';
+  progressText.append(title, phase); progress.append(marker, progressText);
+  const timeline = document.createElement('div'); timeline.className = 'activity-timeline hidden'; timeline.dataset.jobTimeline = '';
+  const technical = document.createElement('details'); technical.className = 'technical-activity hidden'; technical.dataset.jobTechnical = '';
+  const technicalSummary = document.createElement('summary'); technicalSummary.dataset.jobTechnicalSummary = '';
+  const log = document.createElement('div'); log.className = 'technical-activity-log'; log.dataset.jobLog = '';
+  technical.append(technicalSummary, log);
+  const delivery = document.createElement('div'); delivery.dataset.jobDelivery = '';
+  const actions = document.createElement('div'); actions.className = 'run-actions hidden'; actions.dataset.jobActions = '';
+  body.append(progress, timeline, technical, delivery, actions); assistant.append(label, body); article.append(meta, user, assistant);
+  updateJobConversationElement(article, job);
+  return article;
+}
+
+function updateJobConversationElement(article, job) {
+  const status = jobStatus(job);
+  const identity = article.querySelector('[data-job-identity]');
+  identity.textContent = `${formatTime(job.createdAt || job.startedAt)} · ${jobKindLabel(job)}`;
+  const state = article.querySelector('[data-job-state]'); state.className = `status ${status.className}`; state.textContent = status.label;
+  const promptText = submittedTaskText.get(job.id) || job.taskPreview || `${jobKindLabel(job)} gestartet`;
+  const promptAttachments = submittedTaskAttachments.get(job.id) || [];
+  const promptSignature = `${promptText}\u0000${promptAttachments.map((attachment) => attachment.url || attachment.name).join('|')}`;
+  const currentPrompt = article.querySelector('[data-job-prompt]');
+  if (currentPrompt.dataset.signature !== promptSignature) {
+    const prompt = messageElement('user', 'Du', promptText, promptAttachments); prompt.dataset.jobPrompt = ''; prompt.dataset.signature = promptSignature;
+    currentPrompt.replaceWith(prompt);
+  }
+  article.querySelector('[data-job-provider]').textContent = job.provider || 'AI Project Control';
+  article.querySelector('[data-job-progress]').className = `agent-progress ${job.status}`;
+  article.querySelector('[data-job-title]').textContent = status.title;
+  article.querySelector('[data-job-phase]').textContent = `${job.provider || jobKindLabel(job)} · ${job.phase || 'wird vorbereitet'}`;
 
   const important = importantJobEntries(job);
-  if (important.length) {
-    const timeline = document.createElement('div'); timeline.className = 'activity-timeline';
-    for (const entry of important) {
-      const row = document.createElement('div'); row.className = `activity-event ${entry.kind}`; row.textContent = entry.summary; timeline.append(row);
-    }
-    body.append(timeline);
+  const timeline = article.querySelector('[data-job-timeline]');
+  const timelineSignature = important.map((entry) => `${entry.kind}:${entry.summary}`).join('|');
+  if (timeline.dataset.signature !== timelineSignature) {
+    timeline.replaceChildren(...important.map((entry) => {
+      const row = document.createElement('div'); row.className = `activity-event ${entry.kind}`; row.textContent = entry.summary; return row;
+    }));
+    timeline.dataset.signature = timelineSignature;
   }
+  timeline.classList.toggle('hidden', important.length === 0);
 
   const rawEntries = jobLogEntries(job);
-  if (rawEntries.length) {
-    const details = document.createElement('details'); details.className = 'technical-activity';
-    const summary = document.createElement('summary'); summary.textContent = `Technische Aktivität (${rawEntries.length})`;
-    const log = document.createElement('div'); log.className = 'technical-activity-log';
-    for (const entry of rawEntries.slice(-100)) {
-      const row = document.createElement('div'); row.className = `feed-line ${entry.kind}`; row.textContent = summarizeFeedLine(entry.line); log.append(row);
-    }
-    details.append(summary, log); body.append(details);
+  const technical = article.querySelector('[data-job-technical]');
+  technical.classList.toggle('hidden', rawEntries.length === 0);
+  article.querySelector('[data-job-technical-summary]').textContent = `Technische Aktivität (${rawEntries.length})`;
+  const log = article.querySelector('[data-job-log]');
+  const visibleEntries = rawEntries.slice(-100);
+  const logSignature = visibleEntries.map((entry) => `${entry.kind}:${entry.line}`).join('|');
+  if (log.dataset.signature !== logSignature) {
+    log.replaceChildren(...visibleEntries.map((entry) => {
+      const row = document.createElement('div'); row.className = `feed-line ${entry.kind}`; row.textContent = summarizeFeedLine(entry.line); return row;
+    }));
+    log.dataset.signature = logSignature;
   }
 
-  if (job.status === 'running') {
-    const actions = document.createElement('div'); actions.className = 'run-actions';
-    const stop = document.createElement('button'); stop.className = 'button danger'; stop.type = 'button'; stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen';
-    actions.append(stop); body.append(actions);
+  const delivery = article.querySelector('[data-job-delivery]');
+  const deliverySignature = `${job.mode}:${job.executionState || job.status}:${job.deliveryState || ''}:${job.branch || ''}`;
+  if (delivery.dataset.signature !== deliverySignature) {
+    const deliveryList = (job.kind || 'task') === 'task' ? executionDeliveryElement(job.mode, job.executionState || job.status, job.branch, job.deliveryState) : null;
+    delivery.replaceChildren(...(deliveryList ? [deliveryList] : [])); delivery.dataset.signature = deliverySignature;
   }
-  assistant.append(label, body); article.append(assistant);
-  return article;
+
+  const actions = article.querySelector('[data-job-actions]');
+  const canStop = ['running', 'stopping'].includes(job.status) && Boolean(job.cancellable ?? job.pid);
+  let stop = actions.querySelector('[data-stop-job]');
+  if (canStop && !stop) {
+    stop = document.createElement('button'); stop.className = 'button danger'; stop.type = 'button'; stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen'; actions.append(stop);
+  }
+  if (stop) stop.disabled = job.status === 'stopping';
+  actions.classList.toggle('hidden', !canStop);
 }
 
 function showView(name) {
   document.querySelectorAll('[data-view-panel]').forEach((panel) => panel.classList.toggle('hidden', panel.dataset.viewPanel !== name));
-  document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('active', button.dataset.view === name));
+  document.querySelectorAll('[data-view]').forEach((button) => {
+    const selected = button.dataset.view === name;
+    button.classList.toggle('active', selected); button.setAttribute('aria-selected', String(selected)); button.tabIndex = selected ? 0 : -1;
+  });
   elements.executionPanel.classList.toggle('hidden', name !== 'tasks');
   if (name === 'portfolio') loadPortfolio();
   if (name === 'knowledge') loadActiveKnowledge();
@@ -464,38 +628,93 @@ function renderProjectSelector() {
   elements.knowledgeProjectName.textContent = activeProject.name;
 }
 
-function renderPortfolio(data) {
-  const project = data.project;
-  elements.portfolioProjectName.textContent = project.name;
-  elements.portfolioState.className = `project-state ${project.stateClass}`; elements.portfolioState.textContent = project.state;
-  elements.portfolioNextAction.textContent = project.nextAction;
-  elements.portfolioCurrentTask.textContent = project.currentTask || 'Kein CURRENT_TASK.md-Inhalt hinterlegt';
-  elements.portfolioLastRun.textContent = project.running
-    ? `${project.running.provider} läuft · ${project.running.phase || 'gestartet'}`
+function portfolioRows(data) {
+  if (Array.isArray(data.projects)) return data.projects;
+  return data.project ? [{ ...data.project, attention: data.attention || [] }] : [];
+}
+
+function portfolioAttention(data, project) {
+  if (Array.isArray(project.attention)) return project.attention;
+  if (!Array.isArray(data.attention)) return [];
+  return data.attention.filter((entry) => !entry.projectId || entry.projectId === project.id);
+}
+
+function portfolioProjectElement(data, project) {
+  const article = document.createElement('article'); article.className = `portfolio-project${project.id === data.activeProjectId ? ' active' : ''}`;
+  const heading = document.createElement('div'); heading.className = 'portfolio-project-heading';
+  const titleBlock = document.createElement('div');
+  const title = document.createElement('h3'); title.textContent = project.name || project.id || 'Unbenanntes Projekt';
+  const context = document.createElement('span'); context.textContent = project.id === data.activeProjectId ? 'Aktives Projekt' : 'Portfolio-Projekt';
+  titleBlock.append(title, context);
+  const state = document.createElement('span'); state.className = `project-state ${project.stateClass || 'attention'}`; state.textContent = project.state || 'Status unbekannt';
+  heading.append(titleBlock, state);
+
+  const next = document.createElement('div'); next.className = 'portfolio-next-action';
+  const nextLabel = document.createElement('span'); nextLabel.textContent = 'Nächster Schritt';
+  const nextValue = document.createElement('strong'); nextValue.textContent = project.nextAction || 'Projekt öffnen und Zustand prüfen';
+  next.append(nextLabel, nextValue);
+
+  const facts = document.createElement('dl'); facts.className = 'portfolio-facts';
+  const latest = project.running
+    ? `${project.running.provider || 'Job'} läuft · ${project.running.phase || 'gestartet'}`
     : project.lastTask || 'Noch kein Lauf gespeichert';
-  elements.portfolioRepository.textContent = `${project.repository.branch || 'kein Branch'} · ${project.repository.clean ? 'clean' : 'lokale Änderungen'}`;
-  elements.portfolioKnowledge.textContent = `Graph ${project.graph.status} · ${project.obsidian.notes} Obsidian-Notizen`;
-  elements.attentionList.replaceChildren();
-  if (!data.attention.length) {
-    const empty = document.createElement('div'); empty.className = 'empty';
-    empty.textContent = 'Keine Blockade oder ungeklärte Änderung.'; elements.attentionList.append(empty);
+  const repository = project.repository
+    ? `${project.repository.branch || 'kein Branch'} · ${project.repository.clean ? 'clean' : 'lokale Änderungen'}`
+    : 'Repository-Zustand nicht geliefert';
+  const knowledge = project.graph || project.obsidian
+    ? `Graph ${project.graph?.status || 'unbekannt'} · ${project.obsidian?.notes ?? '—'} Obsidian-Notizen`
+    : 'Wissenszustand nicht geliefert';
+  for (const [label, value] of [
+    ['Auftrag', project.currentTask || 'Kein aktueller Auftrag hinterlegt'],
+    ['Letzter Lauf', latest], ['Repository', repository], ['Projektwissen', knowledge],
+  ]) {
+    const term = document.createElement('dt'); term.textContent = label;
+    const description = document.createElement('dd'); description.textContent = value; facts.append(term, description);
+  }
+
+  const attention = document.createElement('div'); attention.className = 'attention-list';
+  const entries = portfolioAttention(data, project);
+  if (!entries.length) {
+    const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Keine gemeldete Blockade oder ungeklärte Änderung.'; attention.append(empty);
   } else {
-    for (const entry of data.attention) {
+    for (const entry of entries) {
       const row = document.createElement('div'); row.className = `attention-item ${entry.severity === 'error' ? 'error' : ''}`;
       const marker = document.createElement('span'); marker.className = 'attention-marker'; marker.setAttribute('aria-hidden', 'true');
-      const text = document.createElement('div'); text.className = 'attention-text';
-      const message = document.createElement('div'); message.textContent = entry.message;
-      text.append(message);
+      const text = document.createElement('div'); text.className = 'attention-text'; text.textContent = entry.message;
       const open = document.createElement('button'); open.type = 'button'; open.className = 'button secondary table-button';
-      open.dataset.portfolioTarget = entry.target || 'tasks'; open.textContent = 'Öffnen'; row.append(marker, text, open); elements.attentionList.append(row);
+      open.dataset.portfolioProject = project.id; open.dataset.portfolioTarget = entry.target || 'tasks'; open.textContent = 'Öffnen';
+      row.append(marker, text, open); attention.append(row);
     }
+  }
+
+  const actions = document.createElement('div'); actions.className = 'portfolio-actions';
+  for (const [target, label, primary] of [['tasks', 'Arbeitsbereich', true], ['git', 'Git prüfen', false], ['knowledge', 'Wissen', false]]) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = `button ${primary ? 'primary' : 'secondary'}`;
+    button.dataset.portfolioProject = project.id; button.dataset.portfolioTarget = target; button.textContent = label; actions.append(button);
+  }
+  article.append(heading, next, facts, attention, actions); return article;
+}
+
+function renderPortfolio(data) {
+  const projects = portfolioRows(data);
+  elements.portfolioSummary.textContent = projects.length === 1 ? '1 Projekt im Blick' : `${projects.length} Projekte im Blick`;
+  elements.portfolioProjects.replaceChildren(...projects.map((project) => portfolioProjectElement(data, project)));
+  if (!projects.length) {
+    const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Die Portfolio-Antwort enthält noch keine Projekte.'; elements.portfolioProjects.append(empty);
   }
 }
 
 async function loadPortfolio() {
-  elements.attentionList.innerHTML = '<div class="empty">Projektzustände werden geprüft…</div>';
-  try { renderPortfolio(await api('/api/portfolio')); }
-  catch (error) { elements.attentionList.innerHTML = ''; const message = document.createElement('div'); message.className = 'empty'; message.textContent = error.message; elements.attentionList.append(message); }
+  if (!activeProject) return;
+  const token = beginRequest('portfolio');
+  elements.portfolioProjects.innerHTML = '<div class="empty">Projektzustände werden geprüft…</div>';
+  try {
+    const data = await api('/api/portfolio');
+    if (requestIsCurrent(token)) renderPortfolio(data);
+  } catch (error) {
+    if (!requestIsCurrent(token)) return;
+    elements.portfolioProjects.replaceChildren(); const message = document.createElement('div'); message.className = 'empty'; message.textContent = error.message; elements.portfolioProjects.append(message);
+  }
 }
 
 function renderSystemRows(container, systems, grouped = false) {
@@ -571,11 +790,12 @@ function renderSystemRows(container, systems, grouped = false) {
 async function loadSystems(force = false, quiet = false) {
   if (!activeProject) return;
   const projectId = activeProject.id;
+  const token = beginRequest('systems', projectId);
   const previousLabel = elements.systemsRefresh.textContent;
   if (force) { elements.systemsRefresh.disabled = true; elements.systemsRefresh.textContent = 'Prüft…'; }
   try {
     const inventory = await api(`/api/systems?projectId=${encodeURIComponent(projectId)}${force ? '&force=1' : ''}`);
-    if (activeProject?.id !== projectId) return;
+    if (!requestIsCurrent(token)) return;
     renderSystemRows(elements.projectSystems, inventory.project);
     renderSystemRows(elements.globalSystems, inventory.global, true);
     const requiredMissing = inventory.global.filter((system) => system.tier === 'required' && !system.ok).length;
@@ -588,11 +808,34 @@ async function loadSystems(force = false, quiet = false) {
     elements.systemSetupSummary.innerHTML = (requiredMissing
       ? `<strong>${requiredMissing} notwendige Komponente(n) fehlen.</strong> Fehlende freigegebene Werkzeuge können direkt installiert werden.`
       : `<strong>Basis vollständig.</strong> ${recommendedMissing ? `${recommendedMissing} empfohlene Erweiterung(en) sind noch nicht eingerichtet.` : 'Der empfohlene lokale Workflow ist vollständig.'}`) + updateNote;
-  } catch (error) { if (!quiet) elements.systemMessage.textContent = error.message; }
-  finally { if (force) { elements.systemsRefresh.disabled = false; elements.systemsRefresh.textContent = previousLabel; } }
+  } catch (error) { if (!quiet && requestIsCurrent(token)) elements.systemMessage.textContent = error.message; }
+  finally { if (force && requestIsCurrent(token)) { elements.systemsRefresh.disabled = false; elements.systemsRefresh.textContent = previousLabel; } }
+}
+
+function renderGitDelivery(data) {
+  const isTaskBranch = !data.mainCheckout && data.branch && data.branch !== data.integration.branch && data.branch !== 'detached HEAD';
+  const deliveryState = data.deliveryState || (data.clean ? 'clean' : 'changes-pending');
+  const integrationState = data.integration.canFastForward ? ['ready', 'bereit']
+    : data.integration.canCleanup || data.integration.alreadyIntegrated ? ['done', 'integriert']
+      : data.integration.selectedIsIntegration ? ['done', 'Integrationsbranch'] : ['waiting', 'nicht bereit'];
+  let pushState = ['unknown', data.remote ? 'nicht bestätigt' : 'kein Remote'];
+  if (deliveryState === 'integrated-unpublished') pushState = ['ready', 'Integrationsbranch offen'];
+  else if (data.remote && data.hasUpstream) pushState = data.ahead > 0 ? ['ready', `${data.ahead} ausstehend`] : data.behind > 0 ? ['blocked', `${data.behind} zurück`] : ['done', 'synchron'];
+  else if (data.remote && data.clean && isTaskBranch) pushState = ['ready', 'Upstream offen'];
+  const commitState = ['committed', 'integrated', 'integrated-unpublished'].includes(deliveryState)
+    ? ['done', 'committed'] : deliveryState === 'changes-pending' ? ['ready', 'ausstehend'] : ['unknown', 'nicht ableitbar'];
+  elements.gitDeliverySteps.replaceChildren(
+    deliveryStep('Agent', isTaskBranch ? 'done' : 'unknown', isTaskBranch ? 'Aufgabenbranch vorhanden' : 'nicht ableitbar'),
+    deliveryStep('Review', deliveryState === 'changes-pending' ? 'ready' : 'unknown', deliveryState === 'changes-pending' ? `${data.files.length} Datei(en) offen` : 'nicht bestätigt'),
+    deliveryStep('Commit', commitState[0], commitState[1]),
+    deliveryStep('Integration', integrationState[0], integrationState[1]),
+    deliveryStep('Push', pushState[0], pushState[1]),
+  );
 }
 
 function renderGitState(data) {
+  requestState.invalidate('git');
+  requestState.invalidate('gitDiff');
   gitData = data;
   if (!data.files.some((file) => file.path === selectedGitFile)) selectedGitFile = null;
   elements.gitProjectName.textContent = `${data.projectName} · ${data.worktreeKind}`;
@@ -628,6 +871,7 @@ function renderGitState(data) {
     data.githubAuthenticated ? 'GitHub angemeldet' : 'GitHub nicht angemeldet',
     data.lastCommit ? `Letzter Commit: ${data.lastCommit.hash} · ${data.lastCommit.subject}` : 'Noch kein Commit',
   ]) { const item = document.createElement('span'); item.textContent = text; elements.gitSummary.append(item); }
+  renderGitDelivery(data);
   elements.gitFileList.replaceChildren();
   if (!data.files.length) {
     const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Keine lokalen Änderungen.'; elements.gitFileList.append(empty);
@@ -636,11 +880,12 @@ function renderGitState(data) {
       const row = document.createElement('div'); row.className = `git-file-row${file.path === selectedGitFile ? ' active' : ''}`;
       const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = file.path; checkbox.checked = true;
       checkbox.setAttribute('aria-label', `Für Commit auswählen: ${file.path}`);
+      const select = document.createElement('label'); select.className = 'git-file-select'; select.title = `Für Commit auswählen: ${file.path}`; select.append(checkbox);
       const view = document.createElement('button'); view.type = 'button'; view.className = 'git-file-view'; view.dataset.gitFile = file.path;
       view.setAttribute('aria-label', `Änderungen anzeigen: ${file.path}`);
       const status = document.createElement('span'); status.className = 'git-file-status'; status.textContent = file.untracked ? '??' : `${file.staged}${file.working}`;
       const name = document.createElement('span'); name.className = 'git-file-path'; name.textContent = file.originalPath ? `${file.originalPath} → ${file.path}` : file.path;
-      view.append(status, name); row.append(checkbox, view); elements.gitFileList.append(row);
+      view.append(status, name); row.append(select, view); elements.gitFileList.append(row);
     }
   }
   if (!selectedGitFile) {
@@ -667,11 +912,18 @@ function renderGitState(data) {
 
 async function loadGitState(worktree = elements.gitTarget.value) {
   if (!activeProject) return;
+  const projectId = activeProject.id;
+  const token = beginRequest('git', projectId);
   elements.gitState.className = 'status warn'; elements.gitState.textContent = 'wird geprüft';
   elements.gitMessage.textContent = '';
   const target = worktree ? `&worktree=${encodeURIComponent(worktree)}` : '';
-  try { renderGitState(await api(`/api/git?${projectQuery()}${target}`)); }
-  catch (error) { elements.gitState.className = 'status fail'; elements.gitState.textContent = 'Fehler'; elements.gitMessage.textContent = error.message; }
+  try {
+    const data = await api(`/api/git?${projectQuery(projectId)}${target}`);
+    if (requestIsCurrent(token)) renderGitState(data);
+  } catch (error) {
+    if (!requestIsCurrent(token)) return;
+    elements.gitState.className = 'status fail'; elements.gitState.textContent = 'Fehler'; elements.gitMessage.textContent = error.message;
+  }
 }
 
 function queueCommitDraftSave(delay = 300) {
@@ -682,20 +934,24 @@ function queueCommitDraftSave(delay = 300) {
   gitDraftSaveTimers.set(key, setTimeout(async () => {
     try {
       await api('/api/git/commit-draft', { method: 'POST', body: JSON.stringify(payload) });
-      if (key === visibleGitDraftKey) visibleGitDraftValue = payload.message.trim();
+      if (activeProject?.id === payload.projectId && key === visibleGitDraftKey) visibleGitDraftValue = payload.message.trim();
     }
-    catch (error) { elements.gitMessage.textContent = `Commit-Entwurf konnte nicht gespeichert werden: ${error.message}`; }
+    catch (error) { if (activeProject?.id === payload.projectId && key === visibleGitDraftKey) elements.gitMessage.textContent = `Commit-Entwurf konnte nicht gespeichert werden: ${error.message}`; }
     finally { gitDraftSaveTimers.delete(key); }
   }, delay));
 }
 
 async function loadGitFileDiff(filePath) {
+  if (!activeProject || !gitData?.worktree) return;
+  const projectId = activeProject.id; const worktree = gitData.worktree;
+  const token = beginRequest('gitDiff', projectId);
   selectedGitFile = filePath;
   elements.gitFileList.querySelectorAll('.git-file-row').forEach((row) => row.classList.toggle('active', row.querySelector('[data-git-file]')?.dataset.gitFile === filePath));
   elements.gitDiffFileName.textContent = filePath; elements.gitDiff.textContent = 'Dateiänderungen werden geladen…';
   elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src'); elements.gitImagePreviewImage.alt = '';
   try {
-    const result = await api(`/api/git/diff?${projectQuery()}&worktree=${encodeURIComponent(gitData.worktree)}&path=${encodeURIComponent(filePath)}`);
+    const result = await api(`/api/git/diff?${projectQuery(projectId)}&worktree=${encodeURIComponent(worktree)}&path=${encodeURIComponent(filePath)}`);
+    if (!requestIsCurrent(token) || selectedGitFile !== filePath || gitData?.worktree !== worktree) return;
     elements.gitDiff.textContent = result.diff;
     if (result.imageUrl) {
       elements.gitImagePreviewImage.src = result.imageUrl; elements.gitImagePreviewImage.alt = `Vorschau von ${filePath}`;
@@ -703,12 +959,14 @@ async function loadGitFileDiff(filePath) {
       elements.gitImagePreview.classList.remove('hidden');
     }
     elements.gitMessage.textContent = result.truncated ? 'Die Dateiansicht wurde bei 400.000 Zeichen gekürzt.' : result.binary && !result.imageUrl ? 'Für diese Binärdatei ist keine Vorschau verfügbar.' : '';
-  } catch (error) { elements.gitDiff.textContent = error.message; }
+  } catch (error) { if (requestIsCurrent(token) && selectedGitFile === filePath && gitData?.worktree === worktree) elements.gitDiff.textContent = error.message; }
 }
 
 async function activateProject(projectId) {
   const target = registry.projects.find((project) => project.id === projectId);
   const visibleView = document.querySelector('[data-view-panel]:not(.hidden)')?.dataset.viewPanel || 'tasks';
+  storeComposerDraft();
+  invalidateProjectRequests();
   setBusy(true, 'Projekt wird gewechselt', `${target?.name || 'Projekt'} und seine lokalen Verbindungen werden geprüft.`);
   try {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
@@ -719,7 +977,8 @@ async function activateProject(projectId) {
     elements.gitFileList.replaceChildren(); elements.gitDiffFileName.textContent = 'Projekt wird gewechselt'; elements.gitDiff.textContent = 'Der Git-Zustand des neuen Projekts wird geladen.';
     elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src');
     elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitIntegrate.disabled = true; elements.gitPush.disabled = true;
-    renderProjectSelector(); resetKnowledge();
+    elements.systemsRefresh.disabled = false; elements.systemsRefresh.textContent = 'Neu prüfen';
+    renderProjectSelector(); restoreComposerDraft(activeProject.id); resetKnowledge(); renderConversation();
     await refreshAll(true);
     if (visibleView === 'portfolio') await loadPortfolio();
     else if (visibleView === 'knowledge') await loadActiveKnowledge();
@@ -732,6 +991,7 @@ async function activateProject(projectId) {
 function resetKnowledge() {
   elements.graphStats.textContent = '';
   elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen.</p>';
+  elements.graphNodeList.replaceChildren();
   const context = elements.graphCanvas.getContext('2d'); context.clearRect(0, 0, elements.graphCanvas.width, elements.graphCanvas.height);
   elements.noteList.replaceChildren(); elements.noteTitle.textContent = 'Keine Notiz ausgewählt'; elements.noteContent.textContent = 'Wähle links eine Notiz aus.';
   elements.knowledgeLoadState.textContent = '';
@@ -806,6 +1066,10 @@ function drawGraph() {
 function renderGraphDetails(nodeId) {
   selectedGraphNodeId = nodeId; elements.graphDetails.replaceChildren();
   const node = graphData?.nodes.find((candidate) => candidate.id === nodeId);
+  elements.graphNodeList.querySelectorAll('[data-graph-node]').forEach((button) => {
+    const selected = button.dataset.graphNode === nodeId; button.classList.toggle('active', selected);
+    if (selected) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
+  });
   if (!node) { elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen.</p>'; drawGraph(); return; }
   const title = document.createElement('h3'); title.textContent = node.label; const list = document.createElement('dl');
   for (const [label, value] of [['Typ', node.type || '—'], ['Community', node.community || '—'], ['Quelle', `${node.sourceFile || '—'}${node.sourceLocation ? ` · ${node.sourceLocation}` : ''}`], ['Verbindungen', String(node.degree)]]) {
@@ -825,16 +1089,37 @@ function renderGraphDetails(nodeId) {
   elements.graphDetails.append(title, list); drawGraph();
 }
 
-async function loadGraph() {
+function renderGraphNodeList() {
+  elements.graphNodeList.replaceChildren();
+  if (!graphData?.nodes?.length) {
+    const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'Keine Knoten in dieser Ansicht.'; elements.graphNodeList.append(empty); return;
+  }
+  const nodes = [...graphData.nodes].sort((left, right) => (right.degree || 0) - (left.degree || 0) || String(left.label).localeCompare(String(right.label), 'de'));
+  for (const node of nodes) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'graph-node-button'; button.dataset.graphNode = node.id;
+    const label = document.createElement('span'); label.textContent = node.label;
+    const meta = document.createElement('small'); meta.textContent = `${node.type || node.community || 'Knoten'} · ${node.degree || 0} Verbindungen`;
+    button.append(label, meta); elements.graphNodeList.append(button);
+  }
+}
+
+async function loadGraph(parentToken = null) {
+  const projectId = activeProject?.id;
+  if (!projectId) return false;
+  const token = beginRequest('graph', projectId);
   elements.graphStats.textContent = 'Graph wird geladen…';
   try {
     const query = elements.knowledgeSearch.value.trim();
-    graphData = await api(`/api/graph?${projectQuery()}&q=${encodeURIComponent(query)}`);
+    const data = await api(`/api/graph?${projectQuery(projectId)}&q=${encodeURIComponent(query)}`);
+    if (!requestIsCurrent(token) || (parentToken && !requestIsCurrent(parentToken))) return false;
+    graphData = data;
     selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0;
     elements.graphStats.textContent = `${graphData.totals.nodes} Knoten · ${graphData.totals.links} Beziehungen${graphData.truncated ? ' · fokussierte Ansicht' : ''}${graphData.builtAtCommit ? ` · Commit ${graphData.builtAtCommit.slice(0, 8)}` : ''}`;
-    renderGraphDetails(null); drawGraph();
+    renderGraphNodeList(); renderGraphDetails(null); drawGraph(); return true;
   } catch (error) {
+    if (!requestIsCurrent(token) || (parentToken && !requestIsCurrent(parentToken))) return false;
     graphData = null; elements.graphStats.textContent = error.message; drawGraph();
+    elements.graphNodeList.replaceChildren(); return false;
   }
 }
 
@@ -847,25 +1132,34 @@ function renderNoteList(data) {
   }
 }
 
-async function loadObsidian(selectedFile = null) {
+async function loadObsidian(selectedFile = null, parentToken = null) {
+  const projectId = activeProject?.id;
+  if (!projectId) return false;
+  const token = beginRequest('obsidian', projectId);
   elements.obsidianStats.textContent = 'Notizen werden geladen…';
   try {
     const query = elements.knowledgeSearch.value.trim();
     const filePart = selectedFile ? `&file=${encodeURIComponent(selectedFile)}` : '';
-    const data = await api(`/api/obsidian?${projectQuery()}&q=${encodeURIComponent(query)}${filePart}`);
+    const data = await api(`/api/obsidian?${projectQuery(projectId)}&q=${encodeURIComponent(query)}${filePart}`);
+    if (!requestIsCurrent(token) || (parentToken && !requestIsCurrent(parentToken))) return false;
     renderNoteList(data);
     if (data.note) {
       elements.noteTitle.textContent = data.note.path; elements.noteContent.textContent = data.note.content;
       document.querySelectorAll('.note-button').forEach((button) => button.classList.toggle('active', button.dataset.notePath === data.note.path));
     }
-  } catch (error) { elements.obsidianStats.textContent = error.message; elements.noteList.replaceChildren(); }
+    return true;
+  } catch (error) {
+    if (!requestIsCurrent(token) || (parentToken && !requestIsCurrent(parentToken))) return false;
+    elements.obsidianStats.textContent = error.message; elements.noteList.replaceChildren(); return false;
+  }
 }
 
 async function loadActiveKnowledge() {
   if (!activeProject) return;
+  const token = beginRequest('knowledge', activeProject.id);
   elements.knowledgeLoadState.textContent = 'Wissen wird automatisch geladen…';
-  await Promise.all([loadGraph(), loadObsidian()]);
-  elements.knowledgeLoadState.textContent = 'Graph und Notizen aktuell';
+  await Promise.all([loadGraph(token), loadObsidian(null, token)]);
+  if (requestIsCurrent(token)) elements.knowledgeLoadState.textContent = 'Graph und Notizen aktuell';
 }
 
 function readFileDataUrl(file) {
@@ -887,21 +1181,32 @@ function renderAttachmentPreview() {
   });
 }
 
-function clearAttachments() {
+function clearAttachments(persist = true) {
   selectedAttachments = []; elements.attachmentInput.value = ''; renderAttachmentPreview();
+  if (persist) storeComposerDraft();
 }
 
-async function addImageFiles(files) {
+async function addImageFiles(files, projectId = activeProject?.id) {
+  if (!projectId) return;
   const allowed = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
-  if (selectedAttachments.length + files.length > 4) throw new Error('Maximal vier Bilder pro Nachricht.');
+  const draft = projectUiState.loadComposer(projectId);
+  const existing = activeProject?.id === projectId ? selectedAttachments : draft.attachments;
+  if (existing.length + files.length > 4) throw new Error('Maximal vier Bilder pro Nachricht.');
+  if ([...existing, ...files].reduce((total, file) => total + Number(file.size || 0), 0) > 15 * 1024 * 1024) throw new Error('Bilder dürfen zusammen höchstens 15 MB groß sein.');
+  const nextAttachments = [...existing];
   for (const file of files) {
     if (!allowed.has(file.type)) throw new Error(`${file.name || 'Bild'}: nicht unterstütztes Bildformat.`);
     if (file.size > 5 * 1024 * 1024) throw new Error(`${file.name || 'Bild'}: größer als 5 MB.`);
     const fallbackName = `screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.${file.type === 'image/jpeg' ? 'jpg' : file.type.split('/')[1]}`;
-    selectedAttachments.push({ name: file.name || fallbackName, type: file.type, size: file.size, dataUrl: await readFileDataUrl(file) });
+    nextAttachments.push({ name: file.name || fallbackName, type: file.type, size: file.size, dataUrl: await readFileDataUrl(file) });
   }
-  elements.formMessage.textContent = selectedAttachments.length ? `${selectedAttachments.length} Bild(er) angehängt.` : '';
-  renderAttachmentPreview();
+  const text = activeProject?.id === projectId ? elements.task.value : draft.text;
+  projectUiState.saveComposer(projectId, text, nextAttachments);
+  if (activeProject?.id === projectId) {
+    selectedAttachments = nextAttachments;
+    elements.formMessage.textContent = selectedAttachments.length ? `${selectedAttachments.length} Bild(er) angehängt.` : '';
+    renderAttachmentPreview();
+  }
 }
 
 function appendInlineFormatting(target, value) {
@@ -991,12 +1296,58 @@ function runConversationElement(run) {
     const chip = document.createElement('span'); chip.textContent = value; summary.append(chip);
   }
   if (summary.childElementCount) article.append(summary);
+  const delivery = executionDeliveryElement(run.mode, run.status);
+  if (delivery) article.append(delivery);
+  article.dataset.version = `${run.modifiedAt}:${run.status}:${String(run.response || '').length}`;
   return article;
+}
+
+function captureHistorySelection() {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  if (!elements.history.contains(range.commonAncestorContainer)) return null;
+  const offsetFor = (node, offset) => {
+    const probe = document.createRange(); probe.selectNodeContents(elements.history); probe.setEnd(node, offset); return probe.toString().length;
+  };
+  return { start: offsetFor(range.startContainer, range.startOffset), end: offsetFor(range.endContainer, range.endOffset) };
+}
+
+function restoreHistorySelection(saved) {
+  if (!saved) return;
+  const locate = (target) => {
+    const walker = document.createTreeWalker(elements.history, NodeFilter.SHOW_TEXT); let consumed = 0; let node;
+    while ((node = walker.nextNode())) {
+      const next = consumed + node.data.length;
+      if (target <= next) return { node, offset: Math.max(0, target - consumed) };
+      consumed = next;
+    }
+    return null;
+  };
+  const start = locate(saved.start); const end = locate(saved.end);
+  if (!start || !end) return;
+  const range = document.createRange(); range.setStart(start.node, start.offset); range.setEnd(end.node, end.offset);
+  const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+}
+
+function historyScrollAnchor() {
+  const top = elements.history.scrollTop;
+  const node = [...elements.history.children].find((child) => child.offsetTop + child.offsetHeight >= top);
+  return node?.dataset.conversationKey ? { key: node.dataset.conversationKey, offset: node.offsetTop - top } : null;
+}
+
+function updateRunConversationElement(article, run) {
+  const version = `${run.modifiedAt}:${run.status}:${String(run.response || '').length}`;
+  if (article.dataset.version === version) return;
+  const replacement = runConversationElement(run);
+  article.className = replacement.className; article.replaceChildren(...replacement.childNodes); article.dataset.version = version;
 }
 
 function renderConversation() {
   const hadContent = elements.history.childElementCount > 0;
   const previousTop = elements.history.scrollTop;
+  const anchor = historyScrollAnchor();
+  const selection = captureHistorySelection();
   const shouldFollow = !hadContent || historyFollow;
   const recordedPaths = new Set(runHistory.map((run) => String(run.path || '').toLowerCase()));
   const jobs = visibleLiveJobs().filter((job) => !job.runDirectory || !recordedPaths.has(String(job.runDirectory).toLowerCase()));
@@ -1006,14 +1357,41 @@ function renderConversation() {
   ].sort((left, right) => String(left.time).localeCompare(String(right.time)));
   const nextVersion = entries.map((entry) => entry.type === 'run'
     ? `${entry.value.name}:${entry.value.modifiedAt}`
-    : `${entry.value.id}:${entry.value.status}:${String(entry.value.stdout || '').length}:${String(entry.value.stderr || '').length}`).join('|');
+    : `${entry.value.id}:${entry.value.kind}:${entry.value.status}:${entry.value.deliveryState || ''}:${String(entry.value.stdout || '').length}:${String(entry.value.stderr || '').length}`).join('|');
   const hasNewContent = Boolean(historyLatestVersion && nextVersion && historyLatestVersion !== nextVersion);
-  elements.history.replaceChildren();
-  if (!entries.length) { const empty = document.createElement('div'); empty.className = 'empty chat-empty'; empty.textContent = 'Noch kein Gespräch für dieses Projekt.'; elements.history.append(empty); return; }
-  for (const entry of entries) elements.history.append(entry.type === 'run' ? runConversationElement(entry.value) : jobConversationElement(entry.value));
+  const desired = [];
+  if (!entries.length) {
+    const key = `empty:${activeProject?.id || 'none'}`;
+    let empty = conversationNodes.get(key);
+    if (!empty) { empty = document.createElement('div'); empty.className = 'empty chat-empty'; empty.textContent = 'Noch kein Gespräch für dieses Projekt.'; conversationNodes.set(key, empty); }
+    empty.dataset.conversationKey = key; desired.push(empty);
+  } else {
+    for (const entry of entries) {
+      const key = entry.type === 'run' ? `run:${entry.value.path || entry.value.name}` : `job:${entry.value.id}`;
+      let node = conversationNodes.get(key);
+      if (!node) {
+        node = entry.type === 'run' ? runConversationElement(entry.value) : jobConversationElement(entry.value);
+        conversationNodes.set(key, node);
+      } else if (entry.type === 'run') updateRunConversationElement(node, entry.value);
+      else updateJobConversationElement(node, entry.value);
+      node.dataset.conversationKey = key; desired.push(node);
+    }
+  }
+  const desiredSet = new Set(desired);
+  for (const [key, node] of conversationNodes) {
+    if (!desiredSet.has(node)) { node.remove(); conversationNodes.delete(key); }
+  }
+  desired.forEach((node, index) => {
+    const current = elements.history.children[index]; if (current !== node) elements.history.insertBefore(node, current || null);
+  });
+  restoreHistorySelection(selection);
   requestAnimationFrame(() => {
     if (shouldFollow) { elements.history.scrollTop = elements.history.scrollHeight; elements.historyJumpLatest.classList.add('hidden'); }
-    else { elements.history.scrollTop = previousTop; elements.historyJumpLatest.classList.toggle('hidden', !hasNewContent); }
+    else {
+      const anchorNode = anchor ? conversationNodes.get(anchor.key) : null;
+      elements.history.scrollTop = anchorNode?.isConnected ? anchorNode.offsetTop - anchor.offset : previousTop;
+      elements.historyJumpLatest.classList.toggle('hidden', !hasNewContent);
+    }
     historyFollow = shouldFollow;
   });
   historyLatestVersion = nextVersion;
@@ -1025,42 +1403,69 @@ function renderHistory(runs) {
 }
 
 async function refreshStatus(force = false) {
+  if (!activeProject) return;
+  const projectId = activeProject.id;
+  const token = beginRequest('status', projectId);
   const [status, components] = await Promise.all([
     api(`/api/status${force ? '?force=1' : ''}`),
-    api(`/api/components?${projectQuery()}${force ? '&force=1' : ''}`),
+    api(`/api/components?${projectQuery(projectId)}${force ? '&force=1' : ''}`),
   ]);
-  renderProviders(status); renderComponents(components);
+  if (requestIsCurrent(token)) { renderProviders(status); renderComponents(components); }
 }
 
 async function refreshJobs() {
   if (!activeProject) return;
-  const rows = await api(`/api/jobs?${projectQuery()}`);
+  const projectId = activeProject.id;
+  const token = beginRequest('jobs', projectId);
+  const rows = await api(`/api/jobs?${projectQuery(projectId)}`);
+  if (!requestIsCurrent(token)) return;
+  for (const row of rows) {
+    if (row.kind === 'provision' && !row.projectId && !projectUiState.jobOrigin(row.id)) projectUiState.setJobOrigin(row.id, projectId);
+  }
   for (const row of rows) liveJobs.set(row.id, row);
   renderConversation();
   renderJobActivity();
   if (componentStatus) renderComponents(componentStatus);
-  const latestTask = rows.find((job) => job.kind === 'task');
+  const latestTask = visibleLiveJobs().findLast((job) => job.kind === 'task');
   if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzte Aufgabe fehlgeschlagen. Details stehen direkt im Gespräch.';
   else if (latestTask?.status === 'blocked') elements.formMessage.textContent = 'Letzte Aufgabe wurde kontrolliert blockiert. Die Begründung steht direkt im Gespräch.';
   else if (latestTask?.status === 'completed') elements.formMessage.textContent = 'Letzter Job abgeschlossen.';
   else if (latestTask?.status === 'stopped') elements.formMessage.textContent = 'Letzter Job wurde gestoppt.';
   if (rows.some((job) => job.status === 'completed' && job.projectId && !registry.projects.some((project) => project.id === job.projectId))) {
-    registry = await api('/api/projects');
-    activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || activeProject;
-    renderProjectSelector();
+    await refreshProjectRegistry();
   }
 }
-async function refreshHistory() { if (activeProject) renderHistory(await api(`/api/runs?${projectQuery()}`)); }
+
+async function refreshProjectRegistry() {
+  if (!activeProject) return;
+  const projectId = activeProject.id;
+  const token = beginRequest('registry', projectId);
+  const nextRegistry = await api('/api/projects');
+  if (!requestIsCurrent(token)) return;
+  registry = nextRegistry;
+  activeProject = registry.projects.find((project) => project.id === projectId)
+    || registry.projects.find((project) => project.id === registry.activeProjectId)
+    || registry.projects[0];
+  renderProjectSelector();
+}
+
+async function refreshHistory() {
+  if (!activeProject) return;
+  const projectId = activeProject.id;
+  const token = beginRequest('history', projectId);
+  const runs = await api(`/api/runs?${projectQuery(projectId)}`);
+  if (requestIsCurrent(token)) renderHistory(runs);
+}
 
 async function refreshAll(force = false) {
-  if (refreshing || !activeProject) return;
-  refreshing = true;
+  if (!activeProject) return;
+  const token = beginRequest('refreshAll', activeProject.id);
   try {
     await Promise.all([refreshStatus(force), refreshJobs(), refreshHistory()]);
-    elements.connection.className = 'connection ok'; elements.connection.textContent = 'Lokal verbunden';
+    if (requestIsCurrent(token)) { elements.connection.className = 'connection ok'; elements.connection.textContent = 'Lokal verbunden'; }
   } catch (error) {
-    elements.connection.className = 'connection error'; elements.connection.textContent = error.message;
-  } finally { refreshing = false; }
+    if (requestIsCurrent(token)) { elements.connection.className = 'connection error'; elements.connection.textContent = error.message; }
+  }
 }
 
 async function initialize() {
@@ -1068,12 +1473,21 @@ async function initialize() {
     [config, registry] = await Promise.all([api('/api/config'), api('/api/projects')]);
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
     elements.provisionParent.value = config.defaultProjectParent;
-    loadExecutionPreferences(); renderProjectSelector(); connectJobEvents(); await refreshAll(true); void loadSystems(false, true);
+    loadExecutionPreferences(); renderProjectSelector(); restoreComposerDraft(activeProject.id); connectJobEvents(); await refreshAll(true); void loadSystems(false, true);
   } catch (error) { elements.connection.className = 'connection error'; elements.connection.textContent = error.message; }
 }
 
 document.querySelector('.view-tabs').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-view]'); if (button) showView(button.dataset.view);
+});
+document.querySelector('.view-tabs').addEventListener('keydown', (event) => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const tabs = [...document.querySelectorAll('.view-tabs [role="tab"]')];
+  const current = tabs.indexOf(document.activeElement); if (current < 0) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  tabs[next].focus(); showView(tabs[next].dataset.view);
 });
 
 elements.systemsRefresh.addEventListener('click', () => loadSystems(true));
@@ -1086,15 +1500,25 @@ elements.backgroundActivity.addEventListener('click', async () => {
   if (projectId !== activeProject?.id) await activateProject(projectId);
   showView('tasks'); renderJobActivity();
 });
-elements.providerRoute.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-route-move]');
-  if (!button) return;
-  const row = button.closest('.provider-route-row');
-  if (button.dataset.routeMove === 'up' && row.previousElementSibling) elements.providerRoute.insertBefore(row, row.previousElementSibling);
-  if (button.dataset.routeMove === 'down' && row.nextElementSibling) elements.providerRoute.insertBefore(row.nextElementSibling, row);
-  renderExecutionControls();
+elements.providerPreset.addEventListener('change', (event) => {
+  const radio = event.target.closest('input[name="providerPreset"]');
+  if (radio) applyProviderPreset(radio.value, true, radio.value === 'custom');
 });
 elements.providerRoute.addEventListener('change', () => renderExecutionControls());
+elements.primaryProvider.addEventListener('change', () => { makeProviderPrimary(elements.primaryProvider.value); renderExecutionControls(); });
+elements.refreshModels.addEventListener('click', async () => {
+  const selected = selectedProviderModels();
+  elements.refreshModels.disabled = true;
+  renderModelCatalogState('wird aktualisiert…');
+  try {
+    const refreshed = await api('/api/config?force=1');
+    config = { ...config, ...refreshed };
+    for (const provider of PROVIDERS) populateProviderModel(provider, selected[provider]);
+    renderModelCatalogState();
+    renderExecutionControls();
+  } catch (error) { renderModelCatalogState(`Fehler: ${error.message}`); }
+  finally { elements.refreshModels.disabled = false; }
+});
 elements.mode.addEventListener('change', () => renderExecutionControls());
 elements.useSubscriptionTokens.addEventListener('change', () => renderExecutionControls());
 elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); });
@@ -1102,7 +1526,8 @@ elements.task.addEventListener('input', () => { if (componentStatus) renderCompo
 elements.attachmentButton.addEventListener('click', () => elements.attachmentInput.click());
 elements.attachmentInput.addEventListener('change', async () => {
   const files = Array.from(elements.attachmentInput.files || []);
-  try { await addImageFiles(files); }
+  const projectId = activeProject?.id;
+  try { await addImageFiles(files, projectId); }
   catch (error) { elements.formMessage.textContent = error.message; }
   finally { elements.attachmentInput.value = ''; }
 });
@@ -1111,7 +1536,8 @@ elements.task.addEventListener('paste', async (event) => {
   const files = Array.from(event.clipboardData?.items || []).filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
   if (!files.length) return;
   event.preventDefault();
-  try { await addImageFiles(files); }
+  const projectId = activeProject?.id;
+  try { await addImageFiles(files, projectId); }
   catch (error) { elements.formMessage.textContent = error.message; }
 });
 
@@ -1119,10 +1545,12 @@ elements.attachmentPreview.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-remove-attachment]'); if (!button) return;
   selectedAttachments.splice(Number(button.dataset.removeAttachment), 1); renderAttachmentPreview();
   elements.formMessage.textContent = selectedAttachments.length ? `${selectedAttachments.length} Bild(er) angehängt.` : '';
+  storeComposerDraft();
 });
 
 elements.task.addEventListener('input', () => {
   elements.task.style.height = 'auto'; elements.task.style.height = `${Math.min(elements.task.scrollHeight, 180)}px`;
+  storeComposerDraft();
 });
 
 elements.history.addEventListener('scroll', () => {
@@ -1135,36 +1563,44 @@ elements.historyJumpLatest.addEventListener('click', () => {
 
 elements.memoryForm.addEventListener('submit', async (event) => {
   event.preventDefault(); elements.memoryMessage.textContent = 'Lernnotiz wird gespeichert…';
+  const projectId = activeProject.id; const token = beginRequest('memoryMutation', projectId);
   try {
-    await api('/api/memory', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, text: elements.memoryText.value }) });
+    await api('/api/memory', { method: 'POST', body: JSON.stringify({ projectId, text: elements.memoryText.value }) });
+    if (!requestIsCurrent(token)) return;
     elements.memoryText.value = ''; elements.memoryMessage.textContent = 'Für künftige Aufgaben gespeichert.';
-  } catch (error) { elements.memoryMessage.textContent = error.message; }
+  } catch (error) { if (requestIsCurrent(token)) elements.memoryMessage.textContent = error.message; }
 });
 
 elements.systemForm.addEventListener('submit', async (event) => {
   event.preventDefault(); elements.systemMessage.textContent = 'System wird registriert…';
+  const projectId = activeProject.id; const token = beginRequest('systemMutation', projectId);
   try {
     await api('/api/systems', { method: 'POST', body: JSON.stringify({
       name: elements.systemName.value, type: elements.systemType.value, path: elements.systemPath.value,
-      scope: elements.systemScope.value, projectId: activeProject.id, note: elements.systemNote.value,
+      scope: elements.systemScope.value, projectId, note: elements.systemNote.value,
     }) });
+    if (!requestIsCurrent(token)) return;
     elements.systemForm.reset(); elements.systemMessage.textContent = 'System wurde registriert.'; await loadSystems(true);
-  } catch (error) { elements.systemMessage.textContent = error.message; }
+  } catch (error) { if (requestIsCurrent(token)) elements.systemMessage.textContent = error.message; }
 });
 
 elements.provisionForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  const projectId = activeProject.id;
+  const token = beginRequest('provisionMutation', projectId);
   const githubText = elements.provisionGitHub.checked ? ` und als ${elements.provisionVisibility.value} GitHub-Repository` : '';
   if (!window.confirm(`Projekt lokal mit initialem Git-Commit${githubText} erstellen?`)) return;
   elements.provisionMessage.textContent = 'Projektaufbau wurde gestartet. Fortschritt erscheint im Arbeitsbereich des neuen Projekts.';
   try {
-    await api('/api/projects/provision', { method: 'POST', body: JSON.stringify({
+    const job = await api('/api/projects/provision', { method: 'POST', body: JSON.stringify({
       name: elements.provisionName.value, slug: elements.provisionSlug.value,
       parentDirectory: elements.provisionParent.value, description: elements.provisionDescription.value,
       createGitHub: elements.provisionGitHub.checked, visibility: elements.provisionVisibility.value,
     }) });
-    showView('tasks'); await refreshJobs();
-  } catch (error) { elements.provisionMessage.textContent = error.message; }
+    projectUiState.setJobOrigin(job.id, projectId); liveJobs.set(job.id, job);
+    if (!requestIsCurrent(token)) return;
+    if (activeProject?.id === projectId) { showView('tasks'); renderConversation(); await refreshJobs(); }
+  } catch (error) { if (activeProject?.id === projectId) elements.provisionMessage.textContent = error.message; }
 });
 
 elements.knowledgeSearch.addEventListener('input', () => {
@@ -1210,6 +1646,10 @@ elements.graphCanvas.addEventListener('click', (event) => {
   }
   if (closest) renderGraphDetails(closest);
 });
+elements.graphNodeList.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-graph-node]'); if (!button) return;
+  renderGraphDetails(button.dataset.graphNode);
+});
 
 elements.noteList.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-note-path]'); if (button) loadObsidian(button.dataset.notePath);
@@ -1217,26 +1657,34 @@ elements.noteList.addEventListener('click', (event) => {
 
 elements.form.addEventListener('submit', async (event) => {
   event.preventDefault(); elements.start.disabled = true; elements.formMessage.textContent = 'Task wird gestartet…';
+  const projectId = activeProject.id;
+  const token = beginRequest('taskMutation', projectId);
   const taskText = elements.task.value;
+  const attachments = selectedAttachments.map((attachment) => ({ ...attachment }));
   const providerOrder = currentProviderOrder();
   if (!providerOrder.length) { elements.formMessage.textContent = 'Aktiviere mindestens einen für diesen Modus verfügbaren Provider.'; renderExecutionControls(false); return; }
   try {
     const job = await api('/api/tasks', { method: 'POST', body: JSON.stringify({
-      projectId: activeProject.id, task: taskText, provider: providerOrder.length === 1 ? providerOrder[0] : 'Auto', providerOrder,
+      projectId, task: taskText, provider: providerOrder.length === 1 ? providerOrder[0] : 'Auto', providerOrder,
       models: selectedProviderModels(),
       mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
-      attachments: selectedAttachments.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })),
+      attachments: attachments.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })),
     }) });
     submittedTaskText.set(job.id, taskText);
-    submittedTaskAttachments.set(job.id, selectedAttachments.map(({ name, dataUrl }) => ({ name, url: dataUrl })));
-    liveJobs.set(job.id, job); renderConversation();
-    elements.formMessage.textContent = 'Aufgabe läuft. Fortschritt erscheint direkt im Gespräch.'; elements.task.value = ''; elements.task.style.height = ''; clearAttachments(); await refreshJobs();
-  } catch (error) { elements.formMessage.textContent = error.message; }
-  finally { renderExecutionControls(false); }
+    submittedTaskAttachments.set(job.id, attachments.map(({ name, dataUrl }) => ({ name, url: dataUrl })));
+    if (job.projectId !== projectId) projectUiState.setJobOrigin(job.id, projectId);
+    liveJobs.set(job.id, job); clearComposerDraft(projectId);
+    if (!requestIsCurrent(token)) return;
+    if (activeProject?.id === projectId) { renderConversation(); elements.formMessage.textContent = 'Aufgabe läuft. Fortschritt erscheint direkt im Gespräch.'; await refreshJobs(); }
+  } catch (error) { if (requestIsCurrent(token)) elements.formMessage.textContent = error.message; }
+  finally { if (requestIsCurrent(token)) renderExecutionControls(false); }
 });
 
 document.getElementById('portfolioView').addEventListener('click', async (event) => {
-  const button = event.target.closest('button[data-portfolio-target]'); if (button) showView(button.dataset.portfolioTarget);
+  const button = event.target.closest('button[data-portfolio-target]'); if (!button) return;
+  const projectId = button.dataset.portfolioProject;
+  if (projectId && projectId !== activeProject?.id) await activateProject(projectId);
+  showView(button.dataset.portfolioTarget);
 });
 
 elements.gitSelectAll.addEventListener('click', () => {
@@ -1254,18 +1702,21 @@ async function commitSelectedGitFiles(pushAfterCommit) {
   if (!message) { elements.gitMessage.textContent = 'Eine Commit-Nachricht ist erforderlich.'; elements.gitCommitMessage.focus(); return; }
   const action = pushAfterCommit ? 'committen und anschließend pushen' : 'lokal committen';
   if (!window.confirm(`${paths.length} Datei(en) im Branch ${gitData?.branch || '—'} ${action}?`)) return;
+  const projectId = activeProject.id; const worktree = gitData.worktree; const token = beginRequest('gitMutation', projectId);
   elements.gitCommit.disabled = true; elements.gitCommitPush.disabled = true; elements.gitMessage.textContent = 'Commit wird erstellt…';
   let committed = false;
   try {
-    const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree, paths, message }) });
-    committed = true; elements.gitCommitMessage.value = ''; visibleGitDraftValue = '';
+    const result = await api('/api/git/commit', { method: 'POST', body: JSON.stringify({ projectId, worktree, paths, message }) });
+    committed = true; if (!requestIsCurrent(token)) return;
+    elements.gitCommitMessage.value = ''; visibleGitDraftValue = '';
     if (pushAfterCommit) {
       elements.gitMessage.textContent = 'Commit erstellt, Branch wird gepusht…';
-      const pushed = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
+      const pushed = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId, worktree }) });
+      if (!requestIsCurrent(token)) return;
       renderGitState(pushed.state); elements.gitMessage.textContent = 'Auswahl wurde committed und der Branch hochgeladen.';
     } else { renderGitState(result.state); elements.gitMessage.textContent = 'Commit wurde lokal erstellt. Noch nichts wurde gepusht.'; }
-  } catch (error) { elements.gitMessage.textContent = committed ? `Commit wurde erstellt, Push ist fehlgeschlagen: ${error.message}` : error.message; }
-  finally { elements.gitCommit.disabled = Boolean(gitData?.clean); elements.gitCommitPush.disabled = Boolean(gitData?.clean || !gitData?.remote); }
+  } catch (error) { if (requestIsCurrent(token)) elements.gitMessage.textContent = committed ? `Commit wurde erstellt, Push ist fehlgeschlagen: ${error.message}` : error.message; }
+  finally { if (requestIsCurrent(token)) { elements.gitCommit.disabled = Boolean(gitData?.clean); elements.gitCommitPush.disabled = Boolean(gitData?.clean || !gitData?.remote); } }
 }
 elements.gitCommit.addEventListener('click', () => commitSelectedGitFiles(false));
 elements.gitCommitPush.addEventListener('click', () => commitSelectedGitFiles(true));
@@ -1277,61 +1728,71 @@ elements.gitIntegrate.addEventListener('click', async () => {
   if (!gitData?.integration?.canFastForward && !canCleanup) { elements.gitMessage.textContent = gitData?.integration?.reason || 'Dieser Aufgabenstand kann nicht automatisch abgeschlossen werden.'; return; }
   const targetNote = gitData.integration.branch === 'main' ? 'Da kein separater Integrationsbranch vorhanden ist, wird main aktualisiert.' : 'main bleibt unverändert.';
   const action = canCleanup
-    ? `Branch ${gitData.branch} ist bereits in ${gitData.integration.branch} enthalten. Aufgaben-Worktree sowie lokalen und gegebenenfalls Remote-Branch jetzt löschen?`
-    : `Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen und anschließend den Aufgaben-Worktree sowie den lokalen und gegebenenfalls den Remote-Branch löschen? ${targetNote}`;
+    ? `Branch ${gitData.branch} ist bereits in ${gitData.integration.branch} enthalten. Aufgaben-Worktree und lokalen Branch jetzt löschen? Ein Remote-Branch bleibt erhalten.`
+    : `Branch ${gitData.branch} per sicherem Fast-forward in ${gitData.integration.branch} übernehmen und anschließend den Aufgaben-Worktree sowie den lokalen Branch löschen? Ein Remote-Branch bleibt erhalten. ${targetNote}`;
   if (!window.confirm(action)) return;
+  const projectId = activeProject.id; const worktree = gitData.worktree; const token = beginRequest('gitMutation', projectId);
   elements.gitIntegrate.disabled = true; elements.gitMessage.textContent = `${gitData.integration.branch} wird aktualisiert…`;
   try {
-    const result = await api('/api/git/integrate', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
+    const result = await api('/api/git/integrate', { method: 'POST', body: JSON.stringify({ projectId, worktree }) });
+    if (!requestIsCurrent(token)) return;
     selectedGitFile = null; renderGitState(result.state);
-    const remoteCleanup = result.deletedRemoteBranch ? ' und auf origin' : '';
+    const remoteNote = result.remoteBranchPreserved ? ' Ein Remote-Branch wurde bewusst nicht gelöscht.' : '';
     const completion = result.alreadyIntegrated ? 'Aufgabenstand war bereits übernommen' : `Aufgabenstand wurde in ${result.state.integration.branch} übernommen`;
     const nextStep = result.state.integration.branch === 'main' ? 'Prüfe und pushe jetzt main.' : `Prüfe und pushe jetzt nur ${result.state.integration.branch}; main bleibt unverändert.`;
-    elements.gitMessage.textContent = `${completion}; ${result.deletedBranch} wurde lokal${remoteCleanup} gelöscht. ${nextStep}`;
-  } catch (error) { elements.gitMessage.textContent = error.message; }
-  finally { elements.gitIntegrate.disabled = !(gitData?.integration?.canFastForward || gitData?.integration?.canCleanup); }
+    elements.gitMessage.textContent = `${completion}; ${result.deletedBranch} wurde lokal gelöscht.${remoteNote} ${nextStep}`;
+  } catch (error) { if (requestIsCurrent(token)) elements.gitMessage.textContent = error.message; }
+  finally { if (requestIsCurrent(token)) elements.gitIntegrate.disabled = !(gitData?.integration?.canFastForward || gitData?.integration?.canCleanup); }
 });
 elements.gitCleanupMerged.addEventListener('click', async () => {
   const candidates = gitData?.cleanupCandidates || [];
   if (!candidates.length) return;
   const branchList = candidates.map((candidate) => `- ${candidate.branch}`).join('\n');
   if (!window.confirm(`${candidates.length} saubere, bereits in ${gitData.integration.branch} enthaltene Aufgaben-Worktrees entfernen?\n\n${branchList}\n\nNicht integrierte oder geänderte Branches bleiben erhalten.`)) return;
+  const projectId = activeProject.id; const token = beginRequest('gitMutation', projectId);
   elements.gitCleanupMerged.disabled = true; elements.gitMessage.textContent = 'Abgeschlossene Aufgaben werden sicher aufgeräumt…';
   try {
-    const result = await api('/api/git/cleanup-merged', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktrees: candidates.map((candidate) => candidate.path) }) });
+    const result = await api('/api/git/cleanup-merged', { method: 'POST', body: JSON.stringify({ projectId, worktrees: candidates.map((candidate) => candidate.path) }) });
+    if (!requestIsCurrent(token)) return;
     selectedGitFile = null; renderGitState(result.state);
     elements.gitMessage.textContent = result.cleaned.length === 1
       ? '1 abgeschlossene Aufgabe wurde entfernt. Nicht integrierte Branches blieben unverändert.'
       : `${result.cleaned.length} abgeschlossene Aufgaben wurden entfernt. Nicht integrierte Branches blieben unverändert.`;
-  } catch (error) { elements.gitMessage.textContent = error.message; }
-  finally { elements.gitCleanupMerged.disabled = !(gitData?.cleanupCandidates?.length); }
+  } catch (error) { if (requestIsCurrent(token)) elements.gitMessage.textContent = error.message; }
+  finally { if (requestIsCurrent(token)) elements.gitCleanupMerged.disabled = !(gitData?.cleanupCandidates?.length); }
 });
 elements.gitPush.addEventListener('click', async () => {
   if (!gitData?.remote) { elements.gitMessage.textContent = 'Kein origin-Remote konfiguriert.'; return; }
   if (!window.confirm(`Branch ${gitData.branch} ohne Force-Push zu ${gitData.remote} hochladen?`)) return;
+  const projectId = activeProject.id; const worktree = gitData.worktree; const token = beginRequest('gitMutation', projectId);
   elements.gitPush.disabled = true; elements.gitMessage.textContent = 'Branch wird gepusht…';
   try {
-    const result = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, worktree: gitData.worktree }) });
+    const result = await api('/api/git/push', { method: 'POST', body: JSON.stringify({ projectId, worktree }) });
+    if (!requestIsCurrent(token)) return;
     renderGitState(result.state); elements.gitMessage.textContent = 'Branch wurde erfolgreich hochgeladen.';
-  } catch (error) { elements.gitMessage.textContent = error.message; }
-  finally { elements.gitPush.disabled = false; }
+  } catch (error) { if (requestIsCurrent(token)) elements.gitMessage.textContent = error.message; }
+  finally { if (requestIsCurrent(token)) elements.gitPush.disabled = false; }
 });
 
 elements.history.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-stop-job]'); if (!button) return; button.disabled = true;
-  try { await api(`/api/jobs/${button.dataset.stopJob}/stop`, { method: 'POST', body: '{}' }); await refreshJobs(); }
-  catch (error) { elements.formMessage.textContent = error.message; }
+  const token = beginRequest('jobMutation', activeProject.id);
+  try { await api(`/api/jobs/${button.dataset.stopJob}/stop`, { method: 'POST', body: '{}' }); if (requestIsCurrent(token)) await refreshJobs(); }
+  catch (error) { if (requestIsCurrent(token)) elements.formMessage.textContent = error.message; }
 });
 
 document.getElementById('systemsView').addEventListener('click', async (event) => {
   const install = event.target.closest('button[data-install-system]');
   if (install) {
     if (!window.confirm(`${install.dataset.installName} über den freigegebenen offiziellen Paketweg installieren? Es werden keine kostenpflichtigen Dienste aktiviert.`)) return;
+    const projectId = activeProject.id; const token = beginRequest('systemMutation', projectId);
     install.disabled = true; elements.systemMessage.textContent = `${install.dataset.installName} wird installiert. Der Fortschritt erscheint direkt im Projektgespräch.`;
     try {
-      await api('/api/systems/install', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, installKey: install.dataset.installSystem }) });
+      const job = await api('/api/systems/install', { method: 'POST', body: JSON.stringify({ projectId, installKey: install.dataset.installSystem }) });
+      liveJobs.set(job.id, job);
+      if (!requestIsCurrent(token)) return;
       showView('tasks'); await refreshJobs();
-    } catch (error) { elements.systemMessage.textContent = error.message; install.disabled = false; }
+    } catch (error) { if (requestIsCurrent(token)) { elements.systemMessage.textContent = error.message; install.disabled = false; } }
     return;
   }
   const update = event.target.closest('button[data-update-system]');
@@ -1339,17 +1800,21 @@ document.getElementById('systemsView').addEventListener('click', async (event) =
     const versionText = update.dataset.currentVersion && update.dataset.latestVersion
       ? ` von ${update.dataset.currentVersion} auf ${update.dataset.latestVersion}` : '';
     if (!window.confirm(`${update.dataset.updateName}${versionText} über ${update.dataset.updateSource} aktualisieren? Das Update läuft sichtbar im Projektgespräch und kann einen Neustart erfordern.`)) return;
+    const projectId = activeProject.id; const token = beginRequest('systemMutation', projectId);
     update.disabled = true; elements.systemMessage.textContent = `${update.dataset.updateName} wird aktualisiert. Der Fortschritt erscheint direkt im Projektgespräch.`;
     try {
-      await api('/api/systems/update', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, updateKey: update.dataset.updateSystem }) });
+      const job = await api('/api/systems/update', { method: 'POST', body: JSON.stringify({ projectId, updateKey: update.dataset.updateSystem }) });
+      liveJobs.set(job.id, job);
+      if (!requestIsCurrent(token)) return;
       showView('tasks'); await refreshJobs();
-    } catch (error) { elements.systemMessage.textContent = error.message; update.disabled = false; }
+    } catch (error) { if (requestIsCurrent(token)) { elements.systemMessage.textContent = error.message; update.disabled = false; } }
     return;
   }
   const remove = event.target.closest('button[data-remove-system]'); if (!remove) return;
   if (!window.confirm('System nur aus dem Dashboard entfernen? Dateien werden nicht gelöscht.')) return;
-  try { await api(`/api/systems/${encodeURIComponent(remove.dataset.removeSystem)}`, { method: 'DELETE' }); await loadSystems(true); }
-  catch (error) { elements.systemMessage.textContent = error.message; }
+  const projectId = activeProject.id; const token = beginRequest('systemMutation', projectId);
+  try { await api(`/api/systems/${encodeURIComponent(remove.dataset.removeSystem)}`, { method: 'DELETE' }); if (requestIsCurrent(token)) await loadSystems(true); }
+  catch (error) { if (requestIsCurrent(token)) elements.systemMessage.textContent = error.message; }
 });
 
 new ResizeObserver(() => { if (graphData) drawGraph(); }).observe(elements.graphCanvas);

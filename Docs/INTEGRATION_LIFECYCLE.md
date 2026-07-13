@@ -38,7 +38,7 @@ Project-dependent tools are inferred from repository signals and displayed only 
 
 1. Verify the official source, license, maintenance state and local requirements.
 2. Compare it with the existing ownership list and reject functional duplicates without measured benefit.
-3. Add a data-driven `config/systems.json` definition with detection and, only when safe, allowlisted install and update routes.
+3. Add a data-driven `config/systems.json` system definition. Reuse or add exactly one official source and one package identity; grant only the install, check and update operations that are safe for that source type.
 4. Declare `workflowRole`, `activation` and `costPolicy`.
 5. Connect it at the narrowest stable boundary: CLI before MCP when capabilities are equal.
 6. Add it to task compilation or provider handoff only where the activation rule is true.

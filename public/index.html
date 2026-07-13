@@ -32,67 +32,6 @@
 
   <main class="layout">
     <aside class="sidebar">
-      <section id="executionPanel" class="panel execution-panel" aria-labelledby="executionHeading">
-        <div class="section-heading execution-heading">
-          <div><h2 id="executionHeading">Ausführung</h2><p>Für dieses Projekt gespeichert</p></div>
-        </div>
-
-        <div class="label-row">
-          <label for="modeSelect">Modus</label>
-          <details class="info-popover">
-            <summary aria-label="Information zum Modus">i</summary>
-            <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt einen getrennten Git-Worktree. Hermes ist für Schreibaufgaben noch nicht freigegeben.</div>
-          </details>
-        </div>
-        <select id="modeSelect" name="mode">
-          <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
-          <option value="Write">Änderungen erlauben</option>
-        </select>
-
-        <div class="route-heading">
-          <span>Provider-Reihenfolge</span>
-          <small>Oben beginnt</small>
-        </div>
-        <ol id="providerRouteList" class="provider-route" aria-label="Provider-Reihenfolge">
-          <li class="provider-route-row" data-provider="Codex">
-            <div class="provider-route-main">
-              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Codex</strong><small>ChatGPT-Kontingent</small></span></label>
-              <div class="route-actions">
-                <button class="route-move" type="button" data-route-move="up" title="Codex nach oben" aria-label="Codex nach oben">&#8593;</button>
-                <button class="route-move" type="button" data-route-move="down" title="Codex nach unten" aria-label="Codex nach unten">&#8595;</button>
-              </div>
-            </div>
-            <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell"></select></label>
-          </li>
-          <li class="provider-route-row" data-provider="Claude">
-            <div class="provider-route-main">
-              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Claude Code</strong><small>Claude-Kontingent</small></span></label>
-              <div class="route-actions">
-                <button class="route-move" type="button" data-route-move="up" title="Claude nach oben" aria-label="Claude nach oben">&#8593;</button>
-                <button class="route-move" type="button" data-route-move="down" title="Claude nach unten" aria-label="Claude nach unten">&#8595;</button>
-              </div>
-            </div>
-            <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Modell"></select></label>
-          </li>
-          <li class="provider-route-row" data-provider="Ollama">
-            <div class="provider-route-main">
-              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Hermes + Ollama</strong><small>Lokal, kein Abo</small></span></label>
-              <div class="route-actions">
-                <button class="route-move" type="button" data-route-move="up" title="Hermes nach oben" aria-label="Hermes nach oben">&#8593;</button>
-                <button class="route-move" type="button" data-route-move="down" title="Hermes nach unten" aria-label="Hermes nach unten">&#8595;</button>
-              </div>
-            </div>
-            <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell"></select></label>
-          </li>
-        </ol>
-
-        <label class="token-toggle compact" for="useSubscriptionTokens">
-          <input id="useSubscriptionTokens" type="checkbox" checked>
-          <span><strong>Abo-Kontingente zulassen</strong><small>Aus: nur Hermes mit lokalem Ollama.</small></span>
-        </label>
-        <p id="routeSummary" class="route-summary" aria-live="polite"></p>
-      </section>
-
       <section class="panel" aria-labelledby="systemHeading">
         <div class="section-heading workflow-heading">
           <div><h2 id="systemHeading">Workflowstatus</h2><p id="workflowContext">Aktueller Projektablauf</p></div>
@@ -103,38 +42,96 @@
     </aside>
 
     <div class="workspace">
-      <nav class="view-tabs" aria-label="Dashboard-Bereiche">
-        <button class="tab-button" type="button" data-view="portfolio">Portfolio</button>
-        <button class="tab-button active" type="button" data-view="tasks">Arbeitsbereich</button>
-        <button class="tab-button" type="button" data-view="git">Prüfen & Git</button>
-        <button class="tab-button" type="button" data-view="knowledge">Wissen</button>
-        <button class="tab-button" type="button" data-view="systems">Systeme</button>
+      <nav class="view-tabs" role="tablist" aria-label="Dashboard-Bereiche">
+        <button id="portfolioTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="portfolioView" tabindex="-1" data-view="portfolio">Portfolio</button>
+        <button id="tasksTab" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="tasksView" data-view="tasks">Arbeitsbereich</button>
+        <button id="gitTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="gitView" tabindex="-1" data-view="git">Prüfen & Git</button>
+        <button id="knowledgeTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="knowledgeView" tabindex="-1" data-view="knowledge">Wissen</button>
+        <button id="systemsTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="systemsView" tabindex="-1" data-view="systems">Systeme</button>
       </nav>
 
       <div class="content">
-        <div id="portfolioView" class="view hidden" data-view-panel="portfolio">
+        <div id="portfolioView" class="view hidden" role="tabpanel" aria-labelledby="portfolioTab" data-view-panel="portfolio">
           <section class="panel portfolio-panel" aria-labelledby="portfolioHeading">
             <div class="section-heading">
-              <div><h2 id="portfolioHeading">Projektüberblick</h2><p id="portfolioProjectName">Aktives Projekt</p></div>
-              <span id="portfolioState" class="project-state attention">wird geprüft</span>
+              <div><h2 id="portfolioHeading">Portfolio</h2><p id="portfolioSummary">Projektzustände werden geladen</p></div>
             </div>
-            <div class="portfolio-next-action"><span>Nächster Schritt</span><strong id="portfolioNextAction">Projektzustand wird geladen…</strong></div>
-            <div class="portfolio-overview-grid">
-              <article><span>Aktueller Auftrag</span><strong id="portfolioCurrentTask">—</strong></article>
-              <article><span>Letzter Lauf</span><strong id="portfolioLastRun">—</strong></article>
-              <article><span>Repository</span><strong id="portfolioRepository">—</strong></article>
-              <article><span>Projektwissen</span><strong id="portfolioKnowledge">—</strong></article>
-            </div>
-            <div id="attentionList" class="attention-list" aria-live="polite"></div>
-            <div class="portfolio-actions">
-              <button class="button primary" type="button" data-portfolio-target="tasks">Aufgabe öffnen</button>
-              <button class="button secondary" type="button" data-portfolio-target="git">Änderungen prüfen</button>
-              <button class="button secondary" type="button" data-portfolio-target="knowledge">Wissen öffnen</button>
-            </div>
+            <div id="portfolioProjects" class="portfolio-projects" aria-live="polite"></div>
           </section>
         </div>
 
-        <div id="tasksView" class="view" data-view-panel="tasks">
+        <div id="tasksView" class="view" role="tabpanel" aria-labelledby="tasksTab" data-view-panel="tasks">
+          <div class="task-workspace-layout">
+          <section id="executionPanel" class="panel execution-panel" aria-labelledby="executionHeading">
+            <div class="section-heading execution-heading">
+              <div><h2 id="executionHeading">Ausführung</h2><p>Für dieses Projekt gespeichert</p></div>
+            </div>
+
+            <div class="label-row">
+              <label for="modeSelect">Modus</label>
+              <details class="info-popover">
+                <summary aria-label="Information zum Modus">i</summary>
+                <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt einen getrennten Git-Worktree. Hermes ist für Schreibaufgaben noch nicht freigegeben.</div>
+              </details>
+            </div>
+            <select id="modeSelect" name="mode">
+              <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
+              <option value="Write">Änderungen erlauben</option>
+            </select>
+
+            <fieldset id="providerPresetControl" class="provider-presets">
+              <legend>Providerpreset</legend>
+              <label><input type="radio" name="providerPreset" value="automatic" checked><span>Automatisch</span></label>
+              <label><input type="radio" name="providerPreset" value="local"><span>Nur lokal</span></label>
+              <label><input type="radio" name="providerPreset" value="custom"><span>Benutzerdefiniert</span></label>
+            </fieldset>
+            <details id="providerDetails" class="provider-details">
+              <summary><span>Providerdetails</span><small>Reihenfolge, Modelle und Kostenweg</small></summary>
+              <div class="provider-details-body">
+                <div class="route-heading"><span>Provider</span><small>aktivieren und Modell wählen</small></div>
+                <label class="primary-provider-control" for="primaryProviderSelect">
+                  <span>Zuerst verwenden</span>
+                  <select id="primaryProviderSelect" aria-describedby="providerPriorityHint">
+                    <option value="Codex">Codex</option>
+                    <option value="Claude">Claude Code</option>
+                    <option value="Ollama">Hermes + Ollama</option>
+                  </select>
+                </label>
+                <p id="providerPriorityHint" class="control-hint">Bei einem Kontingentlimit folgen die weiteren aktiven Provider in der angezeigten Reihenfolge.</p>
+                <ol id="providerRouteList" class="provider-route" aria-label="Provider-Fallback-Reihenfolge">
+                  <li class="provider-route-row" data-provider="Codex">
+                    <div class="provider-route-main">
+                      <label class="provider-enabled"><input type="checkbox" checked><span><strong>Codex</strong><small>ChatGPT-Kontingent</small></span></label>
+                    </div>
+                    <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell"></select></label>
+                  </li>
+                  <li class="provider-route-row" data-provider="Claude">
+                    <div class="provider-route-main">
+                      <label class="provider-enabled"><input type="checkbox" checked><span><strong>Claude Code</strong><small>Claude-Kontingent</small></span></label>
+                    </div>
+                    <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Code-Modell"></select></label>
+                  </li>
+                  <li class="provider-route-row" data-provider="Ollama">
+                    <div class="provider-route-main">
+                      <label class="provider-enabled"><input type="checkbox" checked><span><strong>Hermes + Ollama</strong><small>Lokal, kein Abo</small></span></label>
+                    </div>
+                    <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell"></select></label>
+                  </li>
+                </ol>
+                <div class="model-catalog-actions">
+                  <button id="refreshModelsButton" class="button secondary" type="button">Modelle aktualisieren</button>
+                  <span id="modelCatalogState" class="control-hint" role="status"></span>
+                </div>
+
+                <label class="token-toggle compact" for="useSubscriptionTokens">
+                  <input id="useSubscriptionTokens" type="checkbox" checked>
+                  <span><strong>Abo-Kontingente zulassen</strong><small>Aus: nur Hermes mit lokalem Ollama.</small></span>
+                </label>
+              </div>
+            </details>
+            <p id="routeSummary" class="route-summary" aria-live="polite"></p>
+          </section>
+
           <section class="panel chat-panel" aria-labelledby="historyHeading">
             <div class="section-heading chat-heading">
               <div><h2 id="historyHeading">Arbeitsbereich</h2><p id="taskHeading">Projektgespräch</p></div>
@@ -170,9 +167,10 @@
               </form>
             </details>
           </section>
+          </div>
         </div>
 
-        <div id="gitView" class="view hidden" data-view-panel="git">
+        <div id="gitView" class="view hidden" role="tabpanel" aria-labelledby="gitTab" data-view-panel="git">
           <section class="panel git-panel" aria-labelledby="gitHeading">
             <div class="section-heading">
               <div><h2 id="gitHeading">Änderungen prüfen</h2><p id="gitProjectName">Lokaler Repository-Zustand</p></div>
@@ -183,6 +181,7 @@
               <div class="git-branch-flow"><span>Freigabeweg</span><strong id="gitBranchFlow">Aufgabe → Integrationsbranch → main</strong><small>Ein Aufgabenbranch wird niemals direkt nach main befördert.</small></div>
             </div>
             <div id="gitSummary" class="git-summary" aria-live="polite"></div>
+            <ol id="gitDeliverySteps" class="delivery-steps" aria-label="Freigabestatus"></ol>
             <div class="git-review-layout">
               <section class="git-files" aria-labelledby="gitFilesHeading">
                 <div class="source-heading"><div><span class="source-badge authority">Git</span><h3 id="gitFilesHeading">Geänderte Dateien</h3></div><button id="gitSelectAll" class="button secondary table-button" type="button">Alle auswählen</button></div>
@@ -209,7 +208,7 @@
           </section>
         </div>
 
-        <div id="knowledgeView" class="view hidden" data-view-panel="knowledge">
+        <div id="knowledgeView" class="view hidden" role="tabpanel" aria-labelledby="knowledgeTab" data-view-panel="knowledge">
           <section class="panel knowledge-panel" aria-labelledby="knowledgeHeading">
             <div class="section-heading">
               <div><h2 id="knowledgeHeading">Projektwissen</h2><p id="knowledgeProjectName"></p></div>
@@ -226,7 +225,11 @@
                 </div>
                 <div id="graphStats" class="knowledge-stats"></div>
                 <div class="graph-layout">
-                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Graphify-Beziehungsübersicht; mit Mausrad zoomen und durch Ziehen verschieben" title="Mausrad: zoomen · Ziehen: Ansicht verschieben"></canvas>
+                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Visuelle Graphify-Beziehungsübersicht"></canvas>
+                  <section class="graph-node-browser" aria-labelledby="graphNodeListHeading">
+                    <h4 id="graphNodeListHeading">Knotenliste</h4>
+                    <div id="graphNodeList" class="graph-node-list"></div>
+                  </section>
                   <aside id="graphDetails" class="knowledge-details"><p class="empty">Wähle einen Knoten im Graphen.</p></aside>
                 </div>
               </section>
@@ -242,7 +245,7 @@
           </section>
         </div>
 
-        <div id="systemsView" class="view hidden" data-view-panel="systems">
+        <div id="systemsView" class="view hidden" role="tabpanel" aria-labelledby="systemsTab" data-view-panel="systems">
           <section class="panel" aria-labelledby="systemsHeading">
             <div class="section-heading">
               <div><h2 id="systemsHeading">Systeminventar</h2><p>Basis, empfohlener Workflow und projektspezifische Werkzeuge</p></div>
@@ -255,8 +258,8 @@
             <div id="globalSystems" class="system-grid"></div>
           </section>
 
-          <section class="panel" aria-labelledby="registerSystemHeading">
-            <div class="section-heading"><div><h2 id="registerSystemHeading">System registrieren</h2><p>Lokales Werkzeug oder Erweiterung ergänzen</p></div></div>
+          <details class="panel system-registration">
+            <summary><span><strong id="registerSystemHeading">System registrieren</strong><small>Lokales Werkzeug oder Erweiterung ergänzen</small></span></summary>
             <form id="systemForm" class="system-form">
               <div class="form-grid">
                 <div><label for="systemName">Name</label><input id="systemName" required maxlength="100"></div>
@@ -270,7 +273,7 @@
               </div>
               <div class="form-actions"><button class="button primary" type="submit">System registrieren</button><span id="systemMessage" class="form-message" role="status"></span></div>
             </form>
-          </section>
+          </details>
         </div>
 
         <div id="projectsView" class="view hidden" data-view-panel="projects">
@@ -306,6 +309,6 @@
     </div>
   </div>
 
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

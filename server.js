@@ -7,9 +7,28 @@ const path = require('path');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 const { randomUUID } = require('crypto');
+const { createRequestBoundary } = require('./lib/http/request-boundary');
+const { writeJsonAtomic } = require('./lib/runtime/atomic-json');
+const { safeId, projectDisplayName, yamlScalar } = require('./lib/projects/metadata');
+const {
+  normalizeCatalog,
+  getCatalogBinding,
+  buildMaintenancePlan,
+  sameGitRemote,
+  checkCatalogUpdates,
+  createUpdateCache,
+  catalogFingerprint,
+  consumeSystemUpdateAuthorization,
+  cancellationMetadata,
+  resolveCancellationTarget,
+  emptyMaintenanceGuard,
+  tryAcquireMaintenanceJob,
+  releaseMaintenanceJob,
+} = require('./lib/systems');
 
 const HOST = process.env.AI_PROJECT_CONTROL_HOST || '127.0.0.1';
 const PORT = Number(process.env.AI_PROJECT_CONTROL_PORT || 8765);
+const assertRequestBoundary = createRequestBoundary(HOST, PORT);
 const HOME = os.homedir();
 const PUBLIC_ROOT = path.join(__dirname, 'public');
 const DATA_ROOT = process.env.AI_PROJECT_CONTROL_DATA || path.join(process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local'), 'AI Project Control');
@@ -17,6 +36,7 @@ const PROJECTS_PATH = path.join(DATA_ROOT, 'projects.json');
 const SYSTEMS_PATH = path.join(DATA_ROOT, 'systems.json');
 const SYSTEM_UPDATE_CACHE_PATH = path.join(DATA_ROOT, 'system-updates.json');
 const GIT_DRAFTS_PATH = path.join(DATA_ROOT, 'git-drafts.json');
+const JOBS_PATH = path.join(DATA_ROOT, 'jobs.json');
 const MEMORY_ROOT = path.join(DATA_ROOT, 'memory');
 const ROUTER_ROOT = path.join(__dirname, 'router');
 const STATUS_SCRIPT = path.join(ROUTER_ROOT, 'Get-AiProviderStatus.ps1');
@@ -24,14 +44,13 @@ const TASK_SCRIPT = path.join(ROUTER_ROOT, 'Invoke-ProjectAiTask.ps1');
 const RUN_ROOT = process.env.AI_PROJECT_CONTROL_RUN_ROOT || path.join(HOME, 'Documents', 'AI-Runs');
 const TASK_ROOT = path.join(RUN_ROOT, '_dashboard_tasks');
 const WORKTREE_ROOT = process.env.AI_PROJECT_CONTROL_WORKTREE_ROOT || path.join(HOME, 'Documents', 'AI-Worktrees');
-const ECC_ROOT = path.join(HOME, 'Documents', 'Local-AI-Workspace-Tools', 'ECC');
+const ECC_ROOT = process.env.AI_PROJECT_CONTROL_ECC_ROOT || path.join(HOME, 'Documents', 'Local-AI-Workspace-Tools', 'ECC');
 const OBSIDIAN_VAULT = process.env.AI_PROJECT_CONTROL_OBSIDIAN_VAULT || path.join(HOME, 'Documents', 'Obsidian', 'Project-Knowledge');
-const GRAPHIFY_PYTHON = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python312', 'python.exe');
-const CC_SWITCH_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'CC-Switch', 'cc-switch.exe');
-const COMFY_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Comfy Desktop', 'Comfy Desktop.exe');
+const PROJECTS_ROOT = process.env.AI_PROJECT_CONTROL_PROJECTS_ROOT || path.join(HOME, 'Documents', 'Projects');
+const COMFY_ROOT = process.env.AI_PROJECT_CONTROL_COMFY_ROOT || '';
+const CONFIGURED_GRAPHIFY_PYTHON = process.env.AI_PROJECT_CONTROL_GRAPHIFY_PYTHON || '';
 const COMFY_SETTINGS = path.join(process.env.APPDATA || '', 'Comfy Desktop', 'settings.json');
 const SYSTEM_CATALOG_PATH = path.join(__dirname, 'config', 'systems.json');
-const SYSTEM_CATALOG_SCHEMA_VERSION = 2;
 const SYSTEM_UPDATE_TTL_MS = Number(process.env.AI_PROJECT_CONTROL_UPDATE_TTL_MS || 6 * 60 * 60 * 1000);
 const CODEX_CONFIG_PATH = path.join(HOME, '.codex', 'config.toml');
 const CODEX_MODEL_CACHE_PATH = path.join(HOME, '.codex', 'models_cache.json');
@@ -39,7 +58,8 @@ const PROVIDER_NAMES = ['Codex', 'Claude', 'Ollama'];
 const DEFAULT_PROVIDER_ORDER = ['Codex', 'Claude', 'Ollama'];
 const SAFE_MODEL_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/;
 const MAX_BODY_BYTES = 24 * 1024 * 1024;
-const MAX_JOB_LOG_CHARS = 2 * 1024 * 1024;
+const MAX_JOB_LOG_CHARS = 512 * 1024;
+const MAX_RETAINED_JOBS = 100;
 const MAX_KNOWLEDGE_FILE_BYTES = 512 * 1024;
 const MAX_ATTACHMENTS = 4;
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -52,7 +72,7 @@ const GIT_IMAGE_TYPES = new Map([
 ]);
 const MAX_GIT_IMAGE_BYTES = 20 * 1024 * 1024;
 const jobs = new Map();
-const liveClients = new Set();
+const liveClients = new Map();
 let statusCache = null;
 let statusCacheAt = 0;
 const componentCache = new Map();
@@ -63,24 +83,20 @@ let systemUpdateRefresh = null;
 let providerModelCache = null;
 let providerModelCacheAt = 0;
 let gitDraftWriteChain = Promise.resolve();
+let jobWriteChain = Promise.resolve();
+let jobPersistTimer = null;
+let projectMutationChain = Promise.resolve();
+let systemMutationChain = Promise.resolve();
+let maintenanceGuard = emptyMaintenanceGuard();
 
 function defaultRegistry() {
-  const projects = [];
   const selfRepository = path.resolve(__dirname);
-  projects.push({
+  const projects = [{
     id: 'ai-project-control', name: 'AI Project Control', repository: selfRepository,
     graphPath: path.join(selfRepository, 'graphify-out', 'graph.json'),
     obsidianPath: path.join(OBSIDIAN_VAULT, '10 Projects', 'AI Project Control'),
-  });
-  const polisRepository = 'C:\\Repos\\Polis';
-  if (fs.existsSync(polisRepository) && polisRepository.toLowerCase() !== selfRepository.toLowerCase()) {
-    projects.push({
-      id: 'polis', name: 'Polis', repository: polisRepository,
-      graphPath: path.join(polisRepository, 'graphify-out', 'graph.json'),
-      obsidianPath: path.join(OBSIDIAN_VAULT, '10 Projects', 'Polis'),
-    });
-  }
-  return { activeProjectId: projects.some((project) => project.id === 'polis') ? 'polis' : projects[0].id, projects };
+  }];
+  return { activeProjectId: projects[0].id, projects };
 }
 
 function sendJson(response, statusCode, value) {
@@ -238,6 +254,28 @@ async function getProviderModelCatalog(force = false) {
   return providerModelCache;
 }
 
+function graphifyPythonCommand() {
+  return CONFIGURED_GRAPHIFY_PYTHON && fs.existsSync(CONFIGURED_GRAPHIFY_PYTHON)
+    ? CONFIGURED_GRAPHIFY_PYTHON
+    : 'python.exe';
+}
+
+async function graphifyModelName() {
+  const configured = String(process.env.AI_PROJECT_CONTROL_GRAPHIFY_MODEL || '').trim();
+  if (configured) {
+    if (!SAFE_MODEL_NAME.test(configured)) throw new Error('AI_PROJECT_CONTROL_GRAPHIFY_MODEL is invalid.');
+    return configured;
+  }
+  const catalog = await getProviderModelCatalog();
+  const detected = catalog.Ollama.find((model) => SAFE_MODEL_NAME.test(model.value));
+  if (!detected) throw new Error('Graphify needs an installed Ollama chat model or AI_PROJECT_CONTROL_GRAPHIFY_MODEL.');
+  return detected.value;
+}
+
+async function graphifyArguments(repository) {
+  return ['-m', 'graphify', 'extract', repository, '--backend', 'ollama', '--model', await graphifyModelName(), '--token-budget', '4096', '--max-concurrency', '1', '--out', repository];
+}
+
 function normalizeProviderOrder(value, legacyProvider = 'Auto') {
   const source = Array.isArray(value) ? value : legacyProvider === 'Auto' ? DEFAULT_PROVIDER_ORDER : [legacyProvider];
   const order = [];
@@ -274,11 +312,6 @@ function stripAnsi(value) {
 async function readJsonFile(filePath) {
   const text = await fsp.readFile(filePath, 'utf8');
   return JSON.parse(text.replace(/^\uFEFF/, ''));
-}
-
-function safeId(value) {
-  const base = String(value || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
-  return base || 'project';
 }
 
 function taskBranchSlug(task) {
@@ -338,8 +371,7 @@ async function loadGitDrafts() {
 }
 
 async function saveGitDrafts(store) {
-  await fsp.mkdir(DATA_ROOT, { recursive: true });
-  await fsp.writeFile(GIT_DRAFTS_PATH, JSON.stringify(store, null, 2), 'utf8');
+  await writeJsonAtomic(GIT_DRAFTS_PATH, store);
 }
 
 async function setCommitDraft(projectId, branch, message) {
@@ -445,10 +477,7 @@ async function loadProjects() {
 }
 
 async function saveProjects(registry) {
-  await fsp.mkdir(DATA_ROOT, { recursive: true });
-  const temporary = `${PROJECTS_PATH}.tmp`;
-  await fsp.writeFile(temporary, JSON.stringify(registry, null, 2), 'utf8');
-  await fsp.rename(temporary, PROJECTS_PATH);
+  await writeJsonAtomic(PROJECTS_PATH, registry);
 }
 
 async function getProject(projectId) {
@@ -459,13 +488,24 @@ async function getProject(projectId) {
   return { registry, project };
 }
 
+function mutateProjectRegistry(mutator) {
+  const operation = projectMutationChain.catch(() => {}).then(async () => {
+    const registry = await loadProjects();
+    const result = await mutator(registry);
+    await saveProjects(registry);
+    return result;
+  });
+  projectMutationChain = operation;
+  return operation;
+}
+
 async function ensureObsidianProjectArea(project) {
   const directories = ['Working Notes', 'Research', 'Design Drafts', 'Review Notes', 'Prompt Library', 'Lessons Learned', 'AI Runs'];
   for (const directory of directories) await fsp.mkdir(path.join(project.obsidianPath, directory), { recursive: true });
   const dashboardPath = path.join(project.obsidianPath, project.name + ' Dashboard.md');
   if (!fs.existsSync(dashboardPath)) {
     const dashboard = [
-      '---', 'title: ' + project.name + ' Dashboard', 'tags:', '  - project', '  - active', '---', '',
+      '---', 'title: ' + yamlScalar(project.name + ' Dashboard'), 'tags:', '  - project', '  - active', '---', '',
       '# ' + project.name + ' Dashboard', '',
       '> [!important] Source of truth',
       '> Official information remains in the Git repository. This area contains working notes and run links.', '',
@@ -489,7 +529,7 @@ async function ensureObsidianProjectArea(project) {
     const target = path.join(project.obsidianPath, directory, file);
     if (fs.existsSync(target)) continue;
     const note = [
-      '---', `title: ${title}`, `project: ${project.name}`, 'status: working', '---', '', `# ${title}`, '',
+      '---', `title: ${yamlScalar(title)}`, `project: ${yamlScalar(project.name)}`, 'status: working', '---', '', `# ${title}`, '',
       '> [!info] Arbeitskontext',
       `> ${purpose} Das Git-Repository bleibt die verbindliche Quelle.`, '',
       '## Offen', '', '- ', '', '## Verweise', '', `- Repository: ${project.repository}`, '',
@@ -499,45 +539,48 @@ async function ensureObsidianProjectArea(project) {
 }
 
 async function addProject(payload) {
-  const name = String(payload.name || '').trim();
+  const name = projectDisplayName(payload.name);
   const repository = path.resolve(String(payload.repository || '').trim());
-  if (!name || name.length > 80) throw new Error('Project name must contain between 1 and 80 characters.');
   if (!fs.existsSync(repository) || !fs.statSync(repository).isDirectory()) throw new Error('Repository directory does not exist.');
-  const registry = await loadProjects();
-  if (registry.projects.some((project) => project.repository.toLowerCase() === repository.toLowerCase())) {
-    throw new Error('This repository is already registered.');
+  const gitRoot = await execFileAsync('git.exe', ['-C', repository, 'rev-parse', '--show-toplevel']);
+  if (gitRoot.exitCode !== 0 || path.resolve(gitRoot.stdout.trim()).toLowerCase() !== repository.toLowerCase()) {
+    throw new Error('The selected directory must be the root of a Git repository.');
   }
-  const baseId = safeId(name);
-  let id = baseId;
-  let suffix = 2;
-  while (registry.projects.some((project) => project.id === id)) id = `${baseId}-${suffix++}`;
-  const graphPath = path.resolve(String(payload.graphPath || path.join(repository, 'graphify-out', 'graph.json')).trim());
-  const obsidianPath = path.resolve(String(payload.obsidianPath || path.join(OBSIDIAN_VAULT, '10 Projects', name)).trim());
-  const project = normalizedProject({ id, name, repository, graphPath, obsidianPath });
-  await ensureObsidianProjectArea(project);
-  registry.projects.push(project);
-  registry.activeProjectId = id;
-  await saveProjects(registry);
-  return project;
+  return mutateProjectRegistry(async (registry) => {
+    if (registry.projects.some((project) => project.repository.toLowerCase() === repository.toLowerCase())) {
+      throw new Error('This repository is already registered.');
+    }
+    const baseId = safeId(name);
+    let id = baseId;
+    let suffix = 2;
+    while (registry.projects.some((project) => project.id === id)) id = `${baseId}-${suffix++}`;
+    const graphPath = path.resolve(String(payload.graphPath || path.join(repository, 'graphify-out', 'graph.json')).trim());
+    const obsidianPath = path.resolve(String(payload.obsidianPath || path.join(OBSIDIAN_VAULT, '10 Projects', name)).trim());
+    const project = normalizedProject({ id, name, repository, graphPath, obsidianPath });
+    await ensureObsidianProjectArea(project);
+    registry.projects.push(project);
+    registry.activeProjectId = id;
+    return project;
+  });
 }
 
 async function selectProject(projectId) {
-  const registry = await loadProjects();
-  if (!registry.projects.some((project) => project.id === projectId)) throw new Error('Unknown project.');
-  registry.activeProjectId = projectId;
-  await saveProjects(registry);
-  return registry.projects.find((project) => project.id === projectId);
+  return mutateProjectRegistry((registry) => {
+    if (!registry.projects.some((project) => project.id === projectId)) throw new Error('Unknown project.');
+    registry.activeProjectId = projectId;
+    return registry.projects.find((project) => project.id === projectId);
+  });
 }
 
 async function removeProject(projectId) {
-  const registry = await loadProjects();
-  if (registry.projects.length === 1) throw new Error('At least one project must remain registered.');
-  const index = registry.projects.findIndex((project) => project.id === projectId);
-  if (index < 0) throw new Error('Unknown project.');
-  const [removed] = registry.projects.splice(index, 1);
-  if (registry.activeProjectId === projectId) registry.activeProjectId = registry.projects[0].id;
-  await saveProjects(registry);
-  return removed;
+  return mutateProjectRegistry((registry) => {
+    if (registry.projects.length === 1) throw new Error('At least one project must remain registered.');
+    const index = registry.projects.findIndex((project) => project.id === projectId);
+    if (index < 0) throw new Error('Unknown project.');
+    const [removed] = registry.projects.splice(index, 1);
+    if (registry.activeProjectId === projectId) registry.activeProjectId = registry.projects[0].id;
+    return removed;
+  });
 }
 
 async function loadSystems() {
@@ -552,10 +595,18 @@ async function loadSystems() {
 }
 
 async function saveSystems(registry) {
-  await fsp.mkdir(DATA_ROOT, { recursive: true });
-  const temporary = `${SYSTEMS_PATH}.tmp`;
-  await fsp.writeFile(temporary, JSON.stringify(registry, null, 2), 'utf8');
-  await fsp.rename(temporary, SYSTEMS_PATH);
+  await writeJsonAtomic(SYSTEMS_PATH, registry);
+}
+
+function mutateSystemRegistry(mutator) {
+  const operation = systemMutationChain.catch(() => {}).then(async () => {
+    const registry = await loadSystems();
+    const result = await mutator(registry);
+    await saveSystems(registry);
+    return result;
+  });
+  systemMutationChain = operation;
+  return operation;
 }
 
 async function addSystem(payload) {
@@ -567,22 +618,22 @@ async function addSystem(payload) {
   if (!name || name.length > 100) throw new Error('System name must contain between 1 and 100 characters.');
   if (!fs.existsSync(configuredPath)) throw new Error('System path does not exist.');
   if (scope === 'project') await getProject(projectId);
-  const registry = await loadSystems();
-  const system = { id: randomUUID(), name, type, path: configuredPath, scope, projectId, note: String(payload.note || '').trim().slice(0, 500) };
-  registry.systems.push(system);
-  await saveSystems(registry);
-  systemCacheAt = 0;
-  return system;
+  return mutateSystemRegistry((registry) => {
+    const system = { id: randomUUID(), name, type, path: configuredPath, scope, projectId, note: String(payload.note || '').trim().slice(0, 500) };
+    registry.systems.push(system);
+    systemCacheAt = 0;
+    return system;
+  });
 }
 
 async function removeSystem(systemId) {
-  const registry = await loadSystems();
-  const index = registry.systems.findIndex((system) => system.id === systemId);
-  if (index < 0) throw new Error('Unknown registered system.');
-  const [removed] = registry.systems.splice(index, 1);
-  await saveSystems(registry);
-  systemCacheAt = 0;
-  return removed;
+  return mutateSystemRegistry((registry) => {
+    const index = registry.systems.findIndex((system) => system.id === systemId);
+    if (index < 0) throw new Error('Unknown registered system.');
+    const [removed] = registry.systems.splice(index, 1);
+    systemCacheAt = 0;
+    return removed;
+  });
 }
 
 async function loadMemory(projectId) {
@@ -601,7 +652,7 @@ async function addMemory(project, payload) {
   const note = { id: randomUUID(), createdAt: new Date().toISOString(), text, sourceRun: payload.sourceRun ? String(payload.sourceRun) : null };
   memory.notes.unshift(note);
   memory.notes = memory.notes.slice(0, 100);
-  await fsp.writeFile(path.join(MEMORY_ROOT, `${safeId(project.id)}.json`), JSON.stringify(memory, null, 2), 'utf8');
+  await writeJsonAtomic(path.join(MEMORY_ROOT, `${safeId(project.id)}.json`), memory);
   if (fs.existsSync(project.obsidianPath)) {
     const lessonDirectory = path.join(project.obsidianPath, 'Lessons Learned');
     await fsp.mkdir(lessonDirectory, { recursive: true });
@@ -655,127 +706,43 @@ async function loadSystemUpdateCache() {
   if (systemUpdateCache) return systemUpdateCache;
   try {
     const stored = await readJsonFile(SYSTEM_UPDATE_CACHE_PATH);
-    if (stored.schemaVersion === 1 && stored.entries && typeof stored.entries === 'object') {
+    if (stored.schemaVersion === 2 && stored.entries && typeof stored.entries === 'object') {
       systemUpdateCache = stored;
       return systemUpdateCache;
     }
   } catch {
     // A missing or outdated cache is rebuilt from official sources.
   }
-  systemUpdateCache = { schemaVersion: 1, checkedAt: null, entries: {} };
+  systemUpdateCache = { schemaVersion: 2, catalogFingerprint: null, generatedAt: null, entries: {} };
   return systemUpdateCache;
 }
 
 async function saveSystemUpdateCache(cache) {
-  await fsp.mkdir(DATA_ROOT, { recursive: true });
-  const temporary = `${SYSTEM_UPDATE_CACHE_PATH}.tmp`;
-  await fsp.writeFile(temporary, JSON.stringify(cache, null, 2), 'utf8');
-  await fsp.rename(temporary, SYSTEM_UPDATE_CACHE_PATH);
+  await writeJsonAtomic(SYSTEM_UPDATE_CACHE_PATH, cache);
 }
 
-function updateResult(status, currentVersion, latestVersion, source, detail = null) {
-  return {
-    status, currentVersion: currentVersion || null, latestVersion: latestVersion || null,
-    source, detail, checkedAt: new Date().toISOString(),
-  };
-}
-
-function detectedVersion(detection) {
-  return detection.version || extractVersion(detection.text);
-}
-
-async function checkNpmUpdate(definition, detection) {
-  const packageName = definition.updateCheck.package;
-  const result = await execFileAsync('npm.cmd', ['view', packageName, 'version', '--json'], { timeout: 45000 });
-  const currentVersion = detectedVersion(detection);
-  if (result.exitCode !== 0) return updateResult('unknown', currentVersion, null, `npm · ${packageName}`, 'npm registry nicht erreichbar');
-  let latestVersion = null;
-  try {
-    const parsed = JSON.parse(result.stdout.trim());
-    latestVersion = Array.isArray(parsed) ? parsed.at(-1) : String(parsed || '');
-  } catch { latestVersion = result.stdout.trim().replace(/^"|"$/g, ''); }
-  if (!latestVersion) return updateResult('unknown', currentVersion, null, `npm · ${packageName}`, 'Keine Versionsangabe erhalten');
-  if (!currentVersion) return updateResult('unknown', null, latestVersion, `npm · ${packageName}`, 'Installierte Version konnte nicht gelesen werden');
-  return updateResult(currentVersion !== latestVersion ? 'available' : 'current', currentVersion, latestVersion, `npm · ${packageName}`);
-}
-
-async function checkGitRemoteUpdate(definition) {
-  const check = definition.updateCheck;
-  const repository = expandSystemPath(check.path);
-  const remote = check.remote || 'origin';
-  const local = await execFileAsync('git.exe', ['-C', repository, 'rev-parse', 'HEAD']);
-  const branch = await execFileAsync('git.exe', ['-C', repository, 'branch', '--show-current']);
-  const branchName = branch.stdout.trim();
-  if (local.exitCode !== 0 || branch.exitCode !== 0 || !branchName) {
-    return updateResult('unknown', null, null, `Git · ${remote}`, 'Lokaler Branch ist nicht eindeutig');
-  }
-  const remoteHead = await execFileAsync('git.exe', ['-C', repository, 'ls-remote', remote, `refs/heads/${branchName}`], { timeout: 45000 });
-  const remoteSha = remoteHead.stdout.trim().split(/\s+/)[0];
-  const localSha = local.stdout.trim();
-  if (remoteHead.exitCode !== 0 || !/^[a-f0-9]{40}$/i.test(remoteSha)) {
-    return updateResult('unknown', localSha.slice(0, 8), null, `Git · ${remote}/${branchName}`, 'Remote-Version nicht erreichbar');
-  }
-  return updateResult(localSha === remoteSha ? 'current' : 'available', localSha.slice(0, 8), remoteSha.slice(0, 8), `Git · ${remote}/${branchName}`);
-}
-
-async function performSystemUpdateRefresh(definitions, detections, force) {
+async function performSystemUpdateRefresh(catalog, detections, force) {
   const cache = await loadSystemUpdateCache();
-  const results = {};
-  const pending = [];
-  const now = Date.now();
-  for (let index = 0; index < definitions.length; index += 1) {
-    const definition = definitions[index];
-    if (!definition.updateCheck) continue;
-    const detection = detections[index];
-    if (!detection.ok) {
-      results[definition.id] = { status: 'not-installed', source: definition.updateCheck.type, checkedAt: null };
-      continue;
-    }
-    const cached = cache.entries[definition.id];
-    const fresh = cached?.checkedAt && now - Date.parse(cached.checkedAt) < SYSTEM_UPDATE_TTL_MS;
-    if (!force && fresh) results[definition.id] = cached;
-    else pending.push({ definition, detection });
+  const generatedAt = Date.parse(cache.generatedAt);
+  if (!force && cache.catalogFingerprint === catalogFingerprint(catalog)
+      && Number.isFinite(generatedAt) && Date.now() - generatedAt < SYSTEM_UPDATE_TTL_MS) {
+    return { entries: cache.entries, checkedAt: cache.generatedAt, refreshed: false };
   }
-
-  if (process.env.AI_PROJECT_CONTROL_SKIP_UPDATE_CHECKS === '1') {
-    for (const { definition, detection } of pending) {
-      results[definition.id] = updateResult('skipped', detectedVersion(detection), null, definition.updateCheck.type, 'In dieser Umgebung deaktiviert');
-    }
-  } else {
-    const wingetEntries = pending.filter(({ definition }) => definition.updateCheck.type === 'winget');
-    if (wingetEntries.length) {
-      const packageIds = wingetEntries.map(({ definition }) => definition.updateCheck.id);
-      const winget = await execFileAsync('winget.exe', ['upgrade', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity'], { timeout: 120000 });
-      const availableRows = parseWingetUpgradeOutput(`${winget.stdout}\n${winget.stderr}`, packageIds);
-      for (const { definition, detection } of wingetEntries) {
-        const packageId = definition.updateCheck.id;
-        const versions = availableRows.get(packageId);
-        const currentVersion = versions?.currentVersion || detectedVersion(detection);
-        results[definition.id] = versions
-          ? updateResult('available', currentVersion, versions.latestVersion, `Winget · ${packageId}`)
-          : winget.exitCode === 0
-            ? updateResult('current', currentVersion, currentVersion, `Winget · ${packageId}`)
-            : updateResult('unknown', currentVersion, null, `Winget · ${packageId}`, 'Winget-Quelle nicht erreichbar');
-      }
-    }
-    await Promise.all(pending.filter(({ definition }) => definition.updateCheck.type !== 'winget').map(async ({ definition, detection }) => {
-      if (definition.updateCheck.type === 'npm') results[definition.id] = await checkNpmUpdate(definition, detection);
-      else if (definition.updateCheck.type === 'gitRemote') results[definition.id] = await checkGitRemoteUpdate(definition);
-      else results[definition.id] = updateResult('unknown', detectedVersion(detection), null, definition.updateCheck.type, 'Nicht unterstützte Updatequelle');
-    }));
-  }
-
-  if (pending.length) {
-    for (const { definition } of pending) cache.entries[definition.id] = results[definition.id];
-    cache.checkedAt = new Date().toISOString();
-    await saveSystemUpdateCache(cache);
-  }
-  return { entries: results, checkedAt: cache.checkedAt, refreshed: pending.length > 0 };
+  const detectionMap = new Map(catalog.systems.map((definition, index) => [definition.id, detections[index]]));
+  const disabled = process.env.AI_PROJECT_CONTROL_SKIP_UPDATE_CHECKS === '1';
+  const checked = await checkCatalogUpdates(catalog, detectionMap, {
+    execute: disabled
+      ? async () => ({ exitCode: 1, stdout: '', stderr: 'Update checks disabled in this environment.' })
+      : execFileAsync,
+  });
+  systemUpdateCache = createUpdateCache(catalog, checked, { now: checked.checkedAt });
+  await saveSystemUpdateCache(systemUpdateCache);
+  return { entries: systemUpdateCache.entries, checkedAt: systemUpdateCache.generatedAt, refreshed: true };
 }
 
-async function getSystemUpdateStatuses(definitions, detections, force = false) {
+async function getSystemUpdateStatuses(catalog, detections, force = false) {
   if (systemUpdateRefresh) return systemUpdateRefresh;
-  systemUpdateRefresh = performSystemUpdateRefresh(definitions, detections, force);
+  systemUpdateRefresh = performSystemUpdateRefresh(catalog, detections, force);
   try { return await systemUpdateRefresh; }
   finally { systemUpdateRefresh = null; }
 }
@@ -819,7 +786,7 @@ async function graphSummary(graphPath) {
 async function getComponents(project, force = false) {
   const cached = componentCache.get(project.id);
   if (!force && cached && Date.now() - cached.at < 15000) return cached.value;
-  const graphifyCommand = fs.existsSync(GRAPHIFY_PYTHON) ? GRAPHIFY_PYTHON : 'python.exe';
+  const graphifyCommand = graphifyPythonCommand();
   const [codex, claude, hermes, ollama, graphifyCli, graph, branch, gitStatus, eccCommit, mcp] = await Promise.all([
     commandSummary('codex.exe', ['--version']),
     commandSummary('claude.exe', ['--version']),
@@ -851,14 +818,14 @@ async function getComponents(project, force = false) {
   return value;
 }
 
-async function findMatchingFiles(root, pattern, result = []) {
-  if (!root || !fs.existsSync(root) || result.length >= 40) return result;
+async function findMatchingFiles(root, pattern, result = [], depth = 0) {
+  if (!root || !fs.existsSync(root) || result.length >= 40 || depth > 5) return result;
   let entries = [];
   try { entries = await fsp.readdir(root, { withFileTypes: true }); } catch { return result; }
   for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue;
+    if (entry.name.startsWith('.') || ['node_modules', 'vendor', 'dist', 'build', 'coverage', '__pycache__'].includes(entry.name)) continue;
     const fullPath = path.join(root, entry.name);
-    if (entry.isDirectory()) await findMatchingFiles(fullPath, pattern, result);
+    if (entry.isDirectory()) await findMatchingFiles(fullPath, pattern, result, depth + 1);
     else if (entry.isFile() && pattern.test(entry.name)) result.push(fullPath);
     if (result.length >= 40) break;
   }
@@ -866,28 +833,20 @@ async function findMatchingFiles(root, pattern, result = []) {
 }
 
 async function loadSystemCatalog() {
-  const catalog = await readJsonFile(SYSTEM_CATALOG_PATH);
-  if (catalog.schemaVersion !== SYSTEM_CATALOG_SCHEMA_VERSION || !Array.isArray(catalog.systems)) throw new Error('System catalog is invalid.');
-  for (const definition of catalog.systems) {
-    if (!definition.id || !definition.name || !definition.detect || !['required', 'recommended', 'project'].includes(definition.tier)) {
-      throw new Error(`Invalid system definition: ${definition.id || definition.name || 'unknown'}`);
-    }
-    if ((definition.updateCheck && !definition.update) || (!definition.updateCheck && definition.update)) {
-      throw new Error(`Update check and update action must be configured together: ${definition.id}`);
-    }
-    if (definition.updateCheck && !['winget', 'npm', 'gitRemote'].includes(definition.updateCheck.type)) {
-      throw new Error(`Unsupported update source: ${definition.id}`);
-    }
-  }
-  return catalog.systems;
+  return normalizeCatalog(await readJsonFile(SYSTEM_CATALOG_PATH));
 }
 
 function expandSystemPath(value) {
   const variables = {
     HOME, LOCALAPPDATA: process.env.LOCALAPPDATA || '', APPDATA: process.env.APPDATA || '',
-    PROGRAMFILES: process.env.ProgramFiles || 'C:\\Program Files', OBSIDIAN_VAULT, ECC_ROOT,
+    PROGRAMFILES: process.env.ProgramFiles || 'C:\\Program Files', OBSIDIAN_VAULT, ECC_ROOT, COMFY_ROOT,
   };
-  return String(value || '').replace(/\{([A-Z_]+)\}/g, (_, key) => variables[key] || '');
+  let unresolved = false;
+  const expanded = String(value || '').replace(/\{([A-Z_]+)\}/g, (_, key) => {
+    if (!variables[key]) { unresolved = true; return ''; }
+    return variables[key];
+  });
+  return unresolved ? '' : expanded;
 }
 
 async function detectSystem(definition) {
@@ -905,11 +864,11 @@ async function detectSystem(definition) {
     return command;
   }
   if (detection.type === 'pythonModule') {
-    const python = fs.existsSync(GRAPHIFY_PYTHON) ? GRAPHIFY_PYTHON : 'python.exe';
+    const python = graphifyPythonCommand();
     return commandSummary(python, ['-m', detection.module, '--version']);
   }
   if (detection.type === 'path' || detection.type === 'pathOrCommand') {
-    const found = (detection.paths || []).map(expandSystemPath).find((candidate) => fs.existsSync(candidate));
+    const found = (detection.paths || []).map(expandSystemPath).find((candidate) => candidate && fs.existsSync(candidate));
     if (found && detection.type === 'pathOrCommand') {
       const summary = await commandSummary(found, detection.args || []);
       if (summary.ok) return { ...summary, path: found };
@@ -938,7 +897,13 @@ async function detectSystem(definition) {
   }
   if (detection.type === 'flux') {
     const matches = [];
-    const roots = (detection.roots || []).map(expandSystemPath);
+    const roots = (detection.roots || []).map(expandSystemPath).filter(Boolean);
+    const registry = await loadProjects();
+    for (const project of registry.projects) roots.push(path.join(path.dirname(project.repository), 'ComfyUI', 'models'));
+    const registeredSystems = await loadSystems();
+    for (const system of registeredSystems.systems.filter((candidate) => /comfy|flux/i.test(`${candidate.name} ${candidate.type} ${candidate.note}`))) {
+      roots.push(system.path, path.join(system.path, 'models'));
+    }
     if (fs.existsSync(COMFY_SETTINGS)) {
       try {
         const settings = JSON.parse(await fsp.readFile(COMFY_SETTINGS, 'utf8'));
@@ -956,11 +921,21 @@ async function detectSystem(definition) {
 async function detectProjectCapabilities(project) {
   const capabilities = new Set();
   const direct = (name) => fs.existsSync(path.join(project.repository, name));
+  const capabilityFile = path.join(project.repository, '.ai-project-control.json');
+  if (fs.existsSync(capabilityFile)) {
+    try {
+      const declared = await readJsonFile(capabilityFile);
+      for (const capability of Array.isArray(declared.capabilities) ? declared.capabilities : []) {
+        if (/^[a-z][a-z0-9-]{1,50}$/.test(String(capability))) capabilities.add(String(capability));
+      }
+    } catch {
+      // Invalid optional hints are ignored; deterministic repository signals still apply.
+    }
+  }
   if (direct('project.godot') || (await findMatchingFiles(project.repository, /^project\.godot$/i, [])).length) capabilities.add('godot');
   if (direct('package.json')) capabilities.add('node-development');
   if (direct('pyproject.toml') || direct('requirements.txt')) capabilities.add('python-development');
-  const assetSignals = ['Pics', 'Assets', 'Art', 'art', 'assets'].some(direct)
-    || (await findMatchingFiles(project.repository, /(?:asset|image|texture|sprite).*(?:workflow|pipeline)|(?:workflow|pipeline).*(?:asset|image|texture|sprite)/i, [])).length > 0;
+  const assetSignals = (await findMatchingFiles(project.repository, /(?:asset|image|texture|sprite).*(?:workflow|pipeline)|(?:workflow|pipeline).*(?:asset|image|texture|sprite)/i, [])).length > 0;
   if (assetSignals) { capabilities.add('image-generation'); capabilities.add('asset-pipeline'); }
   const mediaSignals = ['Audio', 'Video', 'Media', 'audio', 'video', 'media'].some(direct)
     || (await findMatchingFiles(project.repository, /\.(?:mp3|wav|ogg|mp4|webm)$/i, [])).length > 0;
@@ -968,12 +943,14 @@ async function detectProjectCapabilities(project) {
   return [...capabilities];
 }
 
-function catalogSystemRow(definition, detection, updateStatus, usedByProjects, activeProjectId) {
+function catalogSystemRow(catalog, definition, detection, updateStatus, usedByProjects, activeProjectId) {
+  const binding = getCatalogBinding(catalog, definition.id);
+  const operations = binding.packageDefinition?.operations || [];
   return {
     id: `auto-${definition.id}`, name: definition.name, category: definition.category,
     ok: Boolean(detection.ok), status: detection.ok ? 'vorhanden' : 'fehlt', detail: detection.text,
     path: detection.path || null, scope: 'global', autoDetected: true, tier: definition.tier,
-    installKey: definition.install ? definition.id : null, reason: definition.reason || null,
+    installKey: operations.includes('install') ? definition.id : null, reason: definition.reason || null,
     workflowRole: definition.workflowRole || null, activation: definition.activation || null,
     costPolicy: definition.costPolicy || null,
     updateStatus: updateStatus ? { ...updateStatus, updateKey: updateStatus.status === 'available' ? definition.id : null } : null,
@@ -984,18 +961,19 @@ function catalogSystemRow(definition, detection, updateStatus, usedByProjects, a
 
 async function getSystemInventory(project, force = false) {
   const registry = await loadProjects();
-  const definitions = await loadSystemCatalog();
+  const catalog = await loadSystemCatalog();
+  const definitions = catalog.systems;
   if (force || !systemCache || Date.now() - systemCacheAt > 60000) {
     const projectCapabilities = new Map();
     await Promise.all(registry.projects.map(async (candidate) => projectCapabilities.set(candidate.id, await detectProjectCapabilities(candidate))));
     const detections = await Promise.all(definitions.map(detectSystem));
-    const updates = await getSystemUpdateStatuses(definitions, detections, force);
+    const updates = await getSystemUpdateStatuses(catalog, detections, force);
     systemCache = definitions.map((definition, index) => {
       const required = definition.capabilities || [];
       const usedByProjects = required.length ? registry.projects
         .filter((candidate) => required.some((capability) => projectCapabilities.get(candidate.id).includes(capability)))
         .map((candidate) => ({ id: candidate.id, name: candidate.name })) : [];
-      return catalogSystemRow(definition, detections[index], updates.entries[definition.id] || null, usedByProjects, project.id);
+      return catalogSystemRow(catalog, definition, detections[index], updates.entries[definition.id] || null, usedByProjects, project.id);
     });
     systemCacheAt = Date.now();
   }
@@ -1021,7 +999,7 @@ async function getSystemInventory(project, force = false) {
     projectCapabilities,
     catalogPath: SYSTEM_CATALOG_PATH,
     updates: {
-      checkedAt: updateCache.checkedAt,
+      checkedAt: updateCache.generatedAt,
       available: systemCache.filter((system) => system.updateStatus?.status === 'available').length,
       unavailable: systemCache.filter((system) => system.updateStatus?.status === 'unknown').length,
     },
@@ -1029,6 +1007,14 @@ async function getSystemInventory(project, force = false) {
 }
 
 function snapshotJob(job) {
+  const cancellation = cancellationMetadata(job);
+  const executionState = ['running', 'stopping'].includes(job.status) ? 'running'
+    : job.status === 'completed' ? 'completed'
+      : job.status === 'blocked' ? 'blocked' : job.status === 'failed' ? 'failed' : job.status;
+  const deliveryState = executionState === 'running' ? 'agent-running'
+    : executionState === 'completed' && job.kind === 'task' && job.mode === 'Write' ? 'review-required'
+      : executionState === 'completed' ? 'result-ready'
+        : ['failed', 'blocked'].includes(executionState) ? 'attention-required' : 'pending';
   return {
     id: job.id, kind: job.kind || 'task', phase: job.phase || null,
     projectId: job.projectId, projectName: job.projectName,
@@ -1037,19 +1023,92 @@ function snapshotJob(job) {
     workingDirectory: job.workingDirectory, branch: job.branch || null, taskPreview: job.taskPreview,
     createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
     exitCode: job.exitCode, runDirectory: job.runDirectory, pid: job.pid,
-    stdout: job.stdout, stderr: job.stderr,
+    stdout: job.stdout, stderr: job.stderr, cancellable: cancellation.cancellable, cancellation,
+    executionState, deliveryState,
   };
+}
+
+function pruneJobs() {
+  if (jobs.size <= MAX_RETAINED_JOBS) return;
+  const removable = [...jobs.values()]
+    .filter((job) => !['running', 'stopping'].includes(job.status))
+    .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+  while (jobs.size > MAX_RETAINED_JOBS && removable.length) jobs.delete(removable.shift().id);
+}
+
+function persistedJob(job) {
+  const value = snapshotJob(job);
+  value.stdout = String(value.stdout || '').slice(-100000);
+  value.stderr = String(value.stderr || '').slice(-100000);
+  return value;
+}
+
+function scheduleJobPersistence() {
+  if (jobPersistTimer) return;
+  jobPersistTimer = setTimeout(() => {
+    jobPersistTimer = null;
+    const values = [...jobs.values()].map(persistedJob);
+    jobWriteChain = jobWriteChain.catch(() => {}).then(async () => {
+      await fsp.mkdir(DATA_ROOT, { recursive: true });
+      const temporary = `${JOBS_PATH}.${process.pid}.tmp`;
+      await fsp.writeFile(temporary, JSON.stringify({ schemaVersion: 1, jobs: values }, null, 2), 'utf8');
+      await fsp.rename(temporary, JOBS_PATH);
+    });
+  }, 250);
+  jobPersistTimer.unref?.();
+}
+
+function registerJob(job) {
+  jobs.set(job.id, job);
+  pruneJobs();
+  scheduleJobPersistence();
+  return job;
+}
+
+function recoverJobs(records, now = new Date().toISOString()) {
+  return (Array.isArray(records) ? records : []).map((stored) => {
+    const interrupted = ['running', 'stopping'].includes(stored?.status);
+    return {
+      ...stored,
+      status: interrupted ? 'failed' : stored.status,
+      phase: interrupted ? 'interrupted' : stored.phase,
+      finishedAt: interrupted ? now : stored.finishedAt,
+      stderr: interrupted
+        ? `${stored.stderr || ''}\nDashboard restarted before this job reached a terminal state.`.trim()
+        : stored.stderr,
+      pid: null,
+      child: null,
+      cancellable: false,
+    };
+  });
+}
+
+async function loadPersistedJobs() {
+  if (!fs.existsSync(JOBS_PATH)) return;
+  try {
+    const store = await readJsonFile(JOBS_PATH);
+    for (const stored of recoverJobs(store.jobs)) {
+      if (!stored?.id || jobs.has(stored.id)) continue;
+      jobs.set(stored.id, stored);
+    }
+    pruneJobs();
+  } catch {
+    // Corrupt optional history must not prevent the local control plane from starting.
+  }
 }
 
 function broadcastJob(job) {
   const payload = `event: job\ndata: ${JSON.stringify(snapshotJob(job))}\n\n`;
-  for (const client of liveClients) {
+  for (const [client, projectId] of liveClients) {
+    if (projectId && job.projectId !== projectId) continue;
     try { client.write(payload); }
     catch { liveClients.delete(client); }
   }
+  scheduleJobPersistence();
 }
 
 function serveLiveEvents(request, response) {
+  const projectId = new URL(request.url, `http://${HOST}:${PORT}`).searchParams.get('projectId');
   response.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -1057,8 +1116,10 @@ function serveLiveEvents(request, response) {
     'X-Accel-Buffering': 'no',
   });
   response.write('retry: 1000\n\n');
-  liveClients.add(response);
-  for (const job of jobs.values()) response.write(`event: job\ndata: ${JSON.stringify(snapshotJob(job))}\n\n`);
+  liveClients.set(response, projectId);
+  for (const job of jobs.values()) {
+    if (!projectId || job.projectId === projectId) response.write(`event: job\ndata: ${JSON.stringify(snapshotJob(job))}\n\n`);
+  }
   const keepAlive = setInterval(() => {
     try { response.write(`: keep-alive ${Date.now()}\n\n`); }
     catch { clearInterval(keepAlive); liveClients.delete(response); }
@@ -1165,13 +1226,12 @@ async function startTask(payload) {
       taskPreview: task.slice(0, 160), createdAt: now, startedAt: now, finishedAt: null, exitCode: null,
       runDirectory: null, pid: null, stdout: 'Projekt ' + registeredProject.name + ' wurde registriert. Obsidian ist verbunden.\n', stderr: '', child: null,
     };
-    jobs.set(id, job);
+    registerJob(job);
     (async () => {
       try {
         if (!fs.existsSync(registeredProject.graphPath)) {
           emitJob(job, 'graphify', 'Graphify-Index wird lokal mit Ollama aufgebaut');
-          const graphifyCommand = fs.existsSync(GRAPHIFY_PYTHON) ? GRAPHIFY_PYTHON : 'python.exe';
-          await runStreamingCommand(job, graphifyCommand, ['-m', 'graphify', 'extract', registeredProject.repository, '--backend', 'ollama', '--model', 'polis-coder', '--token-budget', '4096', '--max-concurrency', '1', '--out', registeredProject.repository], registeredProject.repository, 'graphify');
+          await runStreamingCommand(job, graphifyPythonCommand(), await graphifyArguments(registeredProject.repository), registeredProject.repository, 'graphify');
         }
         job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
         emitJob(job, 'complete', 'Projekt, Graphify und Obsidian sind verbunden');
@@ -1218,7 +1278,7 @@ async function startTask(payload) {
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), finishedAt: null,
     exitCode: null, runDirectory: null, pid: child.pid, stdout: '', stderr: '', child,
   };
-  jobs.set(id, job);
+  registerJob(job);
   broadcastJob(job);
   child.stdout.on('data', (chunk) => appendLog(job, 'stdout', chunk));
   child.stderr.on('data', (chunk) => appendLog(job, 'stderr', chunk));
@@ -1265,99 +1325,153 @@ function runStreamingCommand(job, command, args, cwd, label) {
   });
 }
 
-async function installSystem(payload) {
-  const { project } = await getProject(String(payload.projectId || ''));
-  const installKey = String(payload.installKey || '');
-  const definition = (await loadSystemCatalog()).find((candidate) => candidate.id === installKey);
-  const installer = definition?.install;
-  if (!installer) throw new Error('This system has no approved automatic installer.');
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const job = {
-    id, kind: 'install', phase: 'queued', projectId: project.id, projectName: project.name,
-    status: 'running', provider: 'Local setup', mode: 'Install', workingDirectory: project.repository,
-    taskPreview: `${installer.name} installieren`, createdAt: now, startedAt: now, finishedAt: null,
-    exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
-  };
-  jobs.set(id, job);
-  (async () => {
-    try {
-      await runStreamingCommand(job, installer.command, installer.args, project.repository, `Installation ${installer.name}`);
-      job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
-      emitJob(job, 'complete', `${installer.name} wurde installiert. Ein Neustart des Dashboards kann erforderlich sein.`);
-    } catch (error) {
-      job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
-      appendLog(job, 'stderr', `${error.message}\nInstallation wurde nicht als erfolgreich markiert.\n`);
-    } finally {
-      systemCache = null; systemCacheAt = 0; componentCache.clear();
+function reserveMaintenanceJob({ jobId, kind, systemId = null, projectId = null }) {
+  const active = [...jobs.values()].find((job) => ['install', 'update', 'provision'].includes(job.kind)
+    && ['running', 'stopping'].includes(job.status));
+  if (active) {
+    const error = new Error(`Maintenance is already running: ${active.taskPreview || active.kind}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const acquisition = tryAcquireMaintenanceJob(maintenanceGuard, { jobId, kind, systemId, projectId });
+  if (!acquisition.acquired) {
+    const error = new Error(`Maintenance is already reserved by ${acquisition.active.kind}.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  maintenanceGuard = acquisition.state;
+  return acquisition.lease;
+}
+
+function releaseMaintenanceLease(lease, outcome) {
+  const release = releaseMaintenanceJob(maintenanceGuard, lease, outcome);
+  if (release.released) maintenanceGuard = release.state;
+}
+
+async function runMaintenancePreflight(plan) {
+  for (const check of plan.preflight || []) {
+    const result = await execFileAsync(check.file, check.args, { cwd: check.cwd, timeout: 30000 });
+    if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `${check.kind} preflight failed.`);
+    const actual = result.stdout.trim();
+    if (check.kind === 'official-source') {
+      if (!sameGitRemote(actual, check.expected)) throw new Error('The configured Git remote is not the catalogued official source.');
+    } else if (actual !== check.expected) {
+      throw new Error('The installation contains local changes and cannot be updated automatically.');
     }
-  })();
-  return snapshotJob(job);
+  }
+}
+
+async function installSystem(payload) {
+  const id = randomUUID();
+  const installKey = String(payload.installKey || '');
+  const lease = reserveMaintenanceJob({ jobId: id, kind: 'install', systemId: installKey, projectId: String(payload.projectId || '') || null });
+  let handedOff = false;
+  try {
+    const { project } = await getProject(String(payload.projectId || ''));
+    const catalog = await loadSystemCatalog();
+    const plan = buildMaintenancePlan(catalog, installKey, 'install', { cwd: project.repository, expandPath: expandSystemPath });
+    const now = new Date().toISOString();
+    const job = {
+      id, kind: 'install', phase: 'preparing', projectId: project.id, projectName: project.name,
+      status: 'running', provider: 'Local setup', mode: 'Install', workingDirectory: project.repository,
+      taskPreview: `${plan.displayName} installieren`, createdAt: now, startedAt: now, finishedAt: null,
+      exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
+    };
+    registerJob(job); handedOff = true;
+    (async () => {
+      let outcome = 'failed';
+      try {
+        await runMaintenancePreflight(plan);
+        await runStreamingCommand(job, plan.command.file, plan.command.args, plan.command.cwd || project.repository, `Installation ${plan.displayName}`);
+        job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString(); outcome = 'completed';
+        emitJob(job, 'complete', `${plan.displayName} wurde installiert. Ein Neustart des Dashboards kann erforderlich sein.`);
+      } catch (error) {
+        job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
+        appendLog(job, 'stderr', `${error.message}\nInstallation wurde nicht als erfolgreich markiert.\n`);
+      } finally {
+        releaseMaintenanceLease(lease, outcome);
+        systemCache = null; systemCacheAt = 0; componentCache.clear();
+      }
+    })();
+    return snapshotJob(job);
+  } catch (error) {
+    if (!handedOff) releaseMaintenanceLease(lease, 'failed');
+    throw error;
+  }
 }
 
 async function updateSystem(payload) {
-  const { project } = await getProject(String(payload.projectId || ''));
-  const updateKey = String(payload.updateKey || '');
-  const definition = (await loadSystemCatalog()).find((candidate) => candidate.id === updateKey);
-  const updater = definition?.update;
-  if (!updater) throw new Error('This system has no approved automatic updater.');
-  const updateCache = await loadSystemUpdateCache();
-  if (updateCache.entries[updateKey]?.status !== 'available') throw new Error('No verified update is currently available for this system. Run a new check first.');
-  if (updater.preflight?.type === 'cleanGit') {
-    const repository = expandSystemPath(updater.preflight.path);
-    const status = await execFileAsync('git.exe', ['-C', repository, 'status', '--porcelain']);
-    if (status.exitCode !== 0) throw new Error('The Git installation to update could not be inspected.');
-    if (status.stdout.trim()) throw new Error('The Git installation contains local changes and cannot be updated automatically.');
-  }
   const id = randomUUID();
-  const now = new Date().toISOString();
-  const job = {
-    id, kind: 'update', phase: 'queued', projectId: project.id, projectName: project.name,
-    status: 'running', provider: 'Local setup', mode: 'Update', workingDirectory: project.repository,
-    taskPreview: `${updater.name} aktualisieren`, createdAt: now, startedAt: now, finishedAt: null,
-    exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
-  };
-  jobs.set(id, job);
-  (async () => {
-    try {
-      const args = (updater.args || []).map(expandSystemPath);
-      await runStreamingCommand(job, updater.command, args, project.repository, `Update ${updater.name}`);
-      job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
-      delete updateCache.entries[updateKey];
-      updateCache.checkedAt = null;
-      await saveSystemUpdateCache(updateCache);
-      emitJob(job, 'complete', `${updater.name} wurde aktualisiert. Starte das Dashboard neu, falls die laufende Komponente selbst betroffen ist.`);
-    } catch (error) {
-      job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
-      appendLog(job, 'stderr', `${error.message}\nUpdate wurde nicht als erfolgreich markiert.\n`);
-    } finally {
-      systemCache = null; systemCacheAt = 0; componentCache.clear(); providerModelCacheAt = 0;
-    }
-  })();
-  return snapshotJob(job);
+  const updateKey = String(payload.updateKey || '');
+  const lease = reserveMaintenanceJob({ jobId: id, kind: 'update', systemId: updateKey, projectId: String(payload.projectId || '') || null });
+  let handedOff = false;
+  try {
+    const { project } = await getProject(String(payload.projectId || ''));
+    const catalog = await loadSystemCatalog();
+    await getSystemInventory(project, true);
+    const updateCache = await loadSystemUpdateCache();
+    const consumed = consumeSystemUpdateAuthorization(catalog, updateCache, updateKey, { ttlMs: SYSTEM_UPDATE_TTL_MS });
+    const plan = buildMaintenancePlan(catalog, updateKey, 'update', {
+      cwd: project.repository,
+      expandPath: expandSystemPath,
+      branch: consumed.authorization.branch,
+    });
+    systemUpdateCache = consumed.cache;
+    await saveSystemUpdateCache(systemUpdateCache);
+    const now = new Date().toISOString();
+    const job = {
+      id, kind: 'update', phase: 'preparing', projectId: project.id, projectName: project.name,
+      status: 'running', provider: 'Local setup', mode: 'Update', workingDirectory: project.repository,
+      taskPreview: `${plan.displayName} aktualisieren`, createdAt: now, startedAt: now, finishedAt: null,
+      exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
+    };
+    registerJob(job); handedOff = true;
+    (async () => {
+      let outcome = 'failed';
+      try {
+        await runMaintenancePreflight(plan);
+        await runStreamingCommand(job, plan.command.file, plan.command.args, plan.command.cwd || project.repository, `Update ${plan.displayName}`);
+        job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString(); outcome = 'completed';
+        emitJob(job, 'complete', `${plan.displayName} wurde aktualisiert. Starte das Dashboard neu, falls die laufende Komponente selbst betroffen ist.`);
+      } catch (error) {
+        job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
+        appendLog(job, 'stderr', `${error.message}\nUpdate wurde nicht als erfolgreich markiert.\n`);
+      } finally {
+        releaseMaintenanceLease(lease, outcome);
+        systemCache = null; systemCacheAt = 0; componentCache.clear(); providerModelCacheAt = 0;
+      }
+    })();
+    return snapshotJob(job);
+  } catch (error) {
+    if (!handedOff) releaseMaintenanceLease(lease, 'failed');
+    throw error;
+  }
 }
 
 async function provisionProject(payload) {
-  const name = String(payload.name || '').trim();
+  const id = randomUUID();
+  const lease = reserveMaintenanceJob({ jobId: id, kind: 'provision' });
+  let handedOff = false;
+  try {
+  const name = projectDisplayName(payload.name);
   const slug = safeId(payload.slug || name);
-  const parentDirectory = path.resolve(String(payload.parentDirectory || path.join(HOME, 'Documents', 'Projects')).trim());
+  const parentDirectory = path.resolve(String(payload.parentDirectory || PROJECTS_ROOT).trim());
   const repository = path.join(parentDirectory, slug);
   const createGitHub = Boolean(payload.createGitHub);
   const visibility = payload.visibility === 'public' ? 'public' : 'private';
   const description = String(payload.description || '').trim().slice(0, 300);
-  if (!name || name.length > 80) throw new Error('Project name must contain between 1 and 80 characters.');
   if (!fs.existsSync(parentDirectory) || !fs.statSync(parentDirectory).isDirectory()) throw new Error('Parent directory does not exist.');
   if (fs.existsSync(repository)) throw new Error('Target project directory already exists.');
 
-  const id = randomUUID();
   const job = {
-    id, kind: 'provision', phase: 'queued', projectId: null, projectName: name, status: 'running', provider: 'Local setup', mode: 'Write',
+    id, kind: 'provision', phase: 'preparing', projectId: null, projectName: name, status: 'running', provider: 'Local setup', mode: 'Write',
     workingDirectory: repository, taskPreview: `Create project ${name}`, createdAt: new Date().toISOString(), startedAt: new Date().toISOString(),
     finishedAt: null, exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
   };
-  jobs.set(id, job);
+  registerJob(job); handedOff = true;
 
   (async () => {
+    let outcome = 'failed';
     try {
       emitJob(job, 'filesystem', `Projektordner wird erstellt: ${repository}`);
       await fsp.mkdir(path.join(repository, 'Docs'), { recursive: true });
@@ -1382,11 +1496,11 @@ async function provisionProject(payload) {
       for (const directory of ['Working Notes', 'Research', 'Design Drafts', 'Review Notes', 'Prompt Library', 'Lessons Learned', 'AI Runs']) {
         await fsp.mkdir(path.join(obsidianPath, directory), { recursive: true });
       }
-      await fsp.writeFile(path.join(obsidianPath, `${name} Dashboard.md`), `---\ntitle: ${name} Dashboard\ntags:\n  - project\n  - active\n---\n\n# ${name} Dashboard\n\n> [!important] Source of truth\n> Official project information remains in the Git repository. This area contains working knowledge only.\n\n- Repository: ${repository}\n- Agent rules: ${path.join(repository, 'AGENTS.md')}\n- Current task: ${path.join(repository, 'Docs', 'CURRENT_TASK.md')}\n- Architecture: ${path.join(repository, 'Docs', 'ARCHITECTURE.md')}\n- Changelog: ${path.join(repository, 'Docs', 'CHANGELOG.md')}\n\n## Workspace\n\n- [[Working Notes]]\n- [[Research]]\n- [[Review Notes]]\n- [[Lessons Learned]]\n`, 'utf8');
+      await fsp.writeFile(path.join(obsidianPath, `${name} Dashboard.md`), `---\ntitle: ${yamlScalar(name + ' Dashboard')}\ntags:\n  - project\n  - active\n---\n\n# ${name} Dashboard\n\n> [!important] Source of truth\n> Official project information remains in the Git repository. This area contains working knowledge only.\n\n- Repository: ${repository}\n- Agent rules: ${path.join(repository, 'AGENTS.md')}\n- Current task: ${path.join(repository, 'Docs', 'CURRENT_TASK.md')}\n- Architecture: ${path.join(repository, 'Docs', 'ARCHITECTURE.md')}\n- Changelog: ${path.join(repository, 'Docs', 'CHANGELOG.md')}\n\n## Workspace\n\n- [[Working Notes]]\n- [[Research]]\n- [[Review Notes]]\n- [[Lessons Learned]]\n`, 'utf8');
 
       const graphPath = path.join(repository, 'graphify-out', 'graph.json');
       emitJob(job, 'graphify', 'Lokaler Graphify-Index wird mit Ollama aufgebaut');
-      await runStreamingCommand(job, GRAPHIFY_PYTHON, ['-m', 'graphify', 'extract', repository, '--backend', 'ollama', '--model', 'polis-coder', '--token-budget', '4096', '--max-concurrency', '1', '--out', repository], repository, 'graphify');
+      await runStreamingCommand(job, graphifyPythonCommand(), await graphifyArguments(repository), repository, 'graphify');
 
       if (createGitHub) {
         emitJob(job, 'github', `GitHub-Repository wird ${visibility} erstellt`);
@@ -1397,20 +1511,33 @@ async function provisionProject(payload) {
 
       const project = await addProject({ name, repository, graphPath, obsidianPath });
       job.projectId = project.id; job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
+      outcome = 'completed';
       emitJob(job, 'complete', `${name} ist registriert und einsatzbereit`);
     } catch (error) {
       job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
       appendLog(job, 'stderr', `${error.message}\nBestehende Dateien wurden zur Diagnose nicht gelöscht.\n`);
+    } finally {
+      releaseMaintenanceLease(lease, outcome);
     }
   })();
   return snapshotJob(job);
+  } catch (error) {
+    if (!handedOff) releaseMaintenanceLease(lease, 'failed');
+    throw error;
+  }
 }
 
 async function stopJob(id) {
   const job = jobs.get(id);
-  if (!job || job.status !== 'running' || !job.pid) throw new Error('Running job not found.');
+  if (!job) throw new Error('Running job not found.');
+  const target = resolveCancellationTarget(job);
+  if (target.mode === 'queued') {
+    job.status = 'failed'; job.phase = 'cancelled'; job.finishedAt = new Date().toISOString(); job.exitCode = 1;
+    appendLog(job, 'stderr', 'Job was cancelled before a child process started.\n');
+    return snapshotJob(job);
+  }
   job.status = 'stopping';
-  const result = await execFileAsync('taskkill.exe', ['/PID', String(job.pid), '/T', '/F'], { timeout: 15000 });
+  const result = await execFileAsync('taskkill.exe', ['/PID', String(target.pid), '/T', '/F'], { timeout: 15000 });
   if (result.exitCode !== 0) { job.status = 'running'; throw new Error(result.stderr.trim() || 'Could not stop the job.'); }
   return snapshotJob(job);
 }
@@ -1482,7 +1609,7 @@ async function runRecord(directory, projectId) {
   if (fs.existsSync(taskPath)) taskPackage = await readBounded(taskPath);
   const taggedProject = runProjectId(taskPackage);
   if (taggedProject && taggedProject !== projectId) return null;
-  if (!taggedProject && projectId !== 'polis') return null;
+  if (!taggedProject) return null;
   const stat = await fsp.stat(directory);
   let result = null;
   const resultPath = path.join(directory, 'routing-result.json');
@@ -1556,15 +1683,24 @@ async function portfolioProject(project) {
     } catch { graphStatus = 'fehlerhaft'; }
   }
   let state = 'Wartet'; let stateClass = 'attention'; let nextAction = 'Neue Aufgabe definieren';
+  let executionState = 'idle'; let deliveryState = 'not-started';
   if (!components.repository.ok || latest?.status === 'FAIL' || latest?.status === 'BLOCKED') {
     state = 'Blockiert'; stateClass = 'blocked'; nextAction = latest?.status === 'FAIL' ? 'Fehlgeschlagenen Lauf prüfen' : 'Repository-Verbindung prüfen';
     if (latest?.status === 'BLOCKED') nextAction = 'Gemeldete Blockade prüfen';
+    executionState = latest?.status === 'BLOCKED' ? 'blocked' : 'failed'; deliveryState = 'attention-required';
   } else if (running) {
-    state = 'Aktiv'; stateClass = 'active'; nextAction = 'Lauf im Live-Feed beobachten';
+    state = 'Agent arbeitet'; stateClass = 'active'; nextAction = 'Lauf im Projektgespräch beobachten';
+    executionState = 'running'; deliveryState = 'agent-running';
   } else if (latest?.status === 'PASS') {
-    state = 'Aufgabe abgeschlossen'; stateClass = 'ready'; nextAction = 'Ergebnis und Änderungen im Aufgabenbranch prüfen';
+    executionState = 'completed';
+    if (String(latest.mode || '').toLowerCase() === 'write') {
+      state = 'Bereit zur Prüfung'; stateClass = 'ready'; nextAction = 'Ergebnis und Änderungen im Aufgabenbranch prüfen'; deliveryState = 'review-required';
+    } else {
+      state = 'Analyse fertig'; stateClass = 'ready'; nextAction = 'Ergebnis prüfen'; deliveryState = 'result-ready';
+    }
   } else if (latest) {
     state = 'Wartet'; stateClass = 'attention'; nextAction = 'Letzten Lauf prüfen';
+    executionState = 'unknown'; deliveryState = 'attention-required';
   }
   return {
     id: project.id, name: project.name, state, stateClass,
@@ -1574,20 +1710,28 @@ async function portfolioProject(project) {
     running: running ? { provider: running.provider, phase: running.phase, startedAt: running.startedAt } : null,
     repository: components.repository, graph: { status: graphStatus, ok: graphStatus === 'aktuell' },
     obsidian: { ok: components.obsidian.ok, notes: obsidianNotes }, nextAction,
+    executionState, deliveryState,
   };
 }
 
 async function getPortfolio() {
   const registry = await loadProjects();
-  const selected = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
-  const project = await portfolioProject(selected);
+  const projects = await Promise.all(registry.projects.map(portfolioProject));
+  const project = projects.find((candidate) => candidate.id === registry.activeProjectId) || projects[0];
   const attention = [];
-  if (!project.repository.ok) attention.push({ severity: 'error', message: 'Repository ist nicht erreichbar.', target: 'git' });
-  if (project.latestStatus === 'FAIL') attention.push({ severity: 'error', message: 'Der letzte Task ist fehlgeschlagen.', target: 'tasks' });
-  if (project.repository.ok && !project.repository.clean) attention.push({ severity: 'warning', message: 'Das Repository enthält noch nicht eingeordnete Änderungen.', target: 'git' });
-  if (project.graph.status === 'fehlt' || project.graph.status === 'fehlerhaft') attention.push({ severity: 'warning', message: 'Der Graphify-Index fehlt oder ist nicht lesbar.', target: 'knowledge' });
-  if (project.graph.status === 'veraltet') attention.push({ severity: 'warning', message: 'Der Graphify-Index basiert nicht auf dem aktuellen Commit.', target: 'knowledge' });
-  return { generatedAt: new Date().toISOString(), activeProjectId: registry.activeProjectId, attention, project };
+  for (const candidate of projects) {
+    const context = { projectId: candidate.id, projectName: candidate.name };
+    if (!candidate.repository.ok) attention.push({ ...context, severity: 'error', message: 'Repository ist nicht erreichbar.', target: 'git' });
+    if (candidate.latestStatus === 'FAIL') attention.push({ ...context, severity: 'error', message: 'Der letzte Task ist fehlgeschlagen.', target: 'tasks' });
+    if (candidate.latestStatus === 'BLOCKED') attention.push({ ...context, severity: 'error', message: 'Der letzte Task ist blockiert.', target: 'tasks' });
+    if (candidate.deliveryState === 'review-required') attention.push({ ...context, severity: 'warning', message: 'Agent fertig; Änderungen müssen geprüft werden.', target: 'git' });
+    if (candidate.repository.ok && !candidate.repository.clean) attention.push({ ...context, severity: 'warning', message: 'Das Repository enthält noch nicht eingeordnete Änderungen.', target: 'git' });
+    if (candidate.graph.status === 'fehlt' || candidate.graph.status === 'fehlerhaft') attention.push({ ...context, severity: 'warning', message: 'Der Graphify-Index fehlt oder ist nicht lesbar.', target: 'knowledge' });
+    if (candidate.graph.status === 'veraltet') attention.push({ ...context, severity: 'warning', message: 'Der Graphify-Index basiert nicht auf dem aktuellen Commit.', target: 'knowledge' });
+  }
+  const severityRank = { error: 0, warning: 1, info: 2 };
+  attention.sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9));
+  return { generatedAt: new Date().toISOString(), activeProjectId: registry.activeProjectId, attention, project, projects };
 }
 
 function endpointId(value) {
@@ -1711,6 +1855,20 @@ function parseGitWorktrees(output) {
   }).filter((entry) => entry.path);
 }
 
+function authorizeRemoteBranchDelete({ branch, expectedOid, currentOid, integrated }) {
+  if (!/^ai\/[a-z0-9][a-z0-9._/-]*$/i.test(String(branch || ''))) {
+    throw new Error('Only an ai/* task branch can be considered for remote deletion.');
+  }
+  if (integrated !== true) throw new Error('The task branch is not contained in the integration branch.');
+  if (!/^[a-f0-9]{40}$/i.test(String(expectedOid || '')) || !/^[a-f0-9]{40}$/i.test(String(currentOid || ''))) {
+    throw new Error('A complete remote OID lease is required.');
+  }
+  if (String(expectedOid).toLowerCase() !== String(currentOid).toLowerCase()) {
+    throw new Error('The remote branch changed after confirmation; the OID lease is no longer valid.');
+  }
+  return true;
+}
+
 async function getProjectWorktrees(project) {
   const result = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'list', '--porcelain']);
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Git worktree list failed.');
@@ -1794,13 +1952,18 @@ async function getGitState(project, requestedWorktree = null) {
     const integrated = await execFileAsync('git.exe', ['-C', project.repository, 'merge-base', '--is-ancestor', candidate.branch, integrationBranch]);
     if (integrated.exitCode === 0) cleanupCandidates.push({ path: candidate.path, branch: candidate.branch });
   }
+  const deliveryState = files.length ? 'changes-pending'
+    : target.branch?.startsWith('ai/') && alreadyIntegrated ? 'integrated'
+      : target.branch?.startsWith('ai/') ? 'committed'
+        : target.branch === integrationBranch && ahead > 0 ? 'integrated-unpublished'
+          : 'clean';
   return {
     projectId: project.id, projectName: project.name, repository: project.repository,
     worktree: workingDirectory, worktreeKind: target.kind, mainCheckout: target.mainCheckout, targets,
     branch: currentBranch, commitDraft: await getCommitDraft(project.id, currentBranch), remote: remote.exitCode === 0 ? remote.stdout.trim() : null,
     githubAuthenticated: ghAuth.exitCode === 0, clean: files.length === 0, files,
     ahead, behind, hasUpstream: upstream.exitCode === 0,
-    lastCommit: hash ? { hash, subject, committedAt } : null, cleanupCandidates,
+    lastCommit: hash ? { hash, subject, committedAt } : null, cleanupCandidates, deliveryState,
     integration: {
       branch: integrationBranch, worktree: integrationTarget?.path || null,
       selectedIsIntegration: target.branch === integrationBranch,
@@ -1818,17 +1981,14 @@ async function getGitState(project, requestedWorktree = null) {
 }
 
 async function removeIntegratedTaskWorktree(project, state) {
-  const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${state.branch}`]);
-  if (remoteBranch.exitCode === 0) {
-    const remoteDelete = await execFileAsync('git.exe', ['-C', state.integration.worktree, 'push', 'origin', '--delete', state.branch], { timeout: 180000 });
-    if (remoteDelete.exitCode !== 0) throw new Error(`Deleting remote task branch ${state.branch} failed: ${remoteDelete.stderr.trim() || remoteDelete.stdout.trim()}`);
-  }
+  const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'ls-remote', '--heads', 'origin', `refs/heads/${state.branch}`]);
+  const remoteSha = remoteBranch.exitCode === 0 ? remoteBranch.stdout.trim().split(/\s+/, 1)[0] || null : null;
   const removeWorktree = await execFileAsync('git.exe', ['-C', project.repository, 'worktree', 'remove', state.worktree], { timeout: 120000 });
   if (removeWorktree.exitCode !== 0) throw new Error(`Removing task worktree ${state.worktree} failed: ${removeWorktree.stderr.trim() || removeWorktree.stdout.trim()}`);
   const deleteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'branch', '-d', state.branch]);
   if (deleteBranch.exitCode !== 0) throw new Error(`Deleting local task branch ${state.branch} failed: ${deleteBranch.stderr.trim() || deleteBranch.stdout.trim()}`);
   await clearCommitDraft(project.id, state.branch);
-  return { branch: state.branch, remoteDeleted: remoteBranch.exitCode === 0 };
+  return { branch: state.branch, remotePreserved: Boolean(remoteSha), remoteSha };
 }
 
 async function updateCommitDraft(payload) {
@@ -1857,7 +2017,8 @@ async function integrateGitWorktree(payload) {
     ok: true,
     output: (merge.stdout || merge.stderr).trim(),
     deletedBranch: cleanup.branch,
-    deletedRemoteBranch: cleanup.remoteDeleted,
+    deletedRemoteBranch: false,
+    remoteBranchPreserved: cleanup.remotePreserved,
     alreadyIntegrated: state.integration.alreadyIntegrated,
     state: await getGitState(project, state.integration.worktree),
   };
@@ -1892,7 +2053,12 @@ async function getGitFileDiff(project, requestedPath, requestedWorktree = null) 
   const limit = 400000;
   let text = '';
   if (file.untracked) {
-    const absolute = path.join(state.worktree, filePath);
+    const root = await fsp.realpath(state.worktree);
+    const requested = path.resolve(state.worktree, filePath);
+    const linkStat = await fsp.lstat(requested);
+    if (linkStat.isSymbolicLink()) throw new Error('Untracked symbolic links cannot be previewed.');
+    const absolute = await fsp.realpath(requested);
+    if (!withinRoot(root, absolute)) throw new Error('Requested file resolves outside the selected worktree.');
     const stat = await fsp.stat(absolute);
     if (stat.size > limit) return { path: filePath, diff: `Neue Datei · ${stat.size} Bytes`, truncated: false, binary: Boolean(imageType), imageUrl };
     const buffer = await fsp.readFile(absolute);
@@ -1980,6 +2146,7 @@ async function serveStatic(requestPath, response) {
 
 const server = http.createServer(async (request, response) => {
   try {
+    assertRequestBoundary(request);
     const url = new URL(request.url, `http://${HOST}:${PORT}`);
     if (request.method === 'GET' && url.pathname === '/api/health') return sendJson(response, 200, { status: 'ok', pid: process.pid, host: HOST, port: PORT });
     if (request.method === 'GET' && url.pathname === '/api/events') return serveLiveEvents(request, response);
@@ -2022,7 +2189,7 @@ const server = http.createServer(async (request, response) => {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getGitFileDiff(project, url.searchParams.get('path'), url.searchParams.get('worktree')));
     }
     if (request.method === 'GET' && url.pathname === '/api/git/image') {
-      const { project } = await getProject(projectId); return serveGitFileImage(project, url.searchParams.get('path'), url.searchParams.get('worktree'), response);
+      const { project } = await getProject(projectId); return await serveGitFileImage(project, url.searchParams.get('path'), url.searchParams.get('worktree'), response);
     }
     if (request.method === 'POST' && url.pathname === '/api/git/commit') return sendJson(response, 200, await commitGitChanges(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/commit-draft') return sendJson(response, 200, await updateCommitDraft(await readJsonBody(request)));
@@ -2030,17 +2197,17 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/git/integrate') return sendJson(response, 200, await integrateGitWorktree(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/git/cleanup-merged') return sendJson(response, 200, await cleanupMergedGitWorktrees(await readJsonBody(request)));
     if (request.method === 'GET' && url.pathname === '/api/jobs') {
-      const rows = Array.from(jobs.values()).map(snapshotJob).filter((job) => !projectId || job.projectId === projectId || job.kind === 'provision' || job.kind === 'dashboard-command').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const rows = Array.from(jobs.values()).map(snapshotJob).filter((job) => !projectId || job.projectId === projectId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       return sendJson(response, 200, rows);
     }
     if (request.method === 'GET' && url.pathname === '/api/runs') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await listRuns(project.id));
     }
-    if (request.method === 'GET' && url.pathname === '/api/task-attachment') return serveTaskAttachment(url, response);
+    if (request.method === 'GET' && url.pathname === '/api/task-attachment') return await serveTaskAttachment(url, response);
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, {
       runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT,
-      defaultProjectParent: fs.existsSync('C:\\Repos') ? 'C:\\Repos' : path.join(HOME, 'Documents', 'Projects'),
-      providerModels: await getProviderModelCatalog(), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
+      defaultProjectParent: PROJECTS_ROOT,
+      providerModels: await getProviderModelCatalog(url.searchParams.get('force') === '1'), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
     });
     if (request.method === 'POST' && url.pathname === '/api/tasks') return sendJson(response, 202, await startTask(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/projects/provision') return sendJson(response, 202, await provisionProject(await readJsonBody(request)));
@@ -2049,10 +2216,10 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/open-run') {
       const body = await readJsonBody(request); await openRun(body.path); return sendJson(response, 200, { status: 'opened' });
     }
-    if (request.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(url.pathname, response);
+    if (request.method === 'GET' && !url.pathname.startsWith('/api/')) return await serveStatic(url.pathname, response);
     sendError(response, 404, 'Not found');
   } catch (error) {
-    sendError(response, 400, error.message || 'Request failed');
+    sendError(response, Number(error.statusCode) || 400, error.message || 'Request failed');
   }
 });
 
@@ -2065,10 +2232,20 @@ if (require.main === module) {
   server.listen(PORT, HOST, async () => {
     await fsp.mkdir(RUN_ROOT, { recursive: true });
     await loadProjects();
+    await loadPersistedJobs();
     process.stdout.write(`AI_PROJECT_CONTROL_READY http://${HOST}:${PORT}\n`);
   });
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-module.exports = { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels, extractVersion, parseWingetUpgradeOutput };
+module.exports = {
+  defaultCommitMessage,
+  taskBranchSlug,
+  normalizeProviderOrder,
+  normalizeProviderModels,
+  extractVersion,
+  parseWingetUpgradeOutput,
+  recoverJobs,
+  authorizeRemoteBranchDelete,
+};

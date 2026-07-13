@@ -26,7 +26,7 @@ That extract is supplemental. The task package, current worktree, Git status, di
 
 ## Git And GitHub
 
-Git status, branch, upstream, remote, worktrees and text diffs are read through the local Git CLI. GitHub authentication is reported through GitHub CLI. Commit, task-to-target fast-forward, cleanup and push are owner-triggered actions in separate confirmation steps. A safe fast-forward never resolves conflicts. It targets the separate integration branch when one exists and otherwise explicitly targets `main`; only a separate integration branch is intended to enter `main` through a reviewed pull request. The dashboard never force-pushes or edits repository files in the review view.
+Git status, branch, upstream, remote, worktrees and per-file diffs are read through the local Git CLI. GitHub authentication is reported through GitHub CLI. Commit, task-to-target fast-forward, cleanup and push are owner-triggered actions in separate confirmation steps. A safe fast-forward never resolves conflicts. It targets the separate integration branch when one exists and otherwise explicitly targets `main`; only a separate integration branch is intended to enter `main` through a reviewed pull request. Integration removes the completed local task worktree and branch but preserves any remote branch. The dashboard never force-pushes or edits repository files in the review view.
 
 ## Hermes And ECC
 
@@ -40,6 +40,6 @@ MCP connects an agent to external tools through a standard protocol. MCP itself 
 
 The current setup adds Serena to Codex and Claude Code as the one code-semantic MCP integration. Codex also has its local `node_repl` server. This remains intentionally small. CLI tools remain preferable when they cover the same operation because each MCP tool schema consumes context.
 
-## Polis Flux And ComfyUI
+## Flux And ComfyUI
 
-Polis uses the local `flux1-schnell-fp8.safetensors` checkpoint through the ComfyUI asset pipeline. The checkpoint is stored outside the repository under `C:\Repos\ComfyUI\models\checkpoints`. The inventory searches this canonical installation as well as optional Comfy Desktop model roots; it must not report the installed Polis model as missing merely because Comfy Desktop uses a different settings file.
+Flux and ComfyUI are project-dependent image-generation tools, not dashboard foundations. Detection uses Comfy Desktop settings, the optional `AI_PROJECT_CONTROL_COMFY_ROOT` location and `ComfyUI` siblings of registered repository roots. A custom portable installation can also be registered in System Inventory. These tools appear as relevant only for projects that explicitly declare or contain a bounded image-generation workflow signal.

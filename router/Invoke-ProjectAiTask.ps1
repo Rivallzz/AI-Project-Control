@@ -11,7 +11,7 @@ param(
     [string]$ProjectName = 'Project',
     [string]$CodexModel = 'default',
     [string]$ClaudeModel = 'default',
-    [string]$OllamaModel = 'polis-coder',
+    [string]$OllamaModel = 'default',
     [string]$RunRoot = (Join-Path $env:USERPROFILE 'Documents\AI-Runs'),
     [switch]$LocalOnly,
     [switch]$AllowDirtyWorkingTree,
@@ -74,6 +74,197 @@ function Invoke-CapturedProcess {
         Stdout = $stdout.ToString()
         Stderr = $stderrTask.GetAwaiter().GetResult()
     }
+}
+
+function Test-PathWithinRoot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    $comparison = if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        [System.StringComparison]::OrdinalIgnoreCase
+    }
+    else {
+        [System.StringComparison]::Ordinal
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    if ($fullPath.Equals($fullRoot, $comparison)) { return $true }
+    return $fullPath.StartsWith($fullRoot + [System.IO.Path]::DirectorySeparatorChar, $comparison)
+}
+
+function Get-GitNulPathList {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $output = (& git -c core.quotePath=false -C $RepositoryPath @Arguments | Out-String -NoNewline)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git could not enumerate the repository snapshot: git $($Arguments -join ' ')"
+    }
+    return @($output.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries))
+}
+
+function Copy-RepositoryContentSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$DestinationPath
+    )
+
+    $headPaths = Get-GitNulPathList -RepositoryPath $SourcePath -Arguments @('ls-tree', '-r', '-z', '--name-only', 'HEAD')
+    $workingPaths = Get-GitNulPathList -RepositoryPath $SourcePath -Arguments @('ls-files', '-z', '--cached', '--others', '--exclude-standard')
+    $snapshotPaths = @((@($headPaths) + @($workingPaths)) | Sort-Object -Unique)
+
+    foreach ($relativePath in $snapshotPaths) {
+        if ([System.IO.Path]::IsPathRooted($relativePath)) {
+            throw "Git returned an unsafe rooted snapshot path: $relativePath"
+        }
+        $sourceItemPath = [System.IO.Path]::GetFullPath((Join-Path $SourcePath $relativePath))
+        $destinationItemPath = [System.IO.Path]::GetFullPath((Join-Path $DestinationPath $relativePath))
+        if (-not (Test-PathWithinRoot -Path $sourceItemPath -Root $SourcePath) -or
+            -not (Test-PathWithinRoot -Path $destinationItemPath -Root $DestinationPath)) {
+            throw "Git returned an unsafe snapshot path: $relativePath"
+        }
+
+        $sourceItem = Get-Item -LiteralPath $sourceItemPath -Force -ErrorAction SilentlyContinue
+        $destinationItem = Get-Item -LiteralPath $destinationItemPath -Force -ErrorAction SilentlyContinue
+        if ($null -eq $sourceItem) {
+            if ($null -ne $destinationItem) {
+                Remove-Item -LiteralPath $destinationItemPath -Recurse -Force
+            }
+            continue
+        }
+
+        if ($null -ne $destinationItem -and $sourceItem.PSIsContainer -ne $destinationItem.PSIsContainer) {
+            Remove-Item -LiteralPath $destinationItemPath -Recurse -Force
+            $destinationItem = $null
+        }
+        $destinationParent = Split-Path -Parent $destinationItemPath
+        New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null
+        if ($sourceItem.PSIsContainer) {
+            if ($null -ne $destinationItem) { Remove-Item -LiteralPath $destinationItemPath -Recurse -Force }
+            Copy-Item -LiteralPath $sourceItemPath -Destination $destinationItemPath -Recurse -Force
+        }
+        else {
+            Copy-Item -LiteralPath $sourceItemPath -Destination $destinationItemPath -Force
+        }
+    }
+
+    # Graphify output is intentionally ignored by Git but remains relevant read-only context.
+    $sourceGraph = Join-Path $SourcePath 'graphify-out\graph.json'
+    if (Test-Path -LiteralPath $sourceGraph -PathType Leaf) {
+        $destinationGraph = Join-Path $DestinationPath 'graphify-out\graph.json'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destinationGraph) | Out-Null
+        Copy-Item -LiteralPath $sourceGraph -Destination $destinationGraph -Force
+    }
+}
+
+function New-DisposableReadOnlyCheckout {
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$CheckoutPath
+    )
+
+    if (Test-PathWithinRoot -Path $CheckoutPath -Root $SourcePath) {
+        throw 'Read-only isolation requires RunRoot to be outside the canonical checkout.'
+    }
+    if (Test-Path -LiteralPath $CheckoutPath) {
+        throw "Disposable read-only checkout already exists: $CheckoutPath"
+    }
+
+    $worktreeAdded = $false
+    try {
+        & git -C $SourcePath worktree add --detach $CheckoutPath HEAD | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the disposable read-only checkout.' }
+        $worktreeAdded = $true
+        Copy-RepositoryContentSnapshot -SourcePath $SourcePath -DestinationPath $CheckoutPath
+        return $CheckoutPath
+    }
+    catch {
+        if ($worktreeAdded) {
+            Remove-DisposableReadOnlyCheckout -SourcePath $SourcePath -CheckoutPath $CheckoutPath -ExpectedParent (Split-Path -Parent $CheckoutPath)
+        }
+        throw
+    }
+}
+
+function Get-ContentManifest {
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $manifest = @{}
+    $fullRoot = [System.IO.Path]::GetFullPath($RootPath).TrimEnd('\', '/')
+    $gitMarker = Join-Path $fullRoot '.git'
+    $files = Get-ChildItem -LiteralPath $fullRoot -Recurse -Force -File |
+        Where-Object { $_.FullName -ne $gitMarker } |
+        Sort-Object FullName
+    foreach ($file in $files) {
+        $relativePath = $file.FullName.Substring($fullRoot.Length).TrimStart('\', '/').Replace('\', '/')
+        $linkType = if ($file.PSObject.Properties['LinkType']) { [string]$file.LinkType } else { '' }
+        if ($linkType) {
+            $linkTarget = if ($file.PSObject.Properties['Target']) { @($file.Target) -join '|' } else { '' }
+            $manifest[$relativePath] = "link:${linkType}:$linkTarget"
+        }
+        else {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+            $manifest[$relativePath] = "file:$($file.Length):$hash"
+        }
+    }
+    return $manifest
+}
+
+function Compare-ContentManifest {
+    param(
+        [Parameter(Mandatory)][hashtable]$Before,
+        [Parameter(Mandatory)][hashtable]$After
+    )
+
+    $changes = @(
+        foreach ($relativePath in @((@($Before.Keys) + @($After.Keys)) | Sort-Object -Unique)) {
+            if (-not $Before.ContainsKey($relativePath)) {
+                [pscustomobject]@{ path = $relativePath; change = 'added'; before = $null; after = $After[$relativePath] }
+            }
+            elseif (-not $After.ContainsKey($relativePath)) {
+                [pscustomobject]@{ path = $relativePath; change = 'deleted'; before = $Before[$relativePath]; after = $null }
+            }
+            elseif ($Before[$relativePath] -ne $After[$relativePath]) {
+                [pscustomobject]@{ path = $relativePath; change = 'modified'; before = $Before[$relativePath]; after = $After[$relativePath] }
+            }
+        }
+    )
+    return $changes
+}
+
+function Remove-DisposableReadOnlyCheckout {
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$CheckoutPath,
+        [Parameter(Mandatory)][string]$ExpectedParent
+    )
+
+    if (-not (Test-PathWithinRoot -Path $CheckoutPath -Root $ExpectedParent)) {
+        throw "Refusing to clean a disposable checkout outside its attempt directory: $CheckoutPath"
+    }
+
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & git -C $SourcePath worktree remove --force $CheckoutPath 2>&1 | Out-Null
+        if (Test-Path -LiteralPath $CheckoutPath) {
+            Remove-Item -LiteralPath $CheckoutPath -Recurse -Force -ErrorAction Continue
+        }
+        & git -C $SourcePath worktree prune 2>&1 | Out-Null
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+
+    if (Test-Path -LiteralPath $CheckoutPath) {
+        throw "Could not clean the disposable read-only checkout: $CheckoutPath"
+    }
+    [Console]::Out.WriteLine("AI_EVENT provider=router state=sandbox-cleaned path=$CheckoutPath")
+    [Console]::Out.Flush()
 }
 
 function Test-UsageLimitFailure {
@@ -163,8 +354,10 @@ $workingPath = (Resolve-Path -LiteralPath $WorkingDirectory).Path
 $taskPackageRaw = Get-Content -LiteralPath $taskPath -Raw
 $goalMatch = [regex]::Match($taskPackageRaw, '(?s)## Goal\s*(.+)$')
 $taskGoal = if ($goalMatch.Success) { $goalMatch.Groups[1].Value.Trim() } else { $taskPackageRaw.Trim() }
+$OllamaModel = $OllamaModel.Trim()
 $statusScript = Join-Path $PSScriptRoot 'Get-AiProviderStatus.ps1'
-$status = (& $statusScript -Json | Out-String) | ConvertFrom-Json
+$status = (& $statusScript -Json -OllamaModel $OllamaModel | Out-String) | ConvertFrom-Json
+if ($OllamaModel -eq 'default' -and $status.ollama.model) { $OllamaModel = [string]$status.ollama.model }
 
 $gitBefore = (& git -C $workingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
 if ($Mode -eq 'Write' -and $gitBefore -and -not $AllowDirtyWorkingTree) {
@@ -215,7 +408,7 @@ $prompt = @"
 You are executing a controlled task for the local project "$ProjectName".
 
 Mandatory workflow:
-1. Read AGENTS.md before any project analysis or change when it exists. For Polis, AGENTS.md is mandatory.
+1. Read AGENTS.md before any project analysis or change when it exists.
 2. Treat Git and current repository files as authoritative.
 3. Use Graphify for focused discovery when graphify-out/graph.json exists, then read every relevant original file directly.
 4. For code work, use Serena's `initial_instructions` and symbol tools when available. Clients started with `--project-from-cwd` are already activated; call `activate_project` only when that tool exists.
@@ -242,11 +435,13 @@ $sandbox = if ($Mode -eq 'Write') { 'workspace-write' } else { 'read-only' }
 $claudePermission = if ($Mode -eq 'Write') { 'acceptEdits' } else { 'plan' }
 
 $knownProviders = @('Codex', 'Claude', 'Ollama')
-$requestedProviders = if ($ProviderOrder.Trim()) {
-    @($ProviderOrder.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-}
-elseif ($Provider -ne 'Auto') { @($Provider) }
-else { @('Codex', 'Claude', 'Ollama') }
+$requestedProviders = @(
+    if ($ProviderOrder.Trim()) {
+        $ProviderOrder.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    }
+    elseif ($Provider -ne 'Auto') { $Provider }
+    else { 'Codex', 'Claude', 'Ollama' }
+)
 
 if ($requestedProviders.Count -eq 0) { throw 'Provider order is empty.' }
 if (@($requestedProviders | Select-Object -Unique).Count -ne $requestedProviders.Count) { throw 'Provider order contains duplicates.' }
@@ -288,27 +483,24 @@ foreach ($candidate in $candidates) {
         throw 'Local Hermes/Ollama write tasks are disabled until the read-only instruction-adherence gate passes.'
     }
     $providerWorkingPath = $workingPath
-    $localReadOnlyWorktree = $null
+    $disposableReadOnlyCheckout = $null
+    $providerDiffAfter = ''
+    $contentChanges = @()
 
-    if ($candidate -eq 'ollama' -and $Mode -eq 'ReadOnly') {
-        $localReadOnlyWorktree = Join-Path $attemptDir 'readonly-worktree'
-        & git -C $workingPath worktree add --detach $localReadOnlyWorktree HEAD | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Could not create the isolated local read-only worktree.' }
-        $sourceGraph = Join-Path $workingPath 'graphify-out\graph.json'
-        if (Test-Path -LiteralPath $sourceGraph) {
-            $sandboxGraphDir = Join-Path $localReadOnlyWorktree 'graphify-out'
-            New-Item -ItemType Directory -Force -Path $sandboxGraphDir | Out-Null
-            Copy-Item -LiteralPath $sourceGraph -Destination (Join-Path $sandboxGraphDir 'graph.json')
+    try {
+        if ($Mode -eq 'ReadOnly') {
+            $checkoutPath = Join-Path $attemptDir 'readonly-worktree'
+            $providerWorkingPath = New-DisposableReadOnlyCheckout -SourcePath $workingPath -CheckoutPath $checkoutPath
+            $disposableReadOnlyCheckout = $providerWorkingPath
+            [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=sandbox-ready path=$disposableReadOnlyCheckout")
+            [Console]::Out.Flush()
         }
-        $providerWorkingPath = $localReadOnlyWorktree
-        [Console]::Out.WriteLine("AI_EVENT provider=ollama state=sandbox-ready path=$localReadOnlyWorktree")
-        [Console]::Out.Flush()
-    }
-    $providerGitBefore = (& git -C $providerWorkingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
+        $providerGitBefore = (& git -C $providerWorkingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
+        $providerContentBefore = if ($Mode -eq 'ReadOnly') { Get-ContentManifest -RootPath $providerWorkingPath } else { $null }
 
-    $attemptPrompt = $prompt
-    if ($null -ne $handoffPath) {
-        $attemptPrompt += @"
+        $attemptPrompt = $prompt
+        if ($null -ne $handoffPath) {
+            $attemptPrompt += @"
 
 Provider handoff:
 - Continue the same task from the current worktree state.
@@ -316,33 +508,33 @@ Provider handoff:
 - Inspect the existing git status and diff before changing anything.
 - Preserve correct prior work, repair incomplete work, and do not broaden scope.
 "@
-    }
-    $attemptPromptPath = Join-Path $attemptDir 'provider-prompt.md'
-    $attemptPrompt | Set-Content -LiteralPath $attemptPromptPath -Encoding utf8
-    [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=started attempt=$($attempts.Count + 1)")
-    [Console]::Out.Flush()
+        }
+        $attemptPromptPath = Join-Path $attemptDir 'provider-prompt.md'
+        $attemptPrompt | Set-Content -LiteralPath $attemptPromptPath -Encoding utf8
+        [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=started attempt=$($attempts.Count + 1)")
+        [Console]::Out.Flush()
 
-    if ($candidate -eq 'codex') {
-        if ([bool]$env:OPENAI_API_KEY) {
-            throw 'OPENAI_API_KEY is set. Subscription-only routing refuses to risk API billing.'
+        if ($candidate -eq 'codex') {
+            if ([bool]$env:OPENAI_API_KEY) {
+                throw 'OPENAI_API_KEY is set. Subscription-only routing refuses to risk API billing.'
+            }
+            $command = (Get-Command codex).Source
+            $arguments = @('exec', '--json', '--color', 'never', '-C', $providerWorkingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-')
+            if ($CodexModel -and $CodexModel -ne 'default') { $arguments = @('exec', '--json', '--color', 'never', '-m', $CodexModel, '-C', $providerWorkingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-') }
+            $processInput = $attemptPrompt
         }
-        $command = (Get-Command codex).Source
-        $arguments = @('exec', '--json', '--color', 'never', '-C', $workingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-')
-        if ($CodexModel -and $CodexModel -ne 'default') { $arguments = @('exec', '--json', '--color', 'never', '-m', $CodexModel, '-C', $workingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-') }
-        $processInput = $attemptPrompt
-    }
-    elseif ($candidate -eq 'claude') {
-        if ([bool]$env:ANTHROPIC_API_KEY -or [bool]$env:ANTHROPIC_BASE_URL) {
-            throw 'Anthropic API configuration is present. Subscription-only routing refuses to risk API billing.'
+        elseif ($candidate -eq 'claude') {
+            if ([bool]$env:ANTHROPIC_API_KEY -or [bool]$env:ANTHROPIC_BASE_URL) {
+                throw 'Anthropic API configuration is present. Subscription-only routing refuses to risk API billing.'
+            }
+            $command = (Get-Command claude).Source
+            $arguments = @('-p', '--output-format', 'json', '--effort', 'high', '--permission-mode', $claudePermission)
+            if ($ClaudeModel -and $ClaudeModel -ne 'default') { $arguments += @('--model', $ClaudeModel) }
+            $processInput = $attemptPrompt
         }
-        $command = (Get-Command claude).Source
-        $arguments = @('-p', '--output-format', 'json', '--effort', 'high', '--permission-mode', $claudePermission)
-        if ($ClaudeModel -and $ClaudeModel -ne 'default') { $arguments += @('--model', $ClaudeModel) }
-        $processInput = $attemptPrompt
-    }
-    else {
-        $command = (Get-Command hermes).Source
-        $hermesPrompt = @"
+        else {
+            $command = (Get-Command hermes).Source
+            $hermesPrompt = @"
 Execute this controlled $Mode task now in the current repository.
 
 Goal:
@@ -364,54 +556,82 @@ $deliveryMetadataPolicy
 - Otherwise end the final line with AI_PROJECT_TASK_BLOCKED: followed by the concrete reason.
 - Do not offer a menu, ask what to inspect, or stop after a partial summary.
 "@
-        if ($hermesPrompt.Length -gt 24000) {
-            throw 'The local Hermes prompt exceeds the safe Windows command-line budget. Narrow the task package or use Codex/Claude.'
+            if ($hermesPrompt.Length -gt 24000) {
+                throw 'The local Hermes prompt exceeds the safe Windows command-line budget. Narrow the task package or use Codex/Claude.'
+            }
+            $hermesPrompt | Set-Content -LiteralPath $attemptPromptPath -Encoding utf8
+            # `-z` deliberately hides tool previews. The non-interactive chat query keeps
+            # progress visible on stdout so the dashboard can stream it in real time.
+            $hermesToolsets = if ($Mode -eq 'ReadOnly') { 'terminal,serena' } else { 'terminal,file,skills,todo,serena' }
+            $arguments = @('chat', '-q', $hermesPrompt, '--provider', 'ollama-launch', '-m', $OllamaModel, '--source', 'tool', '--max-turns', '60', '--toolsets', $hermesToolsets)
+            $arguments += @('--skills', 'controlled-project-development')
+            $processInput = ''
         }
-        $hermesPrompt | Set-Content -LiteralPath $attemptPromptPath -Encoding utf8
-        # `-z` deliberately hides tool previews. The non-interactive chat query keeps
-        # progress visible on stdout so the dashboard can stream it in real time.
-        $hermesToolsets = if ($Mode -eq 'ReadOnly') { 'terminal,serena' } else { 'terminal,file,skills,todo,serena' }
-        $arguments = @('chat', '-q', $hermesPrompt, '--provider', 'ollama-launch', '-m', $OllamaModel, '--source', 'tool', '--max-turns', '60', '--toolsets', $hermesToolsets)
-        if ($ProjectName -eq 'Polis') { $arguments += @('--skills', 'polis-controlled-development') }
-        else { $arguments += @('--skills', 'controlled-project-development') }
-        $processInput = ''
-    }
 
-    $started = [DateTimeOffset]::Now
-    $result = Invoke-CapturedProcess -FilePath $command -Arguments $arguments -InputText $processInput -Cwd $providerWorkingPath -ProviderName $candidate
-    $finished = [DateTimeOffset]::Now
-    $result.Stdout | Set-Content -LiteralPath (Join-Path $attemptDir 'stdout.log') -Encoding utf8
-    $result.Stderr | Set-Content -LiteralPath (Join-Path $attemptDir 'stderr.log') -Encoding utf8
-    $combined = $result.Stdout + "`n" + $result.Stderr
-    $limited = $result.ExitCode -ne 0 -and (Test-UsageLimitFailure -Text $combined)
-    $providerReportedFailure = $combined -match '(?im)(API call failed|Non-retryable (?:client )?error|HTTP [45][0-9]{2}:|Traceback \(most recent call last\)|Fatal error)'
-    $completionText = $result.Stdout
-    if ($candidate -eq 'ollama') {
-        # `hermes chat -q` echoes the submitted query, which itself documents the
-        # sentinel. Only the rendered final Hermes panel may confirm completion.
-        $finalPanel = $result.Stdout.LastIndexOf([char]0x2695 + ' Hermes')
-        $completionText = if ($finalPanel -ge 0) { $result.Stdout.Substring($finalPanel) } else { '' }
+        $started = [DateTimeOffset]::Now
+        $result = Invoke-CapturedProcess -FilePath $command -Arguments $arguments -InputText $processInput -Cwd $providerWorkingPath -ProviderName $candidate
+        $finished = [DateTimeOffset]::Now
+        $result.Stdout | Set-Content -LiteralPath (Join-Path $attemptDir 'stdout.log') -Encoding utf8
+        $result.Stderr | Set-Content -LiteralPath (Join-Path $attemptDir 'stderr.log') -Encoding utf8
+        $combined = $result.Stdout + "`n" + $result.Stderr
+        $limited = $result.ExitCode -ne 0 -and (Test-UsageLimitFailure -Text $combined)
+        $providerReportedFailure = $combined -match '(?im)(API call failed|Non-retryable (?:client )?error|HTTP [45][0-9]{2}:|Traceback \(most recent call last\)|Fatal error)'
+        $completionText = $result.Stdout
+        if ($candidate -eq 'ollama') {
+            # `hermes chat -q` echoes the submitted query, which itself documents the
+            # sentinel. Only the rendered final Hermes panel may confirm completion.
+            $finalPanel = $result.Stdout.LastIndexOf([char]0x2695 + ' Hermes')
+            $completionText = if ($finalPanel -ge 0) { $result.Stdout.Substring($finalPanel) } else { '' }
+        }
+        $completionConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $completionText -match 'AI_PROJECT_TASK_COMPLETE'
+        $blockedMatch = [regex]::Match($completionText, '(?im)^AI_PROJECT_TASK_BLOCKED:\s*(.+)$')
+        $blockedConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $blockedMatch.Success
+        $blockedReason = if ($blockedConfirmed) { $blockedMatch.Groups[1].Value.Trim() } else { $null }
+        # Codex and Claude may wrap the final response in JSON, so metadata values
+        # stop at either a real line break or an escaped JSON boundary.
+        $suggestedCommitMatch = [regex]::Match($completionText, '(?i)Suggested commit message:\s*`?([^\\\r\n"]{1,200})')
+        $suggestedBranchMatch = [regex]::Match($completionText, '(?i)Suggested branch name:\s*(ai/[a-z0-9][a-z0-9-]{1,63})')
+        $suggestedCommitMessage = $null
+        if ($suggestedCommitMatch.Success) {
+            $commitCandidate = $suggestedCommitMatch.Groups[1].Value.Trim().Trim('`')
+            if ($commitCandidate.Length -gt 200) { $commitCandidate = $commitCandidate.Substring(0, 200) }
+            if ($commitCandidate.Length -gt 0) { $suggestedCommitMessage = $commitCandidate }
+        }
+        $suggestedBranchName = if ($suggestedBranchMatch.Success) { $suggestedBranchMatch.Groups[1].Value.Trim() } else { $null }
+
+        $gitAfter = (& git -C $providerWorkingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
+        $providerDiffAfter = (& git -C $providerWorkingPath diff --no-ext-diff | Out-String)
+        if ($Mode -eq 'ReadOnly') {
+            $providerContentAfter = Get-ContentManifest -RootPath $providerWorkingPath
+            $contentChanges = @(Compare-ContentManifest -Before $providerContentBefore -After $providerContentAfter)
+            $repoChanged = $contentChanges.Count -gt 0
+            if ($repoChanged) {
+                $providerDiffAfter | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.diff') -Encoding utf8
+                $gitAfter | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.status') -Encoding utf8
+                [pscustomobject]@{
+                    provider = $candidate
+                    canonical_checkout = $workingPath
+                    isolated_checkout = $providerWorkingPath
+                    git_status_before = $providerGitBefore
+                    git_status_after = $gitAfter
+                    changes = $contentChanges
+                } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.json') -Encoding utf8
+            }
+        }
+        else {
+            $repoChanged = $gitAfter -ne $providerGitBefore
+        }
     }
-    $completionConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $completionText -match 'AI_PROJECT_TASK_COMPLETE'
-    $blockedMatch = [regex]::Match($completionText, '(?im)^AI_PROJECT_TASK_BLOCKED:\s*(.+)$')
-    $blockedConfirmed = $result.ExitCode -eq 0 -and -not $providerReportedFailure -and $blockedMatch.Success
-    $blockedReason = if ($blockedConfirmed) { $blockedMatch.Groups[1].Value.Trim() } else { $null }
-    # Codex and Claude may wrap the final response in JSON, so metadata values
-    # stop at either a real line break or an escaped JSON boundary.
-    $suggestedCommitMatch = [regex]::Match($completionText, '(?i)Suggested commit message:\s*`?([^\\\r\n"]{1,200})')
-    $suggestedBranchMatch = [regex]::Match($completionText, '(?i)Suggested branch name:\s*(ai/[a-z0-9][a-z0-9-]{1,63})')
-    $suggestedCommitMessage = $null
-    if ($suggestedCommitMatch.Success) {
-        $commitCandidate = $suggestedCommitMatch.Groups[1].Value.Trim().Trim('`')
-        if ($commitCandidate.Length -gt 200) { $commitCandidate = $commitCandidate.Substring(0, 200) }
-        if ($commitCandidate.Length -gt 0) { $suggestedCommitMessage = $commitCandidate }
+    finally {
+        if ($null -ne $disposableReadOnlyCheckout) {
+            Remove-DisposableReadOnlyCheckout -SourcePath $workingPath -CheckoutPath $disposableReadOnlyCheckout -ExpectedParent $attemptDir
+        }
     }
-    $suggestedBranchName = if ($suggestedBranchMatch.Success) { $suggestedBranchMatch.Groups[1].Value.Trim() } else { $null }
 
     $attempt = [pscustomobject]@{
         provider = $candidate
         exit_code = $result.ExitCode
-        success = $completionConfirmed
+        success = $completionConfirmed -and -not ($Mode -eq 'ReadOnly' -and $repoChanged)
         completion_sentinel = $completionConfirmed
         blocked_sentinel = $blockedConfirmed
         usage_limit_detected = $limited
@@ -423,20 +643,20 @@ $deliveryMetadataPolicy
     [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=finished exit=$($result.ExitCode) complete=$completionConfirmed quota=$limited")
     [Console]::Out.Flush()
 
-    $gitAfter = (& git -C $providerWorkingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
-    $repoChanged = $gitAfter -ne $providerGitBefore
-    if ($repoChanged) {
-        (& git -C $providerWorkingPath diff --no-ext-diff | Out-String) | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.diff') -Encoding utf8
-        $gitAfter | Set-Content -LiteralPath (Join-Path $attemptDir 'read-only-violation.status') -Encoding utf8
-    }
-    if ($null -ne $localReadOnlyWorktree) {
-        & git -C $workingPath worktree remove --force $localReadOnlyWorktree | Out-Null
-        & git -C $workingPath worktree prune | Out-Null
+    if ($Mode -eq 'ReadOnly' -and $repoChanged) {
+        [pscustomobject]@{
+            status = 'FAIL'
+            reason = 'Provider changed content during a read-only task.'
+            selected_provider = $candidate
+            mode = $Mode
+            repository_changed = $true
+            content_changes = $contentChanges
+            attempts = $attempts
+            handoffs = $handoffs
+        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
+        throw "Provider $candidate changed content during a read-only task. Automatic fallback and blocked completion were rejected; inspect $attemptDir."
     }
     if ($completionConfirmed) {
-        if ($Mode -eq 'ReadOnly' -and $repoChanged) {
-            throw "Provider $candidate changed the worktree during a read-only task. Inspect $attemptDir."
-        }
         [pscustomobject]@{
             status = 'PASS'
             selected_provider = $candidate
@@ -465,9 +685,6 @@ $deliveryMetadataPolicy
         exit 2
     }
 
-    if ($Mode -eq 'ReadOnly' -and $repoChanged) {
-        throw "Provider $candidate changed the worktree during a read-only task. Automatic fallback stopped; inspect $attemptDir."
-    }
     if ($result.ExitCode -eq 0 -and -not $completionConfirmed -and -not $limited) {
         [pscustomobject]@{
             status = 'FAIL'
@@ -492,13 +709,13 @@ $deliveryMetadataPolicy
     }
 
     $continuesHandoffPath = if ($candidate -in @('codex', 'claude')) {
-        New-ContinuesHandoffArtifact -SourceProvider $candidate -Cwd $workingPath -StartedAt $started -FinishedAt $finished -OutputDirectory $attemptDir
+        New-ContinuesHandoffArtifact -SourceProvider $candidate -Cwd $providerWorkingPath -StartedAt $started -FinishedAt $finished -OutputDirectory $attemptDir
     }
     else { $null }
     $priorHandoffPath = $handoffPath
     $handoffPath = Join-Path $runDir ("handoff-{0}-to-next.md" -f $candidate)
     $diffPath = Join-Path $attemptDir 'working-tree.diff'
-    (& git -C $workingPath diff --no-ext-diff | Out-String) | Set-Content -LiteralPath $diffPath -Encoding utf8
+    $providerDiffAfter | Set-Content -LiteralPath $diffPath -Encoding utf8
     $handoffDocument = @"
 # Provider Handoff
 

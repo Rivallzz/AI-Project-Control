@@ -5,10 +5,12 @@ AI Project Control is a local, multi-project workspace for running controlled ta
 ## What it provides
 
 - One chat-like task and feedback timeline per project.
+- One compact Portfolio row per registered project with attention, execution, delivery and next-action state.
 - Per-project provider routing with an operator-defined Codex, Claude Code and Hermes/Ollama order.
 - Per-provider model selection from the detected local Codex and Ollama catalogs plus Claude CLI aliases.
 - A visible switch that disables subscription-token use and forces the local Hermes/Ollama path.
 - Automatic isolated Git worktrees with semantic task branches, based on the project's integration branch (`develop` when present).
+- Disposable, content-verified checkouts for every read-only provider attempt.
 - Live provider, handoff and tool progress directly inside the project conversation, with technical output available on demand.
 - Unified Graphify relationship explorer and automatically loaded Obsidian working notes.
 - Worktree-aware per-file Git review with branch-specific persisted commit suggestions and a guarded task-branch → integration-branch → `main` promotion path.
@@ -16,6 +18,7 @@ AI Project Control is a local, multi-project workspace for running controlled ta
 - Machine and project integration inventory, including Hermes, ECC and MCP.
 - Symbol-level code navigation through Serena and compact quota handoffs through cli-continues.
 - Dynamic machine inventory, project capability mapping and reviewed installers for missing local foundations.
+- Source-bound, fingerprinted update checks with explicit one-use owner authorization and no silent maintenance.
 
 ## Cost boundary
 
