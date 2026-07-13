@@ -20,6 +20,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Provider and model are separate decisions: task profiles select capability intent, while route presets control cost and privacy. The execution summary states the leading concrete model, local/subscription boundary and quota-only fallback rule before the task starts.
 - Project switching keeps the previous screen visible beneath a clear loading scrim.
 - Buttons exist only for distinct commands. Conversation continuation uses the composer, not a separate follow-up action.
+- Compact help indicators align to the right edge of their label row. Their visible glyph stays subordinate to the field label while the interactive target remains at least 44 by 44 pixels.
 - Image attachments support file selection and clipboard paste with the same validation limits.
 - Install actions use a server-side allowlist and require explicit confirmation.
 - Portfolio gives every registered project one compact operational row, while the global dropdown remains the canonical active-project switcher.
@@ -35,6 +36,8 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Message width is constrained for readable lines while the workspace itself uses available screen area.
 - Controls wrap before labels truncate.
 - Below desktop width, the workflow panel forms a compact band above the workspace; execution controls and chat collapse from two columns to one on narrow screens.
+- In the two-column workspace, execution and chat share one viewport-aware visible height. The chat keeps the remaining width as the primary surface; overflowing execution controls scroll inside their panel without moving the conversation.
+- From 2000 pixels upward, the workspace may expand to 2140 pixels and the execution column grows fluidly from 380 to 440 pixels. Below 850 pixels, both panels stack and return to the normal page scroll instead of creating an extra nested execution scroll.
 
 ## Accessibility And Performance
 
