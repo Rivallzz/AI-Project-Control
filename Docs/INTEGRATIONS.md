@@ -4,6 +4,10 @@
 
 Graphify is the semantic discovery layer. New projects receive `graphify-out/graph.json`, which stays ignored by Git because it can be rebuilt. Search results are hints, not authority.
 
+The workflow health check requires both an executable Graphify module and a readable project index. `AI_PROJECT_CONTROL_GRAPHIFY_PYTHON` remains the explicit interpreter override; without it, Windows checks the Python launcher before the first `python.exe` on `PATH`, so a private tool environment cannot mask a working Graphify installation.
+
+Portfolio freshness is derived separately from the index and its `built_at_commit`. A missing or broken Graphify runtime can block rebuilding without causing an existing index to be mislabeled as absent.
+
 The dashboard presents Graphify and Obsidian together. One search query filters relationships and working notes, while source badges preserve the authority boundary. Graph zoom is local UI state and does not alter the index.
 
 ## Obsidian

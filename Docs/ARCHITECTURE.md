@@ -33,7 +33,7 @@ Browser UI
 ## Ownership
 
 - `server.js`: HTTP API orchestration, project registry, task dispatch and Git workflow.
-- `lib/http`, `lib/projects` and `lib/runtime`: request boundaries, project metadata and serialized atomic state writes.
+- `lib/http`, `lib/projects` and `lib/runtime`: request boundaries, project metadata, local runtime selection and serialized atomic state writes.
 - `lib/systems`: catalog validation, source-specific checks, authorization, maintenance serialization and cancellation policy.
 - `config/systems.json`: versioned sources, package identities, system detection and capability mapping.
 - `public/app.js`: browser orchestration; `public/modules/` owns project-scoped request and conversation state.
