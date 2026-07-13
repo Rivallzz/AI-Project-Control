@@ -25,6 +25,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Install actions use a server-side allowlist and require explicit confirmation.
 - Portfolio gives every registered project one compact operational row, while the global dropdown remains the canonical active-project switcher.
 - Knowledge search updates Graphify and Obsidian together; source badges keep discovery, working context and authority distinct.
+- Graph canvas, node list and direct relationship buttons share one selection state. List and relationship selection centers the node; graph selection reveals the matching list item; direct relationships use text as well as color.
 - Git checkboxes select commit scope; opening a row controls only the inspected file diff.
 - Execution state and delivery state use separate labels; a completed analysis is not displayed as unpublished code.
 - The graph uses direct manipulation: wheel zooms around the pointer and pointer drag pans the view.

@@ -11,6 +11,7 @@ const { createRequestBoundary } = require('./lib/http/request-boundary');
 const { writeJsonAtomic } = require('./lib/runtime/atomic-json');
 const { safeId, projectDisplayName, yamlScalar } = require('./lib/projects/metadata');
 const { PROVIDER_NAMES, buildModelCatalog, ollamaModelIdsFromList, validateModelSelections } = require('./lib/providers/model-catalog');
+const { createGraphifyRuntimeResolver } = require('./lib/integrations/graphify-runtime');
 const {
   normalizeCatalog,
   getCatalogBinding,
@@ -213,6 +214,11 @@ function execFileAsync(file, args, options = {}) {
   });
 }
 
+const resolveGraphifyRuntime = createGraphifyRuntimeResolver({
+  configuredPython: CONFIGURED_GRAPHIFY_PYTHON,
+  execFileAsync,
+});
+
 async function getProviderModelCatalog(force = false) {
   if (!force && providerModelCache && Date.now() - providerModelCacheAt < 60000) return providerModelCache;
 
@@ -246,12 +252,6 @@ async function getProviderModelCatalog(force = false) {
   return providerModelCache;
 }
 
-function graphifyPythonCommand() {
-  return CONFIGURED_GRAPHIFY_PYTHON && fs.existsSync(CONFIGURED_GRAPHIFY_PYTHON)
-    ? CONFIGURED_GRAPHIFY_PYTHON
-    : 'python.exe';
-}
-
 async function graphifyModelName() {
   const configured = String(process.env.AI_PROJECT_CONTROL_GRAPHIFY_MODEL || '').trim();
   if (configured) {
@@ -264,8 +264,13 @@ async function graphifyModelName() {
   return detected.id;
 }
 
-async function graphifyArguments(repository) {
-  return ['-m', 'graphify', 'extract', repository, '--backend', 'ollama', '--model', await graphifyModelName(), '--token-budget', '4096', '--max-concurrency', '1', '--out', repository];
+async function graphifyInvocation(repository) {
+  const runtime = await resolveGraphifyRuntime();
+  if (!runtime.ok) throw new Error(`Graphify-Laufzeit ist nicht verfügbar. ${runtime.text}`);
+  return {
+    command: runtime.command,
+    args: [...runtime.argsPrefix, 'extract', repository, '--backend', 'ollama', '--model', await graphifyModelName(), '--token-budget', '4096', '--max-concurrency', '1', '--out', repository],
+  };
 }
 
 function normalizeProviderOrder(value, legacyProvider = 'Auto') {
@@ -784,13 +789,12 @@ async function graphSummary(graphPath) {
 async function getComponents(project, force = false) {
   const cached = componentCache.get(project.id);
   if (!force && cached && Date.now() - cached.at < 15000) return cached.value;
-  const graphifyCommand = graphifyPythonCommand();
-  const [codex, claude, hermes, ollama, graphifyCli, graph, branch, gitStatus, eccCommit, mcp] = await Promise.all([
+  const [codex, claude, hermes, ollama, graphifyRuntime, graph, branch, gitStatus, eccCommit, mcp] = await Promise.all([
     commandSummary('codex.exe', ['--version']),
     commandSummary('claude.exe', ['--version']),
     commandSummary('hermes.exe', ['--version']),
     commandSummary('ollama.exe', ['--version']),
-    commandSummary(graphifyCommand, ['-m', 'graphify', '--version']),
+    resolveGraphifyRuntime(force),
     graphSummary(project.graphPath),
     commandSummary('git.exe', ['-C', project.repository, 'branch', '--show-current']),
     commandSummary('git.exe', ['-C', project.repository, 'status', '--short']),
@@ -799,7 +803,12 @@ async function getComponents(project, force = false) {
   ]);
   const value = {
     codex, claude, hermes, ollama,
-    graphify: { ok: graphifyCli.ok && graph.ok, text: graphifyCli.ok ? `${graphifyCli.text} · ${graph.text}` : graphifyCli.text },
+    graphify: {
+      ok: graph.ok,
+      text: `${graph.text} · CLI: ${graphifyRuntime.ok ? graphifyRuntime.text : `nicht verfügbar (${graphifyRuntime.text})`}`,
+      index: graph,
+      runtime: graphifyRuntime,
+    },
     repository: {
       ok: branch.ok && gitStatus.ok,
       branch: branch.text,
@@ -862,8 +871,8 @@ async function detectSystem(definition) {
     return command;
   }
   if (detection.type === 'pythonModule') {
-    const python = graphifyPythonCommand();
-    return commandSummary(python, ['-m', detection.module, '--version']);
+    if (detection.module === 'graphify') return resolveGraphifyRuntime();
+    return commandSummary('python.exe', ['-m', detection.module, '--version']);
   }
   if (detection.type === 'path' || detection.type === 'pathOrCommand') {
     const found = (detection.paths || []).map(expandSystemPath).find((candidate) => candidate && fs.existsSync(candidate));
@@ -1250,7 +1259,8 @@ async function startTask(payload) {
       try {
         if (!fs.existsSync(registeredProject.graphPath)) {
           emitJob(job, 'graphify', 'Graphify-Index wird lokal mit Ollama aufgebaut');
-          await runStreamingCommand(job, graphifyPythonCommand(), await graphifyArguments(registeredProject.repository), registeredProject.repository, 'graphify');
+          const invocation = await graphifyInvocation(registeredProject.repository);
+          await runStreamingCommand(job, invocation.command, invocation.args, registeredProject.repository, 'graphify');
         }
         job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
         emitJob(job, 'complete', 'Projekt, Graphify und Obsidian sind verbunden');
@@ -1527,7 +1537,8 @@ async function provisionProject(payload) {
 
       const graphPath = path.join(repository, 'graphify-out', 'graph.json');
       emitJob(job, 'graphify', 'Lokaler Graphify-Index wird mit Ollama aufgebaut');
-      await runStreamingCommand(job, graphifyPythonCommand(), await graphifyArguments(repository), repository, 'graphify');
+      const invocation = await graphifyInvocation(repository);
+      await runStreamingCommand(job, invocation.command, invocation.args, repository, 'graphify');
 
       if (createGitHub) {
         emitJob(job, 'github', `GitHub-Repository wird ${visibility} erstellt`);

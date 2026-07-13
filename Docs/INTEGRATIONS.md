@@ -4,7 +4,7 @@
 
 Graphify is the semantic discovery layer. New projects receive `graphify-out/graph.json`, which stays ignored by Git because it can be rebuilt. Search results are hints, not authority.
 
-The dashboard presents Graphify and Obsidian together. One search query filters relationships and working notes, while source badges preserve the authority boundary. Graph zoom is local UI state and does not alter the index.
+The dashboard presents Graphify and Obsidian together. One search query filters relationships and working notes, while source badges preserve the authority boundary. The Graphify canvas, node list and direct-relationship controls share one selection state so every entry can locate and inspect the same node without altering the index. Graph zoom and centering remain local UI state.
 
 ## Obsidian
 

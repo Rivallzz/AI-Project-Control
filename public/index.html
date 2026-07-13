@@ -235,12 +235,13 @@
                 </div>
                 <div id="graphStats" class="knowledge-stats"></div>
                 <div class="graph-layout">
-                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Visuelle Graphify-Beziehungsübersicht"></canvas>
+                  <canvas id="graphCanvas" class="graph-canvas" width="900" height="480" aria-label="Visuelle Graphify-Beziehungsübersicht" aria-describedby="graphNodeListHint"></canvas>
                   <section class="graph-node-browser" aria-labelledby="graphNodeListHeading">
                     <h4 id="graphNodeListHeading">Knotenliste</h4>
-                    <div id="graphNodeList" class="graph-node-list"></div>
+                    <p id="graphNodeListHint" class="graph-node-hint">Auswahl zentriert den Knoten und zeigt direkte Verbindungen.</p>
+                    <div id="graphNodeList" class="graph-node-list" aria-label="Graphify-Knoten"></div>
                   </section>
-                  <aside id="graphDetails" class="knowledge-details"><p class="empty">Wähle einen Knoten im Graphen.</p></aside>
+                  <aside id="graphDetails" class="knowledge-details" aria-live="polite"><p class="empty">Wähle einen Knoten im Graphen oder in der Liste.</p></aside>
                 </div>
               </section>
               <section class="knowledge-source notes-source" aria-labelledby="notesSourceHeading">

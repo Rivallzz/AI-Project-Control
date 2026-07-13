@@ -1,19 +1,42 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
 const { after, before, test } = require('node:test');
 const { requestJson } = require('./test-helpers/http-client');
+const { createRepository } = require('./test-helpers/git-fixture');
 const { createSandbox, removeSandbox, startServer } = require('./test-helpers/server-harness');
 
 let root;
 let server;
 let project;
+let graphProject;
 
 before(async () => {
   root = await createSandbox();
   server = await startServer({ root });
   const projects = await requestJson(server.baseUrl, '/api/projects');
   project = projects.body.projects[0];
+  const fixture = await createRepository(root);
+  const graphPath = path.join(fixture.repository, 'graphify-out', 'graph.json');
+  await fs.mkdir(path.dirname(graphPath), { recursive: true });
+  await fs.writeFile(graphPath, JSON.stringify({
+    nodes: [{ id: 'a' }, { id: 'b' }],
+    links: [{ source: 'a', target: 'b' }],
+  }), 'utf8');
+  const registered = await requestJson(server.baseUrl, '/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+    body: JSON.stringify({
+      name: 'Graph Status Fixture',
+      repository: fixture.repository,
+      graphPath,
+      obsidianPath: path.join(root, 'obsidian', 'Graph Status Fixture'),
+    }),
+  });
+  assert.equal(registered.status, 201);
+  graphProject = registered.body;
 });
 
 after(async () => {
@@ -39,6 +62,20 @@ test('the config endpoint exposes the versioned model catalog including partial 
   assert.equal(response.body.modelCatalog.providers.Codex.models.some((model) => model.id === 'default'), true);
   assert.equal(response.body.modelCatalog.providers.Claude.models.some((model) => model.id === 'sonnet'), true);
   assert.equal(response.body.modelCatalog.providers.Ollama.status, 'error');
+});
+
+test('a readable project index stays available when the global Graphify CLI is unavailable', async () => {
+  const components = await requestJson(server.baseUrl, `/api/components?projectId=${encodeURIComponent(graphProject.id)}&force=1`);
+  assert.equal(components.status, 200);
+  assert.equal(components.body.graphify.ok, true);
+  assert.equal(components.body.graphify.index.ok, true);
+  assert.equal(components.body.graphify.runtime.ok, false);
+  assert.match(components.body.graphify.text, /2 nodes · 1 links/);
+
+  const portfolio = await requestJson(server.baseUrl, '/api/portfolio');
+  const projectRow = portfolio.body.projects.find((candidate) => candidate.id === graphProject.id);
+  assert.equal(projectRow.graph.status, 'aktuell');
+  assert.equal(portfolio.body.attention.some((item) => item.projectId === graphProject.id && /Graphify-Index fehlt/.test(item.message)), false);
 });
 
 test('a foreign Origin cannot mutate local project state', async () => {

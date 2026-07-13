@@ -8,6 +8,7 @@ import {
   MODEL_CATALOG_VERSION, PROVIDERS, availableModels, defaultModelId, modelCatalog, modelDecisionText,
   modelProfile, modelProfiles, primaryFirst, reconcileModelSelection, selectedModel, taskStartState,
 } from './modules/model-selection.js';
+import { centeredGraphPan, linkedGraphNodeIds } from './modules/graph-selection.js';
 
 const elements = {
   connection: document.getElementById('connectionState'),
@@ -1167,7 +1168,7 @@ async function activateProject(projectId) {
 
 function resetKnowledge() {
   elements.graphStats.textContent = '';
-  elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen.</p>';
+  elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen oder in der Liste.</p>';
   elements.graphNodeList.replaceChildren();
   const context = elements.graphCanvas.getContext('2d'); context.clearRect(0, 0, elements.graphCanvas.width, elements.graphCanvas.height);
   elements.noteList.replaceChildren(); elements.noteTitle.textContent = 'Keine Notiz ausgewählt'; elements.noteContent.textContent = 'Wähle links eine Notiz aus.';
@@ -1219,13 +1220,7 @@ function drawGraph() {
     if (!source || !target) continue; context.moveTo(source.x, source.y); context.lineTo(target.x, target.y);
   }
   context.stroke();
-  const selectedNeighbors = new Set();
-  if (selectedGraphNodeId) {
-    for (const link of graphData.links) {
-      if (link.source === selectedGraphNodeId) selectedNeighbors.add(link.target);
-      if (link.target === selectedGraphNodeId) selectedNeighbors.add(link.source);
-    }
-  }
+  const selectedNeighbors = new Set(linkedGraphNodeIds(graphData.links, selectedGraphNodeId));
   for (const node of graphData.nodes) {
     const position = graphPositions.get(node.id); const selected = node.id === selectedGraphNodeId;
     const neighbor = selectedNeighbors.has(node.id); const radius = selected ? 8 : neighbor ? 6 : Math.min(5.5, 2.5 + Math.sqrt(node.degree) * 0.32);
@@ -1243,27 +1238,47 @@ function drawGraph() {
 function renderGraphDetails(nodeId) {
   selectedGraphNodeId = nodeId; elements.graphDetails.replaceChildren();
   const node = graphData?.nodes.find((candidate) => candidate.id === nodeId);
+  const relatedIds = new Set(node ? linkedGraphNodeIds(graphData.links, node.id) : []);
   elements.graphNodeList.querySelectorAll('[data-graph-node]').forEach((button) => {
-    const selected = button.dataset.graphNode === nodeId; button.classList.toggle('active', selected);
+    const selected = button.dataset.graphNode === nodeId; const related = !selected && relatedIds.has(button.dataset.graphNode);
+    button.classList.toggle('active', selected); button.classList.toggle('related', related);
     if (selected) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
+    const relation = button.querySelector('[data-graph-relation]');
+    if (relation) { relation.hidden = !(selected || related); relation.textContent = selected ? 'Ausgewählt' : related ? 'Direkt verbunden' : ''; }
   });
-  if (!node) { elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen.</p>'; drawGraph(); return; }
+  if (!node) { elements.graphDetails.innerHTML = '<p class="empty">Wähle einen Knoten im Graphen oder in der Liste.</p>'; drawGraph(); return; }
   const title = document.createElement('h3'); title.textContent = node.label; const list = document.createElement('dl');
   for (const [label, value] of [['Typ', node.type || '—'], ['Community', node.community || '—'], ['Quelle', `${node.sourceFile || '—'}${node.sourceLocation ? ` · ${node.sourceLocation}` : ''}`], ['Verbindungen', String(node.degree)]]) {
     const term = document.createElement('dt'); term.textContent = label; const detail = document.createElement('dd'); detail.textContent = value; list.append(term, detail);
   }
-  const neighborIds = [];
-  for (const link of graphData.links) {
-    if (link.source === node.id) neighborIds.push(link.target); else if (link.target === node.id) neighborIds.push(link.source);
-  }
-  const neighbors = [...new Set(neighborIds)].map((id) => graphData.nodes.find((candidate) => candidate.id === id)).filter(Boolean).slice(0, 12);
+  const neighbors = [...relatedIds].map((id) => graphData.nodes.find((candidate) => candidate.id === id)).filter(Boolean).slice(0, 12);
   if (neighbors.length) {
-    const term = document.createElement('dt'); term.textContent = 'Nachbarn'; const detail = document.createElement('dd');
+    const term = document.createElement('dt'); term.textContent = 'Direkte Zusammenhänge'; const detail = document.createElement('dd');
     const items = document.createElement('ul'); items.className = 'neighbor-list';
-    for (const neighbor of neighbors) { const item = document.createElement('li'); item.textContent = neighbor.label; items.append(item); }
+    for (const neighbor of neighbors) {
+      const item = document.createElement('li'); const button = document.createElement('button');
+      button.type = 'button'; button.className = 'neighbor-button'; button.dataset.graphNeighbor = neighbor.id;
+      const label = document.createElement('span'); label.textContent = neighbor.label;
+      const meta = document.createElement('small'); meta.textContent = `${neighbor.degree || 0} Verbindungen`;
+      button.append(label, meta); item.append(button); items.append(item);
+    }
     detail.append(items); list.append(term, detail);
   }
   elements.graphDetails.append(title, list); drawGraph();
+}
+
+function selectGraphNode(nodeId, { center = false, revealList = false, focusList = false } = {}) {
+  if (center) {
+    const position = graphPositions.get(nodeId); const rect = elements.graphCanvas.getBoundingClientRect();
+    const centered = centeredGraphPan({ position, width: rect.width, height: rect.height, panX: graphPanX, panY: graphPanY });
+    graphPanX = centered.panX; graphPanY = centered.panY;
+  }
+  renderGraphDetails(nodeId);
+  if (!revealList && !focusList) return;
+  const button = [...elements.graphNodeList.querySelectorAll('[data-graph-node]')].find((candidate) => candidate.dataset.graphNode === nodeId);
+  if (!button) return;
+  button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  if (focusList) button.focus({ preventScroll: true });
 }
 
 function renderGraphNodeList() {
@@ -1276,7 +1291,8 @@ function renderGraphNodeList() {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'graph-node-button'; button.dataset.graphNode = node.id;
     const label = document.createElement('span'); label.textContent = node.label;
     const meta = document.createElement('small'); meta.textContent = `${node.type || node.community || 'Knoten'} · ${node.degree || 0} Verbindungen`;
-    button.append(label, meta); elements.graphNodeList.append(button);
+    const relation = document.createElement('small'); relation.className = 'graph-node-relation'; relation.dataset.graphRelation = ''; relation.hidden = true;
+    button.append(label, meta, relation); elements.graphNodeList.append(button);
   }
 }
 
@@ -1899,11 +1915,15 @@ elements.graphCanvas.addEventListener('click', (event) => {
     const distance = Math.hypot(position.x - x, position.y - y);
     if (distance < closestDistance) { closest = id; closestDistance = distance; }
   }
-  if (closest) renderGraphDetails(closest);
+  if (closest) selectGraphNode(closest, { center: true, revealList: true });
 });
 elements.graphNodeList.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-graph-node]'); if (!button) return;
-  renderGraphDetails(button.dataset.graphNode);
+  selectGraphNode(button.dataset.graphNode, { center: true });
+});
+elements.graphDetails.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-graph-neighbor]'); if (!button) return;
+  selectGraphNode(button.dataset.graphNeighbor, { center: true, revealList: true, focusList: true });
 });
 
 elements.noteList.addEventListener('click', (event) => {
