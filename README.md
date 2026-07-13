@@ -7,7 +7,7 @@ AI Project Control is a local, multi-project workspace for running controlled ta
 - One chat-like task and feedback timeline per project.
 - One compact Portfolio row per registered project with attention, execution, delivery and next-action state.
 - Per-project provider routing with an operator-defined Codex, Claude Code and Hermes/Ollama order.
-- Per-provider model selection from the detected local Codex and Ollama catalogs plus Claude CLI aliases.
+- Project-scoped task profiles (`Ausgewogen`, `Schnell`, `Qualität`, `Coding`) plus an advanced, exact per-provider model selection from a versioned catalog of detected Codex and Ollama models and reviewed Claude CLI aliases.
 - A visible switch that disables subscription-token use and forces the local Hermes/Ollama path.
 - Automatic isolated Git worktrees with semantic task branches, based on the project's integration branch (`develop` when present).
 - Disposable, content-verified checkouts for every read-only provider attempt.

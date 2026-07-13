@@ -73,6 +73,9 @@ $oldMockRecord = $env:AI_ROUTER_MOCK_RECORD
 try {
     New-Item -ItemType Directory -Force -Path $shimRoot, $repository, $codexHome | Out-Null
     $shimSource = @'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 $provider = [string]$args[0]
 $providerArguments = @($args | Select-Object -Skip 1)
 if ($provider -eq 'codex' -and $providerArguments.Count -ge 2 -and $providerArguments[0] -eq 'login') {
@@ -87,6 +90,24 @@ if ($provider -eq 'ollama' -and $providerArguments.Count -ge 1 -and $providerArg
     Write-Output 'NAME                 ID              SIZE      MODIFIED'
     Write-Output 'polis-coder:latest   111111111111    1 GB      now'
     Write-Output 'custom-model:7b      222222222222    2 GB      now'
+    Write-Output 'looks-chat-embed:latest 333333333333 2 GB      now'
+    Write-Output 'semantic-vector:latest  444444444444 1 GB      now'
+    exit 0
+}
+if ($provider -eq 'ollama' -and $providerArguments.Count -ge 2 -and $providerArguments[0] -eq 'show') {
+    Write-Output '  Model'
+    Write-Output '    context length      32768'
+    Write-Output ''
+    Write-Output '  Capabilities'
+    if ($providerArguments[1] -eq 'semantic-vector:latest') {
+        Write-Output '    embedding'
+    }
+    else {
+        Write-Output '    completion'
+        Write-Output '    tools'
+    }
+    Write-Output ''
+    Write-Output '  Parameters'
     exit 0
 }
 
@@ -95,12 +116,13 @@ $cwd = (Get-Location).Path
 $trackedPath = Join-Path $cwd 'tracked.txt'
 $untrackedPath = Join-Path $cwd 'untracked.txt'
 if ($env:AI_ROUTER_MOCK_RECORD) {
+    $recordedArguments = ($providerArguments -join '|') -replace '\r?\n', '<NL>'
     $record = @(
         "provider=$provider"
         "cwd=$cwd"
         "tracked=$(if (Test-Path -LiteralPath $trackedPath) { (Get-Content -LiteralPath $trackedPath -Raw).Trim() } else { '<missing>' })"
         "untracked=$(if (Test-Path -LiteralPath $untrackedPath) { (Get-Content -LiteralPath $untrackedPath -Raw).Trim() } else { '<missing>' })"
-        "arguments=$($providerArguments -join '|')"
+        "arguments=$recordedArguments"
     )
     [System.IO.File]::WriteAllLines($env:AI_ROUTER_MOCK_RECORD, $record, [System.Text.UTF8Encoding]::new($false))
 }
@@ -116,11 +138,15 @@ if ($env:AI_ROUTER_MOCK_BEHAVIOR -eq 'fail') {
     exit 7
 }
 
+if ($provider -eq 'hermes') {
+    Write-Output 'Initializing agent'
+    [Console]::Out.WriteLine(([char]0x2695).ToString() + ' Hermes')
+}
 Write-Output 'AI_PROJECT_TASK_COMPLETE'
 exit 0
 '@
     [System.IO.File]::WriteAllText((Join-Path $shimRoot 'provider-shim.ps1'), $shimSource, [System.Text.UTF8Encoding]::new($false))
-    foreach ($providerName in @('codex', 'claude', 'ollama')) {
+    foreach ($providerName in @('codex', 'claude', 'ollama', 'hermes')) {
         $wrapper = "@echo off`r`npwsh.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0provider-shim.ps1`" $providerName %*`r`nexit /b %ERRORLEVEL%`r`n"
         [System.IO.File]::WriteAllText((Join-Path $shimRoot "$providerName.cmd"), $wrapper, [System.Text.Encoding]::ASCII)
     }
@@ -148,6 +174,17 @@ exit 0
     Assert-Equal $status.codex.paid_api_guard 'BLOCKED' 'OPENAI_API_KEY guard status is inconsistent.'
     Assert-True ([bool]$status.ollama.available) 'The selected installed Ollama model was not accepted.'
     Assert-Equal $status.ollama.model 'custom-model:7b' 'Provider status did not preserve the selected Ollama model.'
+    Assert-True ([bool]$status.ollama.hermes_available) 'The local provider did not require the Hermes command.'
+    Assert-True (@($status.ollama.installed_chat_models) -contains 'looks-chat-embed:latest') 'A completion model was excluded because its name contained embed.'
+    Assert-True (@($status.ollama.installed_chat_models) -notcontains 'semantic-vector:latest') 'A non-completion model was accepted because its name did not contain embed.'
+
+    $defaultModelResult = Invoke-TestPowerShell -ScriptPath $statusScript -Arguments @(
+        '-Json', '-CodexHome', $codexHome, '-StatePath', $statePath, '-OllamaModel', 'default'
+    )
+    Assert-Equal $defaultModelResult.ExitCode 0 'Provider status failed for the legacy default model.'
+    $defaultModelStatus = $defaultModelResult.Output | ConvertFrom-Json
+    Assert-True ([bool]$defaultModelStatus.ollama.available) 'The deterministic default Ollama model was not available.'
+    Assert-Equal $defaultModelStatus.ollama.model 'custom-model:7b' 'Legacy default did not resolve to the alphabetically first installed chat model.'
 
     $missingModelResult = Invoke-TestPowerShell -ScriptPath $statusScript -Arguments @(
         '-Json', '-CodexHome', $codexHome, '-StatePath', $statePath, '-OllamaModel', 'missing-model'
@@ -158,21 +195,56 @@ exit 0
     Assert-True ([string]$missingModelStatus.ollama.reason -match 'missing-model') 'Missing-model status did not name the selected model.'
     Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 
+    $unavailableResult = Invoke-TestPowerShell -ScriptPath $router -Arguments @(
+        '-TaskFile', $taskFile, '-WorkingDirectory', $repository, '-Provider', 'Ollama',
+        '-OllamaModel', 'missing-model', '-Mode', 'ReadOnly',
+        '-RunRoot', (Join-Path $testRoot 'runs-unavailable'), '-ProjectName', 'RouterTest'
+    )
+    Assert-True ($unavailableResult.ExitCode -ne 0) 'A provider with a missing requested model unexpectedly started.'
+    Assert-True ($unavailableResult.Output -match 'ollama.+missing-model') 'Unavailable-provider output did not identify Ollama and the missing requested model.'
+
     $claudeRecordPath = Join-Path $testRoot 'claude-record.txt'
     $env:AI_ROUTER_MOCK_RECORD = $claudeRecordPath
     $env:AI_ROUTER_MOCK_BEHAVIOR = 'complete'
     $claudeRunRoot = Join-Path $testRoot 'runs-claude'
     $claudeResult = Invoke-TestPowerShell -ScriptPath $router -Arguments @(
         '-TaskFile', $taskFile, '-WorkingDirectory', $repository, '-Provider', 'Claude',
-        '-Mode', 'ReadOnly', '-RunRoot', $claudeRunRoot, '-ProjectName', 'RouterTest'
+        '-ClaudeModel', 'sonnet', '-Mode', 'ReadOnly', '-RunRoot', $claudeRunRoot, '-ProjectName', 'RouterTest'
     )
     Assert-Equal $claudeResult.ExitCode 0 "Claude read-only execution failed. Output: $($claudeResult.Output)"
     Assert-True ($claudeResult.Output -match 'AI_PROJECT_ROUTER_OK provider=claude') 'Claude did not complete through the router.'
+    Assert-True ($claudeResult.Output -match 'AI_EVENT provider=claude state=started attempt=1 model=sonnet') 'Claude start event did not expose the selected model.'
     $claudeRecord = Read-MockRecord -Path $claudeRecordPath
+    Assert-True ($claudeRecord.arguments -match [regex]::Escape('--model|sonnet')) 'Claude did not receive the selected model argument.'
     Assert-True (-not $claudeRecord.cwd.Equals($repository, [System.StringComparison]::OrdinalIgnoreCase)) 'Claude ran in the canonical checkout.'
     Assert-Equal $claudeRecord.tracked 'dirty-before' 'Claude checkout did not receive dirty tracked content.'
     Assert-Equal $claudeRecord.untracked 'untracked-before' 'Claude checkout did not receive untracked content.'
     Assert-DisposableCheckoutCleaned -RepositoryPath $repository -Record $claudeRecord -Message 'Claude cleanup:'
+    $claudeRun = Get-ChildItem -LiteralPath $claudeRunRoot -Directory | Select-Object -First 1
+    $claudeRoutingResult = Get-Content -LiteralPath (Join-Path $claudeRun.FullName 'routing-result.json') -Raw | ConvertFrom-Json
+    Assert-Equal $claudeRoutingResult.selected_model 'sonnet' 'Claude routing result did not persist the selected model.'
+    Assert-Equal $claudeRoutingResult.attempts[0].model 'sonnet' 'Claude attempt did not persist the selected model.'
+
+    $ollamaRecordPath = Join-Path $testRoot 'ollama-record.txt'
+    $env:AI_ROUTER_MOCK_RECORD = $ollamaRecordPath
+    $env:AI_ROUTER_MOCK_BEHAVIOR = 'complete'
+    $ollamaRunRoot = Join-Path $testRoot 'runs-ollama'
+    $ollamaResult = Invoke-TestPowerShell -ScriptPath $router -Arguments @(
+        '-TaskFile', $taskFile, '-WorkingDirectory', $repository, '-Provider', 'Ollama',
+        '-OllamaModel', 'custom-model:7b', '-Mode', 'ReadOnly', '-RunRoot', $ollamaRunRoot, '-ProjectName', 'RouterTest'
+    )
+    Assert-Equal $ollamaResult.ExitCode 0 "Hermes/Ollama read-only execution failed. Output: $($ollamaResult.Output)"
+    Assert-True ($ollamaResult.Output -match 'AI_PROJECT_ROUTER_OK provider=ollama') 'Hermes/Ollama did not complete through the router.'
+    Assert-True ($ollamaResult.Output -match 'AI_EVENT provider=ollama state=started attempt=1 model=custom-model:7b') 'Hermes/Ollama start event did not expose the selected model.'
+    $ollamaRecord = Read-MockRecord -Path $ollamaRecordPath
+    Assert-Equal $ollamaRecord.provider 'hermes' 'The local provider did not execute through Hermes.'
+    Assert-True ($ollamaRecord.arguments -match [regex]::Escape('-m|custom-model:7b')) "Hermes did not receive the selected Ollama model argument. Arguments: $($ollamaRecord.arguments)"
+    Assert-True (-not $ollamaRecord.cwd.Equals($repository, [System.StringComparison]::OrdinalIgnoreCase)) 'Hermes/Ollama ran in the canonical checkout.'
+    Assert-DisposableCheckoutCleaned -RepositoryPath $repository -Record $ollamaRecord -Message 'Hermes/Ollama cleanup:'
+    $ollamaRun = Get-ChildItem -LiteralPath $ollamaRunRoot -Directory | Select-Object -First 1
+    $ollamaRoutingResult = Get-Content -LiteralPath (Join-Path $ollamaRun.FullName 'routing-result.json') -Raw | ConvertFrom-Json
+    Assert-Equal $ollamaRoutingResult.selected_model 'custom-model:7b' 'Hermes/Ollama routing result did not persist the selected model.'
+    Assert-Equal $ollamaRoutingResult.attempts[0].model 'custom-model:7b' 'Hermes/Ollama attempt did not persist the selected model.'
 
     $codexRecordPath = Join-Path $testRoot 'codex-record.txt'
     $env:AI_ROUTER_MOCK_RECORD = $codexRecordPath

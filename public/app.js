@@ -2,6 +2,10 @@
 
 import { api, createRequestState } from './modules/request-state.js';
 import { createProjectUiState, jobBelongsInConversation } from './modules/project-ui-state.js';
+import {
+  MODEL_CATALOG_VERSION, PROVIDERS, availableModels, defaultModelId, modelCatalog, modelDecisionText,
+  modelProfile, modelProfiles, primaryFirst, reconcileModelSelection, selectedModel, taskStartState,
+} from './modules/model-selection.js';
 
 const elements = {
   connection: document.getElementById('connectionState'),
@@ -10,7 +14,8 @@ const elements = {
   providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'), workflowContext: document.getElementById('workflowContext'),
   executionPanel: document.getElementById('executionPanel'), providerRoute: document.getElementById('providerRouteList'), routeSummary: document.getElementById('routeSummary'),
   providerPreset: document.getElementById('providerPresetControl'), providerDetails: document.getElementById('providerDetails'),
-  primaryProvider: document.getElementById('primaryProviderSelect'), refreshModels: document.getElementById('refreshModelsButton'), modelCatalogState: document.getElementById('modelCatalogState'),
+  primaryProvider: document.getElementById('primaryProviderSelect'), modelProfile: document.getElementById('modelProfileSelect'), modelProfileHint: document.getElementById('modelProfileHint'),
+  refreshModels: document.getElementById('refreshModelsButton'), modelCatalogState: document.getElementById('modelCatalogState'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
   attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
   attachmentPreview: document.getElementById('attachmentPreview'),
@@ -66,6 +71,13 @@ let liveJobs = new Map();
 let jobEventSource = null;
 let jobRenderPending = false;
 let componentStatus = null;
+let providerStatus = null;
+let modelCatalogReady = false;
+let modelCatalogLoading = false;
+let activeModelCatalogToken = null;
+let modelRecoveryMessage = '';
+let providerStatusErrorMessage = '';
+let busyReturnFocus = null;
 let historyFollow = true;
 let historyLatestVersion = null;
 let runHistory = [];
@@ -74,8 +86,8 @@ const submittedTaskText = new Map();
 const submittedTaskAttachments = new Map();
 const terminalHistoryRefreshes = new Set();
 const acknowledgedActivityJobs = new Set(JSON.parse(sessionStorage.getItem('acknowledgedActivityJobs') || '[]'));
-const PROVIDERS = ['Codex', 'Claude', 'Ollama'];
 const JOB_KINDS = new Set(['task', 'dashboard-command', 'install', 'update', 'provision']);
+const API_CONTRACT_VERSION = 2;
 
 const requestState = createRequestState(() => activeProject?.id || null);
 const beginRequest = (...args) => requestState.begin(...args);
@@ -119,31 +131,92 @@ function providerModelSelect(provider) {
 }
 
 function defaultModel(provider) {
-  const catalog = config?.providerModels?.[provider] || [];
-  return catalog[0]?.value || 'default';
+  return defaultModelId(config, provider);
+}
+
+function modelStateElement(provider) {
+  return elements.providerRoute.querySelector(`[data-model-state="${provider}"]`);
+}
+
+function updateProviderModelState(provider) {
+  const model = selectedModel(config, provider, providerModelSelect(provider).value);
+  const providerEntry = modelCatalog(config)?.providers?.[provider];
+  const runtime = providerStatus?.[provider.toLowerCase()];
+  const runtimeMessage = runtime && !runtime.available ? `Provider nicht bereit: ${runtime.reason || 'lokale Verbindung oder Kontingent nicht verfügbar.'}` : '';
+  modelStateElement(provider).textContent = [modelDecisionText(model)
+    || providerEntry?.message
+    || `Für ${provider} ist kein Modell verfügbar.`, runtimeMessage].filter(Boolean).join(' · ');
 }
 
 function populateProviderModel(provider, selectedValue = null) {
   const select = providerModelSelect(provider);
-  const catalog = config?.providerModels?.[provider] || [];
-  const requested = selectedValue === 'default' && !catalog.some((model) => model.value === 'default')
-    ? defaultModel(provider)
-    : selectedValue || defaultModel(provider);
+  const providerEntry = modelCatalog(config)?.providers?.[provider];
+  const selection = reconcileModelSelection(config, provider, selectedValue);
   select.replaceChildren();
-  for (const model of catalog) {
-    const option = document.createElement('option'); option.value = model.value; option.textContent = model.label; select.append(option);
+  for (const model of providerEntry?.models || []) {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.textContent = model.displayName;
+    option.disabled = model.availability !== 'available' || Boolean(model.deprecated);
+    select.append(option);
   }
-  if (requested && !catalog.some((model) => model.value === requested)) {
-    const option = document.createElement('option'); option.value = requested; option.textContent = `${requested} (nicht erkannt)`; select.append(option);
+  if (!availableModels(config, provider).length) {
+    const option = document.createElement('option'); option.value = ''; option.textContent = 'Kein ausführbares Modell verfügbar'; option.disabled = true; select.append(option);
   }
-  select.value = requested;
+  select.value = selection.value;
+  updateProviderModelState(provider);
+  return selection;
 }
 
 function renderModelCatalogState(message = '') {
   if (message) { elements.modelCatalogState.textContent = message; return; }
-  const codexCount = (config?.providerModels?.Codex || []).filter((model) => model.value !== 'default').length;
-  const ollamaCount = (config?.providerModels?.Ollama || []).length;
-  elements.modelCatalogState.textContent = `${codexCount} Codex · ${ollamaCount} Ollama erkannt`;
+  const catalog = modelCatalog(config);
+  if (!catalog) { elements.modelCatalogState.textContent = 'Modellkatalog nicht verfügbar.'; return; }
+  const total = PROVIDERS.reduce((count, provider) => count + availableModels(config, provider).length, 0);
+  const issues = PROVIDERS.map((provider) => catalog.providers?.[provider])
+    .filter((entry) => entry && entry.status !== 'available')
+    .map((entry) => `${entry.displayName}: ${entry.message}`);
+  elements.modelCatalogState.textContent = providerStatusErrorMessage
+    || modelRecoveryMessage
+    || (issues.length ? `${total} Modelle · Teilweise verfügbar: ${issues.join(' ')}` : `${total} ausführbare Modelle erkannt.`);
+}
+
+function selectedModelProfile() {
+  return elements.modelProfile.value || 'balanced';
+}
+
+function populateModelProfiles(selectedId = 'balanced') {
+  const profiles = modelProfiles(config);
+  elements.modelProfile.replaceChildren();
+  for (const profile of profiles) {
+    const option = document.createElement('option'); option.value = profile.id; option.textContent = profile.displayName; elements.modelProfile.append(option);
+  }
+  const custom = document.createElement('option'); custom.value = 'custom'; custom.textContent = 'Benutzerdefiniert'; elements.modelProfile.append(custom);
+  const selectedExists = Boolean(modelProfile(config, selectedId)) || selectedId === 'custom';
+  elements.modelProfile.value = selectedExists ? selectedId : 'balanced';
+  updateModelProfileHint();
+}
+
+function updateModelProfileHint() {
+  const profile = modelProfile(config, selectedModelProfile());
+  elements.modelProfileHint.textContent = profile?.description
+    || 'Individuelle Auswahl: Die konkreten Modelle sind unter „Providerdetails“ sichtbar und werden für dieses Projekt gespeichert.';
+}
+
+function applyModelProfile(profileId, persist = true) {
+  const profile = modelProfile(config, profileId);
+  elements.modelProfile.value = profile ? profile.id : 'custom';
+  const recovery = [];
+  if (profile) {
+    for (const provider of PROVIDERS) {
+      const selection = populateProviderModel(provider, profile.modelIds?.[provider]);
+      if (selection.message) recovery.push(selection.message);
+    }
+  }
+  modelRecoveryMessage = recovery.join(' ');
+  updateModelProfileHint();
+  renderModelCatalogState();
+  renderExecutionControls(persist);
 }
 
 function makeProviderPrimary(provider) {
@@ -189,15 +262,34 @@ function applyProviderPreset(preset, persist = true, revealDetails = false) {
 }
 
 function currentProviderOrder() {
-  const enabled = providerRows().filter((row) => row.querySelector('.provider-enabled input').checked).map((row) => row.dataset.provider);
+  let enabled = providerRows()
+    .filter((row) => row.querySelector('.provider-enabled input').checked
+      && selectedModel(config, row.dataset.provider, providerModelSelect(row.dataset.provider).value)
+      && providerRuntimeAvailable(row.dataset.provider))
+    .map((row) => row.dataset.provider);
   if (elements.mode.value === 'Write' && !elements.useSubscriptionTokens.checked) return [];
-  if (elements.mode.value === 'Write') return enabled.filter((provider) => provider !== 'Ollama');
+  if (elements.mode.value === 'Write') enabled = enabled.filter((provider) => provider !== 'Ollama');
   if (!elements.useSubscriptionTokens.checked) return enabled.includes('Ollama') ? ['Ollama'] : [];
-  return enabled;
+  return primaryFirst(enabled, elements.primaryProvider.value);
 }
 
 function selectedProviderModels() {
-  return Object.fromEntries(PROVIDERS.map((provider) => [provider, providerModelSelect(provider).value || defaultModel(provider)]));
+  return Object.fromEntries(PROVIDERS.map((provider) => [provider, providerModelSelect(provider).value || defaultModel(provider) || 'default']));
+}
+
+function providerRuntimeAvailable(provider) {
+  return Boolean(providerStatus?.[provider.toLowerCase()]?.available);
+}
+
+function hasRunningTask() {
+  return [...liveJobs.values()].some((job) => job.projectId === activeProject?.id && (job.kind || 'task') === 'task' && ['running', 'stopping'].includes(job.status));
+}
+
+function providerConfiguredForMode(provider) {
+  const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
+  if (!row?.querySelector('.provider-enabled input').checked || !selectedModel(config, provider, providerModelSelect(provider).value)) return false;
+  if (!elements.useSubscriptionTokens.checked) return provider === 'Ollama' && elements.mode.value !== 'Write';
+  return !(elements.mode.value === 'Write' && provider === 'Ollama');
 }
 
 function saveExecutionPreferences() {
@@ -205,7 +297,7 @@ function saveExecutionPreferences() {
   const value = {
     order: providerRows().map((row) => row.dataset.provider),
     enabled: Object.fromEntries(providerRows().map((row) => [row.dataset.provider, row.querySelector('.provider-enabled input').checked])),
-    preset: selectedProviderPreset(), models: selectedProviderModels(), mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
+    preset: selectedProviderPreset(), primaryProvider: elements.primaryProvider.value, modelProfile: selectedModelProfile(), models: selectedProviderModels(), mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
   };
   localStorage.setItem(executionPreferenceKey(), JSON.stringify(value));
 }
@@ -222,22 +314,46 @@ function renderExecutionControls(persist = true) {
     const enabled = row.querySelector('.provider-enabled input').checked;
     const unavailableForTokens = !elements.useSubscriptionTokens.checked && provider !== 'Ollama';
     const unavailableForMode = elements.mode.value === 'Write' && provider === 'Ollama';
-    row.classList.toggle('route-disabled', !enabled || unavailableForTokens || unavailableForMode);
-    row.querySelector('.provider-enabled input').disabled = !custom || unavailableForTokens || unavailableForMode;
-    providerModelSelect(provider).disabled = !custom || !enabled || unavailableForTokens || unavailableForMode;
+    const modelAvailable = Boolean(selectedModel(config, provider, providerModelSelect(provider).value));
+    const runtimeAvailable = providerRuntimeAvailable(provider);
+    row.classList.toggle('route-disabled', !enabled || unavailableForTokens || unavailableForMode || !modelAvailable || !runtimeAvailable);
+    row.classList.toggle('model-unavailable', !modelAvailable);
+    row.classList.toggle('runtime-unavailable', modelAvailable && !runtimeAvailable);
+    updateProviderModelState(provider);
+    row.querySelector('.provider-enabled input').disabled = !custom || unavailableForTokens || unavailableForMode || !modelAvailable || modelCatalogLoading;
+    providerModelSelect(provider).disabled = !enabled || unavailableForTokens || unavailableForMode || !availableModels(config, provider).length || modelCatalogLoading;
   });
-  elements.primaryProvider.disabled = !custom;
-  elements.useSubscriptionTokens.disabled = !custom;
+  elements.primaryProvider.disabled = !custom || modelCatalogLoading;
+  elements.useSubscriptionTokens.disabled = !custom || modelCatalogLoading;
+  elements.modelProfile.disabled = !modelCatalogReady || modelCatalogLoading;
+  elements.refreshModels.disabled = !modelCatalogReady || modelCatalogLoading;
   elements.providerDetails.classList.toggle('preset-managed', !custom);
   const route = currentProviderOrder();
-  if (route.length && !route.includes(elements.primaryProvider.value)) elements.primaryProvider.value = route[0];
+  if (custom && route.length && !route.includes(elements.primaryProvider.value) && !providerConfiguredForMode(elements.primaryProvider.value)) makeProviderPrimary(route[0]);
   const names = route.map((provider) => provider === 'Ollama' ? 'Hermes + Ollama' : provider === 'Claude' ? 'Claude Code' : provider);
-  elements.routeSummary.innerHTML = route.length
-    ? `<strong>${names.join(' &rarr; ')}</strong><br>${elements.mode.value === 'Write' ? 'Getrennter Task-Worktree; lokaler Schreibpfad gesperrt.' : 'Bei einem Kontingentlimit übernimmt der nächste Provider.'}`
-    : elements.mode.value === 'Write' && !elements.useSubscriptionTokens.checked
-      ? '<strong>Schreibmodus benötigt Codex oder Claude.</strong> Aktiviere Abo-Kontingente oder wechsle zu „Nur lesen“.'
-      : '<strong>Kein Provider aktiv.</strong> Aktiviere mindestens Codex oder Claude.';
-  elements.start.disabled = !route.length;
+  const summaryStrong = document.createElement('strong');
+  const summaryDetail = document.createTextNode('');
+  if (route.length) {
+    const leadingProvider = route[0];
+    const leadingModel = selectedModel(config, leadingProvider, providerModelSelect(leadingProvider).value);
+    const profile = modelProfile(config, selectedModelProfile());
+    summaryStrong.textContent = names.join(' → ');
+    summaryDetail.textContent = `${profile?.displayName || 'Benutzerdefiniert'} · Zuerst: ${leadingModel?.displayName || 'kein Modell'}. ${elements.mode.value === 'Write' ? 'Getrennter Task-Worktree; lokaler Schreibpfad gesperrt.' : 'Fallback nur bei einem erkannten Kontingentlimit.'}`;
+  } else if (!providerStatus) {
+    summaryStrong.textContent = 'Provider werden geprüft.';
+    summaryDetail.textContent = ' Senden wird freigegeben, sobald mindestens ein aktiver Provider bereit ist.';
+  } else if (elements.mode.value === 'Write' && !elements.useSubscriptionTokens.checked) {
+    summaryStrong.textContent = 'Schreibmodus benötigt Codex oder Claude.';
+    summaryDetail.textContent = ' Aktiviere Abo-Kontingente oder wechsle zu „Nur lesen“.';
+  } else {
+    summaryStrong.textContent = 'Kein ausführbarer Provider aktiv.';
+    summaryDetail.textContent = ' Prüfe Modellkatalog, Providerdetails und Modus.';
+  }
+  elements.routeSummary.replaceChildren(summaryStrong, document.createElement('br'), summaryDetail);
+  const startState = taskStartState({ providerOrder: route, hasRunningTask: hasRunningTask(), catalogReady: modelCatalogReady, catalogLoading: modelCatalogLoading, runtimeReady: Boolean(providerStatus) });
+  elements.start.disabled = startState.disabled;
+  elements.start.textContent = startState.label;
+  elements.start.title = startState.reason;
   if (persist) saveExecutionPreferences();
   if (componentStatus) renderComponents(componentStatus);
 }
@@ -247,17 +363,25 @@ function loadExecutionPreferences() {
   const requestedOrder = Array.isArray(value.order) ? value.order.filter((provider) => PROVIDERS.includes(provider)) : [];
   const order = [...requestedOrder, ...PROVIDERS.filter((provider) => !requestedOrder.includes(provider))];
   for (const provider of order) elements.providerRoute.append(elements.providerRoute.querySelector(`[data-provider="${provider}"]`));
-  elements.primaryProvider.value = order[0] || 'Codex';
+  elements.primaryProvider.value = PROVIDERS.includes(value.primaryProvider) ? value.primaryProvider : order[0] || 'Codex';
+  const savedProfileExists = Boolean(modelProfile(config, value.modelProfile)) || value.modelProfile === 'custom';
+  const requestedProfile = savedProfileExists ? value.modelProfile : Object.keys(value.models || {}).length ? 'custom' : 'balanced';
+  populateModelProfiles(requestedProfile);
+  const recovery = [];
   for (const provider of PROVIDERS) {
     const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
     row.querySelector('.provider-enabled input').checked = value.enabled?.[provider] !== false;
-    populateProviderModel(provider, value.models?.[provider]);
+    const requestedModel = requestedProfile === 'custom' ? value.models?.[provider] : modelProfile(config, requestedProfile)?.modelIds?.[provider];
+    const selection = populateProviderModel(provider, requestedModel);
+    if (selection.message) recovery.push(selection.message);
   }
   elements.mode.value = ['ReadOnly', 'Write'].includes(value.mode) ? value.mode : 'ReadOnly';
   elements.useSubscriptionTokens.checked = value.useSubscriptionTokens !== false;
   const preset = ['automatic', 'local', 'custom'].includes(value.preset)
     ? value.preset
     : Object.keys(value).length ? 'custom' : 'automatic';
+  modelRecoveryMessage = recovery.join(' ');
+  updateModelProfileHint();
   renderModelCatalogState();
   applyProviderPreset(preset, false, false);
 }
@@ -267,10 +391,16 @@ function projectQuery(projectId = activeProject?.id) {
 }
 
 function setBusy(active, title = 'Bitte warten', message = 'Lokaler Projektzustand wird geladen.') {
+  if (active) busyReturnFocus = document.activeElement;
   elements.busyTitle.textContent = title; elements.busyMessage.textContent = message;
   elements.busyOverlay.classList.toggle('hidden', !active);
   elements.projectSelect.disabled = active;
   document.body.setAttribute('aria-busy', active ? 'true' : 'false');
+  document.querySelector('.topbar').inert = active;
+  document.getElementById('mainContent').inert = active;
+  if (!active && busyReturnFocus instanceof HTMLElement && busyReturnFocus.isConnected) {
+    busyReturnFocus.focus(); busyReturnFocus = null;
+  }
 }
 
 function statusClass(ok, available) {
@@ -284,7 +414,7 @@ function providerRow(name, provider, detail, percent = null) {
   const line = document.createElement('div'); line.className = 'row-line';
   const label = document.createElement('span'); label.className = 'row-name'; label.textContent = name;
   const state = document.createElement('span'); state.className = `status ${statusClass(true, provider.available)}`;
-  state.textContent = provider.available ? 'bereit' : 'wartet'; line.append(label, state);
+  state.textContent = provider.available ? 'bereit' : 'nicht bereit'; line.append(label, state);
   const description = document.createElement('div'); description.className = 'row-detail'; description.textContent = detail;
   row.append(line, description);
   if (percent !== null) {
@@ -296,6 +426,7 @@ function providerRow(name, provider, detail, percent = null) {
 }
 
 function renderProviders(status) {
+  providerStatus = status;
   elements.providerList.replaceChildren();
   const codex = status.codex;
   const creditNote = codex.credits?.has_credits ? ` · Zusatz-Credits ${Number(codex.credits.balance).toFixed(2)} (gesperrt)` : ' · keine abrechenbaren API-Credits verwendet';
@@ -399,6 +530,7 @@ function scheduleLiveJobRender() {
     jobRenderPending = false;
     renderConversation();
     renderJobActivity();
+    renderExecutionControls(false);
     if (componentStatus) renderComponents(componentStatus);
   });
 }
@@ -480,6 +612,18 @@ function jobKindLabel(job) {
   return 'Agent';
 }
 
+function providerKey(value) {
+  const normalized = String(value || '').toLowerCase();
+  return PROVIDERS.find((provider) => provider.toLowerCase() === normalized) || null;
+}
+
+function jobExecutionIdentity(job) {
+  const provider = job.selectedProvider || job.provider || jobKindLabel(job);
+  const key = providerKey(provider);
+  const modelId = job.selectedModel || (key ? job.models?.[key] : null);
+  return modelId ? `${provider} · ${modelId === 'default' ? 'Provider-Standard' : modelId}` : provider;
+}
+
 function jobStatus(job) {
   const kind = jobKindLabel(job);
   if (job.status === 'running') return { label: 'läuft', className: 'info', title: `${kind} läuft` };
@@ -557,10 +701,10 @@ function updateJobConversationElement(article, job) {
     const prompt = messageElement('user', 'Du', promptText, promptAttachments); prompt.dataset.jobPrompt = ''; prompt.dataset.signature = promptSignature;
     currentPrompt.replaceWith(prompt);
   }
-  article.querySelector('[data-job-provider]').textContent = job.provider || 'AI Project Control';
+  article.querySelector('[data-job-provider]').textContent = jobExecutionIdentity(job) || 'AI Project Control';
   article.querySelector('[data-job-progress]').className = `agent-progress ${job.status}`;
   article.querySelector('[data-job-title]').textContent = status.title;
-  article.querySelector('[data-job-phase]').textContent = `${job.provider || jobKindLabel(job)} · ${job.phase || 'wird vorbereitet'}`;
+  article.querySelector('[data-job-phase]').textContent = `${jobExecutionIdentity(job)} · ${job.phase || 'wird vorbereitet'}`;
 
   const important = importantJobEntries(job);
   const timeline = article.querySelector('[data-job-timeline]');
@@ -598,7 +742,7 @@ function updateJobConversationElement(article, job) {
   const canStop = ['running', 'stopping'].includes(job.status) && Boolean(job.cancellable ?? job.pid);
   let stop = actions.querySelector('[data-stop-job]');
   if (canStop && !stop) {
-    stop = document.createElement('button'); stop.className = 'button danger'; stop.type = 'button'; stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen'; actions.append(stop);
+    stop = document.createElement('button'); stop.className = 'button destructive'; stop.type = 'button'; stop.dataset.stopJob = job.id; stop.textContent = 'Stoppen'; actions.append(stop);
   }
   if (stop) stop.disabled = job.status === 'stopping';
   actions.classList.toggle('hidden', !canStop);
@@ -777,7 +921,7 @@ function renderSystemRows(container, systems, grouped = false) {
         update.dataset.updateSource = system.updateStatus.source || 'offizielle Quelle'; update.textContent = 'Update'; actions.append(update);
       }
       if (!system.autoDetected) {
-        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger table-button';
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button destructive table-button';
         remove.dataset.removeSystem = system.id; remove.textContent = 'Entfernen'; actions.append(remove);
       }
       item.append(actions);
@@ -967,6 +1111,7 @@ async function activateProject(projectId) {
   const visibleView = document.querySelector('[data-view-panel]:not(.hidden)')?.dataset.viewPanel || 'tasks';
   storeComposerDraft();
   invalidateProjectRequests();
+  activeModelCatalogToken = null; modelCatalogLoading = false; providerStatus = null; providerStatusErrorMessage = ''; elements.refreshModels.removeAttribute('aria-busy');
   setBusy(true, 'Projekt wird gewechselt', `${target?.name || 'Projekt'} und seine lokalen Verbindungen werden geprüft.`);
   try {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
@@ -1175,7 +1320,7 @@ function renderAttachmentPreview() {
     const chip = document.createElement('div'); chip.className = 'attachment-chip';
     const image = document.createElement('img'); image.src = attachment.dataUrl; image.alt = attachment.name;
     const name = document.createElement('span'); name.textContent = attachment.name;
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'attachment-remove';
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button icon-only destructive attachment-remove';
     remove.dataset.removeAttachment = String(index); remove.textContent = '×'; remove.setAttribute('aria-label', `${attachment.name} entfernen`);
     chip.append(image, name, remove); elements.attachmentPreview.append(chip);
   });
@@ -1285,12 +1430,14 @@ function messageElement(role, label, text, attachments = []) {
 function runConversationElement(run) {
   const article = document.createElement('article'); article.className = 'conversation-run';
   const meta = document.createElement('div'); meta.className = 'conversation-meta';
-  const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${run.provider || 'externer Lauf'}`;
+  const runProvider = run.provider || 'externer Lauf';
+  const runIdentity = run.model ? `${runProvider} · ${run.model === 'default' ? 'Provider-Standard' : run.model}` : runProvider;
+  const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${runIdentity}`;
   const stateClass = run.status === 'PASS' ? 'ok' : run.status === 'FAIL' ? 'fail' : run.status === 'external' ? 'info' : 'warn';
   const state = document.createElement('span'); state.className = `status ${stateClass}`; state.textContent = run.status;
   meta.append(identity, state); article.append(meta);
   if (run.task) article.append(messageElement('user', 'Du', run.task, run.attachments || []));
-  article.append(messageElement('assistant', run.provider || 'AI Project Control', run.response));
+  article.append(messageElement('assistant', runIdentity || 'AI Project Control', run.response));
   const summary = document.createElement('div'); summary.className = 'run-summary';
   for (const value of [run.mode, run.tests, run.filesChanged, run.gate].filter(Boolean)) {
     const chip = document.createElement('span'); chip.textContent = value; summary.append(chip);
@@ -1402,15 +1549,45 @@ function renderHistory(runs) {
   renderConversation();
 }
 
-async function refreshStatus(force = false) {
+async function refreshStatus(force = false, updateConnection = false) {
   if (!activeProject) return;
   const projectId = activeProject.id;
   const token = beginRequest('status', projectId);
-  const [status, components] = await Promise.all([
-    api(`/api/status${force ? '?force=1' : ''}`),
-    api(`/api/components?${projectQuery(projectId)}${force ? '&force=1' : ''}`),
-  ]);
-  if (requestIsCurrent(token)) { renderProviders(status); renderComponents(components); }
+  const statusQuery = new URLSearchParams();
+  if (force) statusQuery.set('force', '1');
+  const ollamaModel = providerModelSelect('Ollama')?.value;
+  if (ollamaModel) statusQuery.set('ollamaModel', ollamaModel);
+  try {
+    const statusSuffix = statusQuery.toString();
+    const [status, components] = await Promise.all([
+      api(`/api/status${statusSuffix ? `?${statusSuffix}` : ''}`),
+      api(`/api/components?${projectQuery(projectId)}${force ? '&force=1' : ''}`),
+    ]);
+    if (requestIsCurrent(token)) {
+      providerStatusErrorMessage = '';
+      renderProviders(status); renderComponents(components); renderModelCatalogState(); renderExecutionControls(false);
+      if (updateConnection) {
+        elements.connection.className = 'connection ok';
+        elements.connection.textContent = 'Lokal verbunden';
+      }
+    }
+  } catch (error) {
+    if (requestIsCurrent(token)) {
+      providerStatus = null;
+      providerStatusErrorMessage = `Providerstatus konnte nicht aktualisiert werden: ${error.message} Prüfe den lokalen Dienst oder aktualisiere die Modelle erneut.`;
+      renderModelCatalogState(); renderExecutionControls(false);
+      if (updateConnection) {
+        elements.connection.className = 'connection error';
+        elements.connection.textContent = `Providerstatus nicht verfügbar: ${error.message}`;
+      }
+    }
+    throw error;
+  }
+}
+
+async function refreshStatusSafely(force = false) {
+  try { await refreshStatus(force, true); }
+  catch { /* refreshStatus renders failures only while its request is current. */ }
 }
 
 async function refreshJobs() {
@@ -1425,6 +1602,7 @@ async function refreshJobs() {
   for (const row of rows) liveJobs.set(row.id, row);
   renderConversation();
   renderJobActivity();
+  renderExecutionControls(false);
   if (componentStatus) renderComponents(componentStatus);
   const latestTask = visibleLiveJobs().findLast((job) => job.kind === 'task');
   if (latestTask?.status === 'failed') elements.formMessage.textContent = 'Letzte Aufgabe fehlgeschlagen. Details stehen direkt im Gespräch.';
@@ -1471,10 +1649,18 @@ async function refreshAll(force = false) {
 async function initialize() {
   try {
     [config, registry] = await Promise.all([api('/api/config'), api('/api/projects')]);
+    if (config.apiContractVersion !== API_CONTRACT_VERSION || config.modelCatalog?.version !== MODEL_CATALOG_VERSION) {
+      throw new Error('Dashboard-Dienst und Oberfläche haben unterschiedliche Versionen. Starte das Dashboard neu; Aufgaben bleiben bis dahin deaktiviert.');
+    }
+    modelCatalogReady = true;
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
     elements.provisionParent.value = config.defaultProjectParent;
     loadExecutionPreferences(); renderProjectSelector(); restoreComposerDraft(activeProject.id); connectJobEvents(); await refreshAll(true); void loadSystems(false, true);
-  } catch (error) { elements.connection.className = 'connection error'; elements.connection.textContent = error.message; }
+  } catch (error) {
+    modelCatalogReady = false; renderExecutionControls(false);
+    elements.connection.className = 'connection error'; elements.connection.textContent = error.message;
+    renderModelCatalogState(error.message);
+  }
 }
 
 document.querySelector('.view-tabs').addEventListener('click', (event) => {
@@ -1504,20 +1690,57 @@ elements.providerPreset.addEventListener('change', (event) => {
   const radio = event.target.closest('input[name="providerPreset"]');
   if (radio) applyProviderPreset(radio.value, true, radio.value === 'custom');
 });
-elements.providerRoute.addEventListener('change', () => renderExecutionControls());
+elements.modelProfile.addEventListener('change', () => {
+  applyModelProfile(elements.modelProfile.value);
+  if (providerStatus) providerStatus = { ...providerStatus, ollama: null };
+  renderExecutionControls(false); void refreshStatusSafely(true);
+});
+elements.providerRoute.addEventListener('change', (event) => {
+  const modelSelect = event.target.closest('select[data-provider-model]');
+  if (modelSelect) {
+    elements.modelProfile.value = 'custom'; updateModelProfileHint(); updateProviderModelState(modelSelect.dataset.providerModel);
+    modelRecoveryMessage = ''; renderModelCatalogState();
+    if (modelSelect.dataset.providerModel === 'Ollama' && providerStatus) providerStatus = { ...providerStatus, ollama: null };
+  }
+  renderExecutionControls();
+  if (modelSelect?.dataset.providerModel === 'Ollama') void refreshStatusSafely(true);
+});
 elements.primaryProvider.addEventListener('change', () => { makeProviderPrimary(elements.primaryProvider.value); renderExecutionControls(); });
 elements.refreshModels.addEventListener('click', async () => {
+  const projectId = activeProject?.id;
+  if (!projectId) return;
+  const token = beginRequest('modelCatalog', projectId);
+  activeModelCatalogToken = token;
   const selected = selectedProviderModels();
-  elements.refreshModels.disabled = true;
+  const profileId = selectedModelProfile();
+  modelCatalogLoading = true; renderExecutionControls(false);
+  elements.refreshModels.setAttribute('aria-busy', 'true');
   renderModelCatalogState('wird aktualisiert…');
   try {
     const refreshed = await api('/api/config?force=1');
+    if (!requestIsCurrent(token)) return;
+    if (refreshed.apiContractVersion !== API_CONTRACT_VERSION || refreshed.modelCatalog?.version !== MODEL_CATALOG_VERSION) {
+      throw new Error('Der laufende Dashboard-Dienst ist nicht mit dieser Oberfläche kompatibel. Starte das Dashboard neu.');
+    }
     config = { ...config, ...refreshed };
-    for (const provider of PROVIDERS) populateProviderModel(provider, selected[provider]);
+    populateModelProfiles(profileId);
+    const recovery = [];
+    for (const provider of PROVIDERS) {
+      const requested = profileId === 'custom' ? selected[provider] : modelProfile(config, profileId)?.modelIds?.[provider];
+      const selection = populateProviderModel(provider, requested);
+      if (selection.message) recovery.push(selection.message);
+    }
+    modelRecoveryMessage = recovery.join(' ');
     renderModelCatalogState();
-    renderExecutionControls();
-  } catch (error) { renderModelCatalogState(`Fehler: ${error.message}`); }
-  finally { elements.refreshModels.disabled = false; }
+    updateModelProfileHint();
+    await refreshStatus(true);
+  } catch (error) { if (requestIsCurrent(token)) renderModelCatalogState(`Fehler: ${error.message}`); }
+  finally {
+    if (activeModelCatalogToken === token) {
+      activeModelCatalogToken = null; modelCatalogLoading = false; elements.refreshModels.removeAttribute('aria-busy');
+      renderExecutionControls(requestIsCurrent(token));
+    }
+  }
 });
 elements.mode.addEventListener('change', () => renderExecutionControls());
 elements.useSubscriptionTokens.addEventListener('change', () => renderExecutionControls());
@@ -1656,13 +1879,15 @@ elements.noteList.addEventListener('click', (event) => {
 });
 
 elements.form.addEventListener('submit', async (event) => {
-  event.preventDefault(); elements.start.disabled = true; elements.formMessage.textContent = 'Task wird gestartet…';
+  event.preventDefault();
   const projectId = activeProject.id;
+  const providerOrder = currentProviderOrder();
+  const availability = taskStartState({ providerOrder, hasRunningTask: hasRunningTask(), catalogReady: modelCatalogReady, catalogLoading: modelCatalogLoading, runtimeReady: Boolean(providerStatus) });
+  if (availability.disabled) { elements.formMessage.textContent = availability.reason; renderExecutionControls(false); return; }
+  elements.start.disabled = true; elements.formMessage.textContent = 'Task wird gestartet…';
   const token = beginRequest('taskMutation', projectId);
   const taskText = elements.task.value;
   const attachments = selectedAttachments.map((attachment) => ({ ...attachment }));
-  const providerOrder = currentProviderOrder();
-  if (!providerOrder.length) { elements.formMessage.textContent = 'Aktiviere mindestens einen für diesen Modus verfügbaren Provider.'; renderExecutionControls(false); return; }
   try {
     const job = await api('/api/tasks', { method: 'POST', body: JSON.stringify({
       projectId, task: taskText, provider: providerOrder.length === 1 ? providerOrder[0] : 'Auto', providerOrder,
@@ -1821,5 +2046,5 @@ new ResizeObserver(() => { if (graphData) drawGraph(); }).observe(elements.graph
 
 initialize();
 setInterval(refreshJobs, 3000);
-setInterval(refreshStatus, 15000);
+setInterval(() => { void refreshStatusSafely(); }, 15000);
 setInterval(refreshHistory, 15000);

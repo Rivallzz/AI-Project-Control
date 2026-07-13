@@ -1,9 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
 const { after, test } = require('node:test');
 const { createCompletedDashboardJob } = require('./test-helpers/job-fixture');
-const { requestJson } = require('./test-helpers/http-client');
+const { requestJson, waitFor } = require('./test-helpers/http-client');
 const { createSandbox, removeSandbox, startServer } = require('./test-helpers/server-harness');
 
 let root;
@@ -22,7 +24,12 @@ test('completed jobs remain visible after a server restart', async () => {
   root = await createSandbox();
   server = await startServer({ root });
   const { job } = await createCompletedDashboardJob(server, 'RestartProject');
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await waitFor(async () => {
+    try {
+      const store = JSON.parse(await fs.readFile(path.join(server.dataRoot, 'jobs.json'), 'utf8'));
+      return store.jobs?.some((candidate) => candidate.id === job.id && candidate.status === 'completed');
+    } catch { return false; }
+  }, { description: 'completed job persistence' });
   await server.stop();
 
   server = await startServer({ root });

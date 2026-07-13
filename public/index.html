@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">Zum Hauptinhalt springen</a>
   <header class="topbar">
     <div class="brand-block">
       <h1>AI Project Control</h1>
@@ -30,7 +31,7 @@
     </div>
   </header>
 
-  <main class="layout">
+  <main id="mainContent" class="layout" tabindex="-1">
     <aside class="sidebar">
       <section class="panel" aria-labelledby="systemHeading">
         <div class="section-heading workflow-heading">
@@ -80,13 +81,22 @@
             </select>
 
             <fieldset id="providerPresetControl" class="provider-presets">
-              <legend>Providerpreset</legend>
+              <legend>Ausführungsweg</legend>
               <label><input type="radio" name="providerPreset" value="automatic" checked><span>Automatisch</span></label>
               <label><input type="radio" name="providerPreset" value="local"><span>Nur lokal</span></label>
               <label><input type="radio" name="providerPreset" value="custom"><span>Benutzerdefiniert</span></label>
             </fieldset>
+
+            <label class="model-profile-control" for="modelProfileSelect">
+              <span>Modellprofil</span>
+              <select id="modelProfileSelect" aria-describedby="modelProfileHint" disabled>
+                <option>Modelle werden geladen</option>
+              </select>
+            </label>
+            <p id="modelProfileHint" class="control-hint">Wählt nachvollziehbare Modelle je Provider. Die konkrete Auswahl bleibt unter „Providerdetails“ sichtbar.</p>
+
             <details id="providerDetails" class="provider-details">
-              <summary><span>Providerdetails</span><small>Reihenfolge, Modelle und Kostenweg</small></summary>
+              <summary><span>Providerdetails</span><small>Reihenfolge, konkrete Modelle und Kostenweg</small></summary>
               <div class="provider-details-body">
                 <div class="route-heading"><span>Provider</span><small>aktivieren und Modell wählen</small></div>
                 <label class="primary-provider-control" for="primaryProviderSelect">
@@ -103,24 +113,24 @@
                     <div class="provider-route-main">
                       <label class="provider-enabled"><input type="checkbox" checked><span><strong>Codex</strong><small>ChatGPT-Kontingent</small></span></label>
                     </div>
-                    <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell"></select></label>
+                    <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell" aria-describedby="codexModelState" disabled></select><small id="codexModelState" data-model-state="Codex">Modelle werden geladen.</small></label>
                   </li>
                   <li class="provider-route-row" data-provider="Claude">
                     <div class="provider-route-main">
                       <label class="provider-enabled"><input type="checkbox" checked><span><strong>Claude Code</strong><small>Claude-Kontingent</small></span></label>
                     </div>
-                    <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Code-Modell"></select></label>
+                    <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Code-Modell" aria-describedby="claudeModelState" disabled></select><small id="claudeModelState" data-model-state="Claude">Modelle werden geladen.</small></label>
                   </li>
                   <li class="provider-route-row" data-provider="Ollama">
                     <div class="provider-route-main">
                       <label class="provider-enabled"><input type="checkbox" checked><span><strong>Hermes + Ollama</strong><small>Lokal, kein Abo</small></span></label>
                     </div>
-                    <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell"></select></label>
+                    <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell" aria-describedby="ollamaModelState" disabled></select><small id="ollamaModelState" data-model-state="Ollama">Modelle werden geladen.</small></label>
                   </li>
                 </ol>
                 <div class="model-catalog-actions">
-                  <button id="refreshModelsButton" class="button secondary" type="button">Modelle aktualisieren</button>
-                  <span id="modelCatalogState" class="control-hint" role="status"></span>
+                  <button id="refreshModelsButton" class="button secondary" type="button" disabled>Modelle aktualisieren</button>
+                  <span id="modelCatalogState" class="control-hint" role="status">Modellkatalog wird geladen.</span>
                 </div>
 
                 <label class="token-toggle compact" for="useSubscriptionTokens">
@@ -150,7 +160,7 @@
               <div class="form-actions">
                 <input id="attachmentInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
                 <button id="attachmentButton" class="button secondary" type="button" title="Bild auswählen oder Screenshot mit Strg+V einfügen">Bild hinzufügen</button>
-                <button id="startButton" class="button primary" type="submit">Senden</button>
+                <button id="startButton" class="button primary" type="submit" aria-describedby="routeSummary formMessage" disabled>Modelle werden geladen</button>
                 <span id="formMessage" class="form-message" role="status"></span>
               </div>
             </form>
@@ -302,7 +312,7 @@
     </div>
   </main>
 
-  <div id="busyOverlay" class="busy-overlay hidden" role="status" aria-live="assertive" aria-busy="true">
+  <div id="busyOverlay" class="busy-overlay hidden" role="status" aria-live="assertive" aria-busy="true" aria-labelledby="busyTitle" aria-describedby="busyMessage">
     <div class="busy-dialog">
       <span class="busy-spinner" aria-hidden="true"></span>
       <div><h2 id="busyTitle">Bitte warten</h2><p id="busyMessage">Der lokale Projektzustand wird geladen.</p></div>

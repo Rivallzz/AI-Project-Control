@@ -342,6 +342,50 @@ function Write-ClaudeBackoffState {
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
 }
 
+function Get-ProviderStatusValue {
+    param(
+        [object]$ProviderStatus,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    if ($null -eq $ProviderStatus) { return $null }
+    $property = $ProviderStatus.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-ProviderUnavailableReason {
+    param(
+        [Parameter(Mandatory)][string]$ProviderKey,
+        [object]$ProviderStatus
+    )
+
+    $reportedReason = [string](Get-ProviderStatusValue -ProviderStatus $ProviderStatus -Name 'reason')
+    if ($reportedReason.Trim()) { return $reportedReason.Trim() }
+
+    if ($ProviderKey -eq 'codex') {
+        if (-not [bool](Get-ProviderStatusValue -ProviderStatus $ProviderStatus -Name 'authenticated_with_chatgpt')) {
+            return 'Codex is not authenticated with a ChatGPT subscription.'
+        }
+        if ([bool](Get-ProviderStatusValue -ProviderStatus $ProviderStatus -Name 'quota_known')) {
+            return 'Codex subscription quota is currently exhausted.'
+        }
+        return 'Codex is currently unavailable.'
+    }
+    if ($ProviderKey -eq 'claude') {
+        $retryNotBefore = [string](Get-ProviderStatusValue -ProviderStatus $ProviderStatus -Name 'retry_not_before_local')
+        if ($retryNotBefore.Trim()) { return "Claude is in quota backoff until $($retryNotBefore.Trim())." }
+        if (-not [bool](Get-ProviderStatusValue -ProviderStatus $ProviderStatus -Name 'authenticated_with_subscription')) {
+            return 'Claude Code is not authenticated with an eligible subscription.'
+        }
+        return 'Claude Code is currently unavailable.'
+    }
+    if ($ProviderKey -eq 'ollama') {
+        return 'Hermes/Ollama is unavailable for the selected local model.'
+    }
+    return "$ProviderKey is currently unavailable."
+}
+
 if (-not (Test-Path -LiteralPath $TaskFile -PathType Leaf)) {
     throw "Task file not found: $TaskFile"
 }
@@ -354,10 +398,20 @@ $workingPath = (Resolve-Path -LiteralPath $WorkingDirectory).Path
 $taskPackageRaw = Get-Content -LiteralPath $taskPath -Raw
 $goalMatch = [regex]::Match($taskPackageRaw, '(?s)## Goal\s*(.+)$')
 $taskGoal = if ($goalMatch.Success) { $goalMatch.Groups[1].Value.Trim() } else { $taskPackageRaw.Trim() }
+$CodexModel = $CodexModel.Trim()
+$ClaudeModel = $ClaudeModel.Trim()
 $OllamaModel = $OllamaModel.Trim()
+if (-not $CodexModel) { $CodexModel = 'default' }
+if (-not $ClaudeModel) { $ClaudeModel = 'default' }
+if (-not $OllamaModel) { $OllamaModel = 'default' }
 $statusScript = Join-Path $PSScriptRoot 'Get-AiProviderStatus.ps1'
 $status = (& $statusScript -Json -OllamaModel $OllamaModel | Out-String) | ConvertFrom-Json
-if ($OllamaModel -eq 'default' -and $status.ollama.model) { $OllamaModel = [string]$status.ollama.model }
+if ($status.ollama.model) { $OllamaModel = [string]$status.ollama.model }
+$providerModels = @{
+    codex = $CodexModel
+    claude = $ClaudeModel
+    ollama = $OllamaModel
+}
 
 $gitBefore = (& git -C $workingPath status --porcelain=v1 --untracked-files=all | Out-String).TrimEnd()
 if ($Mode -eq 'Write' -and $gitBefore -and -not $AllowDirtyWorkingTree) {
@@ -450,32 +504,61 @@ foreach ($requestedProvider in $requestedProviders) {
 }
 
 if ($LocalOnly) { $requestedProviders = @('Ollama') }
+$attempts = [System.Collections.Generic.List[object]]::new()
+$handoffs = [System.Collections.Generic.List[object]]::new()
+$unavailableProviders = [System.Collections.Generic.List[object]]::new()
 $candidates = @(
     foreach ($requestedProvider in $requestedProviders) {
         $providerKey = $requestedProvider.ToLowerInvariant()
         $providerStatus = $status.PSObject.Properties[$providerKey].Value
-        if ($providerStatus.available) { $providerKey }
+        if ($providerStatus.available) {
+            $providerKey
+            continue
+        }
+        $reason = Get-ProviderUnavailableReason -ProviderKey $providerKey -ProviderStatus $providerStatus
+        $model = [string]$providerModels[$providerKey]
+        [void]$unavailableProviders.Add([pscustomobject]@{
+            provider = $providerKey
+            model = $model
+            reason = $reason
+        })
+        [Console]::Out.WriteLine("AI_EVENT provider=$providerKey state=unavailable model=$model reason=$reason")
+        [Console]::Out.Flush()
     }
 )
 
 if ($candidates.Count -eq 0) {
-    throw 'No provider is currently available under the subscription-only policy.'
+    $reasonSummary = @($unavailableProviders | ForEach-Object { "$($_.provider) model=$($_.model): $($_.reason)" }) -join '; '
+    [pscustomobject]@{
+        status = 'FAIL'
+        reason = "No requested provider is currently available. $reasonSummary"
+        selected_provider = $null
+        selected_model = $null
+        mode = $Mode
+        attempts = $attempts
+        handoffs = $handoffs
+        unavailable_providers = $unavailableProviders
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
+    throw "No requested provider is currently available. $reasonSummary"
 }
 
 if ($DryRun) {
     [pscustomobject]@{
         run_directory = $runDir
         selected_order = $candidates
+        selected_models = $providerModels
+        unavailable_providers = $unavailableProviders
         mode = $Mode
         repository_status_unchanged = $true
     } | ConvertTo-Json -Depth 5
     exit 0
 }
 
-$attempts = [System.Collections.Generic.List[object]]::new()
-$handoffs = [System.Collections.Generic.List[object]]::new()
 $handoffPath = $null
+$selectedModel = $null
 foreach ($candidate in $candidates) {
+    $candidateModel = [string]$providerModels[$candidate]
+    $selectedModel = $candidateModel
     $attemptDir = Join-Path $runDir ("attempt-{0}-{1}" -f ($attempts.Count + 1), $candidate)
     New-Item -ItemType Directory -Force -Path $attemptDir | Out-Null
     if ($candidate -eq 'ollama' -and $Mode -eq 'Write') {
@@ -511,7 +594,7 @@ Provider handoff:
         }
         $attemptPromptPath = Join-Path $attemptDir 'provider-prompt.md'
         $attemptPrompt | Set-Content -LiteralPath $attemptPromptPath -Encoding utf8
-        [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=started attempt=$($attempts.Count + 1)")
+        [Console]::Out.WriteLine("AI_EVENT provider=$candidate state=started attempt=$($attempts.Count + 1) model=$candidateModel")
         [Console]::Out.Flush()
 
         if ($candidate -eq 'codex') {
@@ -563,7 +646,7 @@ $deliveryMetadataPolicy
             # `-z` deliberately hides tool previews. The non-interactive chat query keeps
             # progress visible on stdout so the dashboard can stream it in real time.
             $hermesToolsets = if ($Mode -eq 'ReadOnly') { 'terminal,serena' } else { 'terminal,file,skills,todo,serena' }
-            $arguments = @('chat', '-q', $hermesPrompt, '--provider', 'ollama-launch', '-m', $OllamaModel, '--source', 'tool', '--max-turns', '60', '--toolsets', $hermesToolsets)
+            $arguments = @('chat', '-m', $OllamaModel, '-q', $hermesPrompt, '--provider', 'ollama-launch', '--source', 'tool', '--max-turns', '60', '--toolsets', $hermesToolsets)
             $arguments += @('--skills', 'controlled-project-development')
             $processInput = ''
         }
@@ -630,6 +713,7 @@ $deliveryMetadataPolicy
 
     $attempt = [pscustomobject]@{
         provider = $candidate
+        model = $candidateModel
         exit_code = $result.ExitCode
         success = $completionConfirmed -and -not ($Mode -eq 'ReadOnly' -and $repoChanged)
         completion_sentinel = $completionConfirmed
@@ -648,11 +732,13 @@ $deliveryMetadataPolicy
             status = 'FAIL'
             reason = 'Provider changed content during a read-only task.'
             selected_provider = $candidate
+            selected_model = $candidateModel
             mode = $Mode
             repository_changed = $true
             content_changes = $contentChanges
             attempts = $attempts
             handoffs = $handoffs
+            unavailable_providers = $unavailableProviders
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         throw "Provider $candidate changed content during a read-only task. Automatic fallback and blocked completion were rejected; inspect $attemptDir."
     }
@@ -660,12 +746,14 @@ $deliveryMetadataPolicy
         [pscustomobject]@{
             status = 'PASS'
             selected_provider = $candidate
+            selected_model = $candidateModel
             mode = $Mode
             repository_changed = $repoChanged
             suggested_commit_message = $suggestedCommitMessage
             suggested_branch_name = $suggestedBranchName
             attempts = $attempts
             handoffs = $handoffs
+            unavailable_providers = $unavailableProviders
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         Write-Output "AI_PROJECT_ROUTER_OK provider=$candidate run=$runDir"
         exit 0
@@ -676,10 +764,12 @@ $deliveryMetadataPolicy
             status = 'BLOCKED'
             reason = $blockedReason
             selected_provider = $candidate
+            selected_model = $candidateModel
             mode = $Mode
             repository_changed = $repoChanged
             attempts = $attempts
             handoffs = $handoffs
+            unavailable_providers = $unavailableProviders
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         Write-Output "AI_PROJECT_ROUTER_BLOCKED provider=$candidate run=$runDir"
         exit 2
@@ -690,9 +780,11 @@ $deliveryMetadataPolicy
             status = 'FAIL'
             reason = 'Provider exited without the required completion sentinel.'
             selected_provider = $candidate
+            selected_model = $candidateModel
             mode = $Mode
             attempts = $attempts
             handoffs = $handoffs
+            unavailable_providers = $unavailableProviders
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         throw "Provider $candidate exited without the required completion sentinel. Automatic fallback stopped; inspect $attemptDir."
     }
@@ -701,9 +793,11 @@ $deliveryMetadataPolicy
             status = 'FAIL'
             reason = 'Provider failed for a non-quota reason.'
             selected_provider = $candidate
+            selected_model = $candidateModel
             mode = $Mode
             attempts = $attempts
             handoffs = $handoffs
+            unavailable_providers = $unavailableProviders
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
         throw "Provider $candidate failed for a non-quota reason. Automatic fallback stopped; inspect $attemptDir."
     }
@@ -763,6 +857,9 @@ $gitAfter
 [pscustomobject]@{
     status = 'FAIL'
     reason = 'All allowed providers were exhausted.'
+    selected_model = $selectedModel
     attempts = $attempts
+    handoffs = $handoffs
+    unavailable_providers = $unavailableProviders
 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'routing-result.json') -Encoding utf8
 throw "All allowed providers were exhausted. See $runDir"

@@ -225,17 +225,81 @@ function Get-ClaudeStatus {
     }
 }
 
+function Get-OllamaModelCapabilities {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.CommandInfo]$OllamaCommand,
+        [Parameter(Mandatory)][string]$ModelName
+    )
+
+    try {
+        $showOutput = @(& $OllamaCommand.Source show $ModelName 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw "ollama show failed for $ModelName" }
+    }
+    catch {
+        return [pscustomobject]@{ success = $false; capabilities = @(); reason = $_.Exception.Message }
+    }
+
+    $capabilities = @()
+    $insideCapabilities = $false
+    $headingIndent = 0
+    foreach ($lineValue in $showOutput) {
+        $line = [string]$lineValue
+        $trimmed = $line.Trim()
+        if (-not $insideCapabilities) {
+            if ($trimmed -ieq 'Capabilities') {
+                $insideCapabilities = $true
+                $headingIndent = ([regex]::Match($line, '^\s*')).Value.Length
+            }
+            continue
+        }
+        if (-not $trimmed) {
+            if ($capabilities.Count) { break }
+            continue
+        }
+        $indent = ([regex]::Match($line, '^\s*')).Value.Length
+        if ($indent -le $headingIndent) { break }
+        $capabilities += @($trimmed -split '\s+')[0].ToLowerInvariant()
+    }
+
+    return [pscustomobject]@{
+        success = $true
+        capabilities = @($capabilities | Sort-Object -Unique)
+        reason = if ($capabilities.Count) { $null } else { 'No capability metadata was reported.' }
+    }
+}
+
 function Get-OllamaStatus {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$RequestedModel)
 
     $requestedModelName = $RequestedModel.Trim()
+    $hermesCommand = Get-Command hermes -ErrorAction SilentlyContinue
     if (-not $requestedModelName) {
-        return [pscustomobject]@{ available = $false; model = $requestedModelName; local_only = $true; reason = 'No Ollama model was selected.' }
+        return [pscustomobject]@{
+            available = $false
+            model = $requestedModelName
+            requested_model = $requestedModelName
+            hermes_available = $null -ne $hermesCommand
+            installed_models = @()
+            installed_chat_models = @()
+            local_only = $true
+            reason = 'No Ollama model was selected.'
+        }
     }
 
     $command = Get-Command ollama -ErrorAction SilentlyContinue
     if ($null -eq $command) {
-        return [pscustomobject]@{ available = $false; model = $requestedModelName; local_only = $true; reason = 'ollama command not found' }
+        $reasons = @('ollama command not found')
+        if ($null -eq $hermesCommand) { $reasons += 'hermes command not found' }
+        return [pscustomobject]@{
+            available = $false
+            model = $requestedModelName
+            requested_model = $requestedModelName
+            hermes_available = $null -ne $hermesCommand
+            installed_models = @()
+            installed_chat_models = @()
+            local_only = $true
+            reason = $reasons -join '; '
+        }
     }
 
     try {
@@ -243,7 +307,18 @@ function Get-OllamaStatus {
         if ($LASTEXITCODE -ne 0) { throw 'ollama list failed' }
     }
     catch {
-        return [pscustomobject]@{ available = $false; model = $requestedModelName; local_only = $true; reason = 'Installed Ollama models could not be read.' }
+        $reasons = @('Installed Ollama models could not be read.')
+        if ($null -eq $hermesCommand) { $reasons += 'hermes command not found.' }
+        return [pscustomobject]@{
+            available = $false
+            model = $requestedModelName
+            requested_model = $requestedModelName
+            hermes_available = $null -ne $hermesCommand
+            installed_models = @()
+            installed_chat_models = @()
+            local_only = $true
+            reason = $reasons -join ' '
+        }
     }
 
     $installedModels = @(
@@ -253,19 +328,59 @@ function Get-OllamaStatus {
             @($trimmed -split '\s+')[0]
         }
     )
+    $installedModels = @(
+        $installedModels |
+            Sort-Object @{ Expression = { $_.ToLowerInvariant() } }, @{ Expression = { $_ } } -Unique
+    )
+    $capabilityByModel = @{}
+    $installedChatModels = @(
+        foreach ($modelName in $installedModels) {
+            $metadata = Get-OllamaModelCapabilities -OllamaCommand $command -ModelName $modelName
+            $capabilityByModel[$modelName] = $metadata
+            if ($metadata.success -and @($metadata.capabilities) -contains 'completion') { $modelName }
+        }
+    )
+    $resolvedModelName = $requestedModelName
     if ($requestedModelName -eq 'default') {
-        $fallbackModels = @($installedModels | Where-Object { $_ -notmatch '(?i)embed' } | Select-Object -First 1)
-        $requestedModelName = if ($fallbackModels.Count) { [string]$fallbackModels[0] } else { '' }
+        $resolvedModelName = if ($installedChatModels.Count) { [string]$installedChatModels[0] } else { '' }
     }
-    $hasModel = [bool]$requestedModelName -and @($installedModels | Where-Object {
-        $_ -ieq $requestedModelName -or $_ -ieq ($requestedModelName + ':latest')
-    }).Count -gt 0
+    else {
+        $matchingModel = @($installedChatModels | Where-Object {
+            $_ -ieq $requestedModelName -or $_ -ieq ($requestedModelName + ':latest')
+        } | Select-Object -First 1)
+        if ($matchingModel.Count) { $resolvedModelName = [string]$matchingModel[0] }
+    }
+    $hasModel = [bool]$resolvedModelName -and @($installedChatModels | Where-Object { $_ -ieq $resolvedModelName }).Count -gt 0
+    $reasons = @()
+    if ($null -eq $hermesCommand) { $reasons += 'hermes command not found.' }
+    if (-not $hasModel) {
+        $reasons += if ($requestedModelName -eq 'default') {
+            'No installed Ollama model exposes a confirmed completion capability.'
+        }
+        else {
+            $installedMatch = @($installedModels | Where-Object {
+                $_ -ieq $requestedModelName -or $_ -ieq ($requestedModelName + ':latest')
+            } | Select-Object -First 1)
+            if (-not $installedMatch.Count) {
+                "Selected Ollama model is not installed: $requestedModelName"
+            }
+            elseif (-not $capabilityByModel[[string]$installedMatch[0]].success) {
+                "Capability metadata for the selected Ollama model could not be read: $requestedModelName"
+            }
+            else {
+                "Selected Ollama model does not expose the completion capability: $requestedModelName"
+            }
+        }
+    }
     return [pscustomobject]@{
-        available = $hasModel
-        model = $requestedModelName
+        available = $null -ne $hermesCommand -and $hasModel
+        model = $resolvedModelName
+        requested_model = $requestedModelName
+        hermes_available = $null -ne $hermesCommand
         installed_models = $installedModels
+        installed_chat_models = $installedChatModels
         local_only = $true
-        reason = if ($hasModel) { $null } else { "Selected Ollama model not found: $requestedModelName" }
+        reason = if ($reasons.Count) { $reasons -join ' ' } else { $null }
     }
 }
 

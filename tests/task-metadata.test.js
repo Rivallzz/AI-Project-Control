@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels, extractVersion, parseWingetUpgradeOutput } = require('../server');
+const { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels, extractVersion, parseWingetUpgradeOutput, rememberProviderAttempt } = require('../server');
 
 assert.strictEqual(
   taskBranchSlug('Die durch den Chat erstellten Branches haben schlechte Titel. Commit-Nachrichten sollen pro Branch gespeichert werden.'),
@@ -21,6 +21,12 @@ assert.deepStrictEqual(normalizeProviderModels({ Codex: 'gpt-5.6-sol', Claude: '
   Codex: 'gpt-5.6-sol', Claude: 'opus', Ollama: 'polis-coder:latest',
 });
 assert.throws(() => normalizeProviderModels({ Codex: 'bad model' }), /Invalid model/);
+
+const providerJob = {};
+rememberProviderAttempt(providerJob, 'AI_EVENT provider=codex state=started attempt=1 model=gpt-');
+rememberProviderAttempt(providerJob, '5.6-sol\n');
+rememberProviderAttempt(providerJob, 'x'.repeat(600 * 1024));
+assert.deepStrictEqual({ provider: providerJob.selectedProvider, model: providerJob.selectedModel }, { provider: 'codex', model: 'gpt-5.6-sol' });
 
 assert.strictEqual(extractVersion('codex-cli 0.114.0'), '0.114.0');
 assert.strictEqual(extractVersion('PowerShell 7.6.3'), '7.6.3');

@@ -2,6 +2,11 @@
 
 ## 2026-07-13
 
+- Replaced loosely validated model strings with a versioned server-owned catalog, deterministic provider defaults and pre-execution rejection of unknown, unavailable or deprecated active models; Ollama chat capability now comes from `ollama show` metadata instead of model-name heuristics.
+- Added project-scoped `Ausgewogen`, `Schnell`, `Qualität` and `Coding` profiles while retaining exact provider/model controls through progressive disclosure and never inferring local-model capability from its name.
+- Passed the selected Ollama model through status checks and Hermes execution, required both Hermes and the installed chat model, and recorded the provider/model actually used independently of bounded raw logs in attempt events and run history.
+- Added explicit catalog loading, empty, stale, unavailable and provider-error states; guarded cross-project refresh races; and locked task start until the active route is valid and idle.
+- Clarified responsive execution hierarchy, button semantics, focus handling, touch targets and pre-run privacy/cost/fallback feedback in the workspace UI.
 - Consolidated the system-update branch with the current `main` implementation without committing or publishing the merge.
 - Bound the local HTTP service to loopback, rejected foreign-origin mutations and required JSON for mutating API requests.
 - Moved request validation, atomic JSON state, project metadata, system catalog behavior and project-scoped UI state into focused modules.

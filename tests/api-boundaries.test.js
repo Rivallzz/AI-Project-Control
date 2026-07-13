@@ -30,6 +30,17 @@ test('the isolated harness chooses a non-default port and health reports it', as
   assert.notEqual(server.port, 8765);
 });
 
+test('the config endpoint exposes the versioned model catalog including partial availability', async () => {
+  const response = await requestJson(server.baseUrl, '/api/config');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.apiContractVersion, 2);
+  assert.equal(response.body.modelCatalog.version, 1);
+  assert.deepEqual(Object.keys(response.body.modelCatalog.providers), ['Codex', 'Claude', 'Ollama']);
+  assert.equal(response.body.modelCatalog.providers.Codex.models.some((model) => model.id === 'default'), true);
+  assert.equal(response.body.modelCatalog.providers.Claude.models.some((model) => model.id === 'sonnet'), true);
+  assert.equal(response.body.modelCatalog.providers.Ollama.status, 'error');
+});
+
 test('a foreign Origin cannot mutate local project state', async () => {
   const marker = 'foreign-origin-must-not-be-written';
   const rejected = await requestJson(server.baseUrl, '/api/memory', {
@@ -63,4 +74,23 @@ test('a same-origin application/json mutation remains accepted', async () => {
     body: JSON.stringify({ projectId: project.id, text: 'same-origin-contract' }),
   });
   assert.equal(accepted.status, 201);
+});
+
+test('an unknown active model is rejected before provider execution', async () => {
+  const rejected = await requestJson(server.baseUrl, '/api/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: server.baseUrl },
+    body: JSON.stringify({
+      projectId: project.id,
+      task: 'Do not start a provider for this invalid model.',
+      provider: 'Codex',
+      providerOrder: ['Codex'],
+      models: { Codex: 'fantasy-model', Claude: 'default', Ollama: 'default' },
+      mode: 'ReadOnly',
+      useSubscriptionTokens: true,
+    }),
+  });
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.body.error, /fantasy-model/);
+  assert.match(rejected.body.error, /nicht verfügbar/);
 });

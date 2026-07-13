@@ -10,6 +10,7 @@ const { randomUUID } = require('crypto');
 const { createRequestBoundary } = require('./lib/http/request-boundary');
 const { writeJsonAtomic } = require('./lib/runtime/atomic-json');
 const { safeId, projectDisplayName, yamlScalar } = require('./lib/projects/metadata');
+const { PROVIDER_NAMES, buildModelCatalog, ollamaModelIdsFromList, validateModelSelections } = require('./lib/providers/model-catalog');
 const {
   normalizeCatalog,
   getCatalogBinding,
@@ -54,8 +55,7 @@ const SYSTEM_CATALOG_PATH = path.join(__dirname, 'config', 'systems.json');
 const SYSTEM_UPDATE_TTL_MS = Number(process.env.AI_PROJECT_CONTROL_UPDATE_TTL_MS || 6 * 60 * 60 * 1000);
 const CODEX_CONFIG_PATH = path.join(HOME, '.codex', 'config.toml');
 const CODEX_MODEL_CACHE_PATH = path.join(HOME, '.codex', 'models_cache.json');
-const PROVIDER_NAMES = ['Codex', 'Claude', 'Ollama'];
-const DEFAULT_PROVIDER_ORDER = ['Codex', 'Claude', 'Ollama'];
+const DEFAULT_PROVIDER_ORDER = [...PROVIDER_NAMES];
 const SAFE_MODEL_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/;
 const MAX_BODY_BYTES = 24 * 1024 * 1024;
 const MAX_JOB_LOG_CHARS = 512 * 1024;
@@ -73,8 +73,7 @@ const GIT_IMAGE_TYPES = new Map([
 const MAX_GIT_IMAGE_BYTES = 20 * 1024 * 1024;
 const jobs = new Map();
 const liveClients = new Map();
-let statusCache = null;
-let statusCacheAt = 0;
+const statusCache = new Map();
 const componentCache = new Map();
 let systemCache = null;
 let systemCacheAt = 0;
@@ -205,10 +204,11 @@ function execFileAsync(file, args, options = {}) {
           exitCode: error && Number.isInteger(error.code) ? error.code : error ? 1 : 0,
           stdout: String(stdout || ''),
           stderr: String(stderr || ''),
+          error: error ? String(error.message || error) : null,
         });
       });
     } catch (error) {
-      resolve({ exitCode: 1, stdout: '', stderr: String(error?.message || error) });
+      resolve({ exitCode: 1, stdout: '', stderr: String(error?.message || error), error: String(error?.message || error) });
     }
   });
 }
@@ -222,34 +222,26 @@ async function getProviderModelCatalog(force = false) {
     configuredCodexModel = source.match(/^model\s*=\s*["']([^"']+)["']/m)?.[1] || null;
   }
 
-  let codexModels = [];
+  let codexCache = null;
   if (fs.existsSync(CODEX_MODEL_CACHE_PATH)) {
     try {
-      const cache = await readJsonFile(CODEX_MODEL_CACHE_PATH);
-      codexModels = (Array.isArray(cache.models) ? cache.models : [])
-        .filter((model) => model.visibility === 'list' && SAFE_MODEL_NAME.test(String(model.slug || '')))
-        .map((model) => ({ value: model.slug, label: model.display_name || model.slug }));
-    } catch { codexModels = []; }
-  }
-  if (configuredCodexModel && SAFE_MODEL_NAME.test(configuredCodexModel) && !codexModels.some((model) => model.value === configuredCodexModel)) {
-    codexModels.unshift({ value: configuredCodexModel, label: configuredCodexModel });
+      codexCache = await readJsonFile(CODEX_MODEL_CACHE_PATH);
+    } catch { codexCache = null; }
   }
 
   const ollamaResult = await execFileAsync('ollama.exe', ['list']);
-  const ollamaModels = ollamaResult.exitCode === 0
-    ? ollamaResult.stdout.split(/\r?\n/).slice(1).map((line) => line.trim().split(/\s{2,}/)[0]).filter((name) => SAFE_MODEL_NAME.test(name) && !/embed/i.test(name))
-    : [];
-
-  providerModelCache = {
-    Codex: [{ value: 'default', label: configuredCodexModel ? `Standard (${configuredCodexModel})` : 'Codex-Standard' }, ...codexModels],
-    Claude: [
-      { value: 'default', label: 'Claude-Standard' },
-      { value: 'sonnet', label: 'Sonnet' },
-      { value: 'opus', label: 'Opus' },
-      { value: 'haiku', label: 'Haiku' },
-    ],
-    Ollama: ollamaModels.map((model) => ({ value: model, label: model })),
-  };
+  const ollamaShowResults = {};
+  if (ollamaResult.exitCode === 0) {
+    for (const modelId of ollamaModelIdsFromList(ollamaResult.stdout)) {
+      ollamaShowResults[modelId] = await execFileAsync('ollama.exe', ['show', modelId]);
+    }
+  }
+  providerModelCache = buildModelCatalog({
+    configuredCodexModel,
+    codexCache,
+    ollamaResult: { ...ollamaResult, stderr: ollamaResult.stderr || ollamaResult.error || '' },
+    ollamaShowResults,
+  });
   providerModelCacheAt = Date.now();
   return providerModelCache;
 }
@@ -267,9 +259,9 @@ async function graphifyModelName() {
     return configured;
   }
   const catalog = await getProviderModelCatalog();
-  const detected = catalog.Ollama.find((model) => SAFE_MODEL_NAME.test(model.value));
+  const detected = catalog.providers.Ollama.models.find((model) => model.availability === 'available' && SAFE_MODEL_NAME.test(model.id));
   if (!detected) throw new Error('Graphify needs an installed Ollama chat model or AI_PROJECT_CONTROL_GRAPHIFY_MODEL.');
-  return detected.value;
+  return detected.id;
 }
 
 async function graphifyArguments(repository) {
@@ -665,13 +657,19 @@ async function addMemory(project, payload) {
   return note;
 }
 
-async function getProviderStatus(force = false) {
-  if (!force && statusCache && Date.now() - statusCacheAt < 5000) return statusCache;
-  const result = await execFileAsync('pwsh.exe', ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', STATUS_SCRIPT, '-Json']);
+async function getProviderStatus(force = false, requestedOllamaModel = 'default') {
+  const ollamaModel = String(requestedOllamaModel || 'default');
+  if (!SAFE_MODEL_NAME.test(ollamaModel)) throw new Error('Invalid Ollama model for provider status.');
+  const cacheKey = ollamaModel.toLowerCase();
+  const cached = statusCache.get(cacheKey);
+  if (!force && cached && Date.now() - cached.at < 5000) return cached.value;
+  const result = await execFileAsync('pwsh.exe', [
+    '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', STATUS_SCRIPT, '-Json', '-OllamaModel', ollamaModel,
+  ]);
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || 'Provider status command failed.');
-  statusCache = parseJsonOutput(result.stdout);
-  statusCacheAt = Date.now();
-  return statusCache;
+  const value = parseJsonOutput(result.stdout);
+  statusCache.set(cacheKey, { at: Date.now(), value });
+  return value;
 }
 
 async function commandSummary(command, args) {
@@ -1006,8 +1004,29 @@ async function getSystemInventory(project, force = false) {
   };
 }
 
+function latestProviderAttempt(job) {
+  const attempts = [...String(job.stdout || '').matchAll(/AI_EVENT\s+provider=([^\s]+)\s+state=started\s+attempt=\d+\s+model=([^\s]+)/g)];
+  const latest = attempts.at(-1);
+  return latest ? { provider: latest[1], model: latest[2] } : null;
+}
+
+function rememberProviderAttempt(job, text) {
+  const source = `${job.providerEventTail || ''}${String(text || '')}`;
+  const attempts = [...source.matchAll(/AI_EVENT\s+provider=([^\s]+)\s+state=started\s+attempt=\d+\s+model=([^\s]+)/g)];
+  const latest = attempts.at(-1);
+  if (latest) {
+    job.selectedProvider = latest[1];
+    job.selectedModel = latest[2];
+  }
+  job.providerEventTail = source.slice(-256);
+  return job;
+}
+
 function snapshotJob(job) {
   const cancellation = cancellationMetadata(job);
+  const selectedAttempt = latestProviderAttempt(job);
+  const selectedProvider = job.selectedProvider || selectedAttempt?.provider || null;
+  const selectedModel = job.selectedModel || selectedAttempt?.model || null;
   const executionState = ['running', 'stopping'].includes(job.status) ? 'running'
     : job.status === 'completed' ? 'completed'
       : job.status === 'blocked' ? 'blocked' : job.status === 'failed' ? 'failed' : job.status;
@@ -1019,6 +1038,7 @@ function snapshotJob(job) {
     id: job.id, kind: job.kind || 'task', phase: job.phase || null,
     projectId: job.projectId, projectName: job.projectName,
     status: job.status, provider: job.provider, providerOrder: job.providerOrder || null, models: job.models || null,
+    selectedProvider, selectedModel,
     mode: job.mode, useSubscriptionTokens: job.useSubscriptionTokens,
     workingDirectory: job.workingDirectory, branch: job.branch || null, taskPreview: job.taskPreview,
     createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
@@ -1137,6 +1157,7 @@ function appendLog(job, key, chunk) {
     const latest = events[events.length - 1];
     job.phase = `${latest[1]} · ${latest[2]}`;
   }
+  rememberProviderAttempt(job, text);
   broadcastJob(job);
 }
 
@@ -1205,17 +1226,12 @@ async function startTask(payload) {
   const mode = String(payload.mode || 'ReadOnly');
   const useSubscriptionTokens = payload.useSubscriptionTokens !== false;
   let providerOrder = normalizeProviderOrder(payload.providerOrder, legacyProvider);
-  const models = normalizeProviderModels(payload.models);
+  const requestedModels = normalizeProviderModels(payload.models);
   if (!task || task.length > 200000) throw new Error('Task text must contain between 1 and 200,000 characters.');
   if (!['Auto', 'Codex', 'Claude', 'Ollama'].includes(legacyProvider)) throw new Error('Unknown provider selection.');
   if (!['ReadOnly', 'Write'].includes(mode)) throw new Error('Unknown execution mode.');
-  if (!useSubscriptionTokens) providerOrder = ['Ollama'];
-  if (mode === 'Write') {
-    providerOrder = providerOrder.filter((provider) => provider !== 'Ollama');
-    if (!providerOrder.length) throw new Error('Hermes lokal ist derzeit nicht für Schreibaufgaben freigegeben. Aktiviere Codex oder Claude.');
-  }
-  const provider = providerOrder.length === 1 ? providerOrder[0] : 'Auto';
 
+  // Dashboard commands are deterministic local operations and must not depend on an AI route.
   const registeredProject = await registerProjectFromChat(task);
   if (registeredProject) {
     const id = randomUUID();
@@ -1242,6 +1258,14 @@ async function startTask(payload) {
     })();
     return snapshotJob(job);
   }
+
+  if (!useSubscriptionTokens) providerOrder = ['Ollama'];
+  if (mode === 'Write') {
+    providerOrder = providerOrder.filter((provider) => provider !== 'Ollama');
+    if (!providerOrder.length) throw new Error('Hermes lokal ist derzeit nicht für Schreibaufgaben freigegeben. Aktiviere Codex oder Claude.');
+  }
+  const models = validateModelSelections(requestedModels, providerOrder, await getProviderModelCatalog());
+  const provider = providerOrder.length === 1 ? providerOrder[0] : 'Auto';
 
   await fsp.mkdir(TASK_ROOT, { recursive: true });
   const memory = await loadMemory(project.id);
@@ -1298,7 +1322,7 @@ async function startTask(payload) {
       try { await finalizeTaskGitMetadata(project, job, worktree.branch, task); }
       catch (error) { appendLog(job, 'stderr', `Git-Metadaten konnten nicht aktualisiert werden: ${error.message}\n`); }
     }
-    job.child = null; statusCacheAt = 0; broadcastJob(job);
+    job.child = null; statusCache.clear(); broadcastJob(job);
   });
   return snapshotJob(job);
 }
@@ -1643,7 +1667,7 @@ async function runRecord(directory, projectId) {
   const summary = runSummary(responseText, result, status);
   return {
     name: path.basename(directory), path: directory, modifiedAt: stat.mtime.toISOString(),
-    status, provider: result ? result.selected_provider || null : null,
+    status, provider: result ? result.selected_provider || null : null, model: result ? result.selected_model || null : null,
     mode: result?.mode || packageField(taskPackage, 'Mode'), task: extractGoal(taskPackage), response: responseText,
     attachments: await taskAttachmentsFromPackage(taskPackage), ...summary,
   };
@@ -2158,7 +2182,9 @@ const server = http.createServer(async (request, response) => {
     const projectMatch = url.pathname.match(/^\/api\/projects\/([a-z0-9-]+)$/);
     if (request.method === 'DELETE' && projectMatch) return sendJson(response, 200, await removeProject(projectMatch[1]));
     const projectId = url.searchParams.get('projectId');
-    if (request.method === 'GET' && url.pathname === '/api/status') return sendJson(response, 200, await getProviderStatus(url.searchParams.get('force') === '1'));
+    if (request.method === 'GET' && url.pathname === '/api/status') return sendJson(response, 200, await getProviderStatus(
+      url.searchParams.get('force') === '1', url.searchParams.get('ollamaModel') || 'default',
+    ));
     if (request.method === 'GET' && url.pathname === '/api/components') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getComponents(project, url.searchParams.get('force') === '1'));
     }
@@ -2205,9 +2231,10 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/task-attachment') return await serveTaskAttachment(url, response);
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, {
+      apiContractVersion: 2,
       runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT,
       defaultProjectParent: PROJECTS_ROOT,
-      providerModels: await getProviderModelCatalog(url.searchParams.get('force') === '1'), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
+      modelCatalog: await getProviderModelCatalog(url.searchParams.get('force') === '1'), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
     });
     if (request.method === 'POST' && url.pathname === '/api/tasks') return sendJson(response, 202, await startTask(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/projects/provision') return sendJson(response, 202, await provisionProject(await readJsonBody(request)));
@@ -2247,5 +2274,6 @@ module.exports = {
   extractVersion,
   parseWingetUpgradeOutput,
   recoverJobs,
+  rememberProviderAttempt,
   authorizeRemoteBranchDelete,
 };

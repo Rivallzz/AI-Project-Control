@@ -15,7 +15,9 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Async operations lasting more than 300 ms show a blocking status dialog or an inline loading state.
 - The conversation uses one scroll region. User messages appear right, agent responses left, oldest first.
 - Running work appears as an in-conversation assistant response with a concise phase timeline; raw provider and tool output stays inside an optional technical disclosure.
-- Project execution controls live inside the workspace immediately left of the conversation, while the global sidebar remains reserved for workflow status. Presets cover automatic routing, local-only use and a disclosed custom route. One labelled `Zuerst verwenden` control chooses the primary provider; numbered rows make the resulting fallback order visible without repeated move-button interactions. Model and mode choices remain labelled and project-scoped, and the detected model catalog can be refreshed in place.
+- Project execution controls live inside the workspace immediately left of the conversation, while the global sidebar remains reserved for workflow status. A visible task-profile selector covers the common intent (`Ausgewogen`, `Schnell`, `Qualität`, `Coding`); exact provider and model controls remain available through progressive disclosure. Presets cover automatic routing, local-only use and a disclosed custom route. One labelled `Zuerst verwenden` control chooses the primary provider, and numbered rows make the resulting fallback order visible without repeated move-button interactions.
+- Model choices always show a human-readable name and a concise decision hint; technical IDs remain available where they differ. Loading, empty, stale, unavailable and provider-error states are explicit, stale IDs are never restored as selectable options, and task start remains disabled until the active route has a current valid model.
+- Provider and model are separate decisions: task profiles select capability intent, while route presets control cost and privacy. The execution summary states the leading concrete model, local/subscription boundary and quota-only fallback rule before the task starts.
 - Project switching keeps the previous screen visible beneath a clear loading scrim.
 - Buttons exist only for distinct commands. Conversation continuation uses the composer, not a separate follow-up action.
 - Image attachments support file selection and clipboard paste with the same validation limits.
@@ -38,6 +40,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 
 - Visible focus states and semantic labels are mandatory.
 - Status is communicated with text as well as color.
+- Primary, secondary and destructive actions use distinct semantics; icon-only controls keep a minimum 44-by-44-pixel target and an accessible name.
 - `prefers-reduced-motion` disables nonessential transitions and spinner motion.
 - No cloud fonts, decorative images, large UI frameworks or client-side telemetry.
 - Background refresh is automatic and cached; manual refresh controls are reserved for explicit diagnostic views.
