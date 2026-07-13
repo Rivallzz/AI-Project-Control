@@ -54,6 +54,7 @@ test('in-flight jobs recover as explicit non-running interrupted records', {
     assert.equal(['running', 'stopping'].includes(recovered.status), false);
     assert.equal(recovered.phase, 'interrupted');
     assert.equal(recovered.finishedAt, now);
+    assert.equal(recovered.updatedAt, now);
     assert.equal(recovered.pid, null);
   }
   assert.equal(running.stdout, 'kept');

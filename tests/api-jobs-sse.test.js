@@ -37,6 +37,7 @@ test('SSE carries a non-provider dashboard job with the same public shape as /ap
     assert.equal(streamed.kind, 'dashboard-command');
     assert.equal(streamed.projectId, job.projectId);
     assert.equal(typeof streamed.stdout, 'string');
+    assert.match(streamed.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.deepEqual(streamed, fromApi);
   } finally {
     stream.close();

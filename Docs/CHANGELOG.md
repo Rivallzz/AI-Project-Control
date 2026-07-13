@@ -2,6 +2,7 @@
 
 ## 2026-07-13
 
+- Fixed incomplete run directories replacing their active or recovered job cards: running work now keeps its live progress surface with current activity and timestamps, interrupted jobs remain explicit after restart, and orphaned run artifacts can no longer appear as yellow active work.
 - Added a dedicated `Restart-Dashboard.ps1` entry point for the desktop shortcut so every shortcut launch stops a running dashboard instance before starting and opening the current repository version.
 - Replaced loosely validated model strings with a versioned server-owned catalog, deterministic provider defaults and pre-execution rejection of unknown, unavailable or deprecated active models; Ollama chat capability now comes from `ollama show` metadata instead of model-name heuristics.
 - Added project-scoped `Ausgewogen`, `Schnell`, `Qualität` and `Coding` profiles while retaining exact provider/model controls through progressive disclosure and never inferring local-model capability from its name.

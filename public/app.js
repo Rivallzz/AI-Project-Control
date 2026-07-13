@@ -1,7 +1,9 @@
 'use strict';
 
 import { api, createRequestState } from './modules/request-state.js';
-import { createProjectUiState, jobBelongsInConversation } from './modules/project-ui-state.js';
+import {
+  createProjectUiState, jobBelongsInConversation, jobPhaseLabel, reconcileConversationSources, runStatusPresentation,
+} from './modules/project-ui-state.js';
 import {
   MODEL_CATALOG_VERSION, PROVIDERS, availableModels, defaultModelId, modelCatalog, modelDecisionText,
   modelProfile, modelProfiles, primaryFirst, reconcileModelSelection, selectedModel, taskStartState,
@@ -558,6 +560,9 @@ function connectJobEvents() {
 }
 
 function summarizeFeedLine(line) {
+  if (/Dashboard restarted before this job reached a terminal state/i.test(line)) {
+    return 'Dashboard neu gestartet · dieser Job wurde unterbrochen und arbeitet nicht mehr.';
+  }
   const blocked = line.match(/AI_PROJECT_ROUTER_BLOCKED\s+provider=([^\s]+)/i);
   if (blocked) return `${blocked[1]} · Aufgabe kontrolliert blockiert; Begründung im Verlauf.`;
   const incomplete = line.match(/Provider\s+(\w+)\s+exited without the required completion sentinel/i);
@@ -567,13 +572,25 @@ function summarizeFeedLine(line) {
   if (/local Hermes.*write tasks are disabled/i.test(line)) return 'Hermes lokal · Schreibaufträge sind aus Sicherheitsgründen gesperrt.';
   const runDirectory = line.match(/AI_RUN_DIRECTORY\s+(.+)/);
   if (runDirectory) return `Run-Artefakte · ${runDirectory[1]}`;
-  if (line.includes('AI_EVENT')) return line.replace(/^.*?AI_EVENT\s*/, '');
+  const providerEvent = line.match(/AI_EVENT\s+provider=([^\s]+)\s+state=([^\s]+)/i);
+  if (providerEvent) {
+    const model = line.match(/\bmodel=([^\s]+)/i)?.[1];
+    if (providerEvent[2] === 'started') return `${providerEvent[1]} startet${model ? ` · Modell ${model}` : ''}`;
+    if (providerEvent[2] === 'finished') return `${providerEvent[1]} hat die Ausführung beendet`;
+    return `${providerEvent[1]} · ${providerEvent[2]}`;
+  }
   const stream = line.match(/AI_STREAM provider=([^\s]+)\s+(.+)/);
   if (stream) {
     try {
       const event = JSON.parse(stream[2]);
       const type = event.type || event.item?.type || 'event';
       const detail = event.item?.command || event.item?.text || event.item?.name || event.message || '';
+      if (type === 'turn.started') return `${stream[1]} bearbeitet die Aufgabe`;
+      if (event.item?.type === 'agent_message') return `${stream[1]} berichtet · ${String(detail).slice(0, 280)}`;
+      if (event.item?.type === 'command_execution') {
+        const action = event.type === 'item.started' ? 'führt einen lokalen Befehl aus' : 'hat einen lokalen Befehl abgeschlossen';
+        return `${stream[1]} ${action}${detail ? ` · ${String(detail).replace(/\s+/g, ' ').slice(0, 220)}` : ''}`;
+      }
       return `${stream[1]} · ${type}${detail ? ` · ${String(detail).slice(0, 280)}` : ''}`;
     } catch { return `${stream[1]} · ${stream[2].slice(0, 320)}`; }
   }
@@ -593,7 +610,7 @@ function importantJobEntries(job) {
   const entries = jobLogEntries(job).filter((entry) => {
     if (entry.kind) return true;
     const stream = entry.line.match(/AI_STREAM provider=[^\s]+\s*(.*)/);
-    return stream && /item\.(?:started|completed)|preparing|\bread\b|\bsearch|\btool\b|\$\s+|API call failed|completion sentinel|read-only/i.test(stream[1]);
+    return stream && /turn\.started|item\.(?:started|completed)|preparing|\bread\b|\bsearch|\btool\b|\$\s+|API call failed|completion sentinel|read-only/i.test(stream[1]);
   });
   const unique = [];
   for (const entry of entries) {
@@ -626,7 +643,7 @@ function jobExecutionIdentity(job) {
 
 function jobStatus(job) {
   const kind = jobKindLabel(job);
-  if (job.status === 'running') return { label: 'läuft', className: 'info', title: `${kind} läuft` };
+  if (job.status === 'running') return { label: 'läuft', className: 'info', title: (job.kind || 'task') === 'task' ? 'Agent arbeitet' : `${kind} läuft` };
   if (job.status === 'stopping') return { label: 'wird gestoppt', className: 'warn', title: `${kind} wird kontrolliert gestoppt` };
   if (job.status === 'completed') return {
     label: (job.kind || 'task') === 'task' ? 'Agent fertig' : 'abgeschlossen', className: 'ok',
@@ -649,10 +666,11 @@ function executionDeliveryElement(mode, status, branch = null, deliveryState = n
   const completed = status === 'completed' || status === 'PASS';
   const failed = ['failed', 'blocked', 'stopped', 'FAIL', 'BLOCKED'].includes(status);
   const running = ['running', 'stopping'].includes(status);
+  const unknown = !completed && !failed && !running;
   const list = document.createElement('ol'); list.className = 'delivery-steps compact'; list.setAttribute('aria-label', 'Ausführung und Freigabe');
   list.append(
-    deliveryStep('Agent', completed ? 'done' : failed ? 'blocked' : 'active', completed ? 'fertig' : failed ? 'nicht fertig' : 'arbeitet'),
-    deliveryStep('Review', deliveryState === 'review-required' || completed ? 'ready' : failed ? 'blocked' : 'waiting', deliveryState === 'review-required' || completed ? 'offen' : failed ? 'blockiert' : 'wartet'),
+    deliveryStep('Agent', completed ? 'done' : failed ? 'blocked' : unknown ? 'unknown' : 'active', completed ? 'fertig' : failed ? 'nicht fertig' : unknown ? 'nicht bestätigt' : 'arbeitet'),
+    deliveryStep('Review', deliveryState === 'review-required' || completed ? 'ready' : failed ? 'blocked' : 'waiting', deliveryState === 'review-required' || completed ? 'offen' : failed ? 'blockiert' : unknown ? 'kein Ergebnis' : 'wartet'),
     deliveryStep('Commit', 'unknown', branch ? 'im Git-Bereich' : 'keine Laufdaten'),
     deliveryStep('Integration', 'unknown', running ? 'wartet' : 'im Git-Bereich'),
     deliveryStep('Push', 'unknown', running ? 'wartet' : 'im Git-Bereich'),
@@ -671,11 +689,14 @@ function jobConversationElement(job) {
   const label = document.createElement('div'); label.className = 'message-label'; label.dataset.jobProvider = '';
   const body = document.createElement('div'); body.className = 'message-body';
   const progress = document.createElement('div'); progress.className = 'agent-progress'; progress.dataset.jobProgress = '';
+  progress.setAttribute('role', 'status'); progress.setAttribute('aria-live', 'polite'); progress.setAttribute('aria-atomic', 'true');
   const marker = document.createElement('span'); marker.className = 'agent-progress-marker'; marker.setAttribute('aria-hidden', 'true');
   const progressText = document.createElement('div');
   const title = document.createElement('strong'); title.dataset.jobTitle = '';
   const phase = document.createElement('span'); phase.dataset.jobPhase = '';
-  progressText.append(title, phase); progress.append(marker, progressText);
+  const current = document.createElement('span'); current.className = 'agent-progress-current'; current.dataset.jobCurrent = '';
+  const timing = document.createElement('span'); timing.className = 'agent-progress-time'; timing.dataset.jobTiming = '';
+  progressText.append(title, phase, current, timing); progress.append(marker, progressText);
   const timeline = document.createElement('div'); timeline.className = 'activity-timeline hidden'; timeline.dataset.jobTimeline = '';
   const technical = document.createElement('details'); technical.className = 'technical-activity hidden'; technical.dataset.jobTechnical = '';
   const technicalSummary = document.createElement('summary'); technicalSummary.dataset.jobTechnicalSummary = '';
@@ -704,18 +725,29 @@ function updateJobConversationElement(article, job) {
   article.querySelector('[data-job-provider]').textContent = jobExecutionIdentity(job) || 'AI Project Control';
   article.querySelector('[data-job-progress]').className = `agent-progress ${job.status}`;
   article.querySelector('[data-job-title]').textContent = status.title;
-  article.querySelector('[data-job-phase]').textContent = `${jobExecutionIdentity(job)} · ${job.phase || 'wird vorbereitet'}`;
-
   const important = importantJobEntries(job);
+  article.querySelector('[data-job-phase]').textContent = `${jobExecutionIdentity(job)} · ${jobPhaseLabel(job.phase)}`;
+  const latestActivity = important.at(-1)?.summary;
+  const currentActivity = latestActivity || (['running', 'stopping'].includes(job.status)
+    ? `Task angenommen · ${jobPhaseLabel(job.phase)}`
+    : job.status === 'failed' && job.phase === 'interrupted'
+      ? 'Der Dashboard-Dienst wurde neu gestartet; dieser Job arbeitet nicht mehr.'
+      : jobPhaseLabel(job.phase));
+  article.querySelector('[data-job-current]').textContent = `${['running', 'stopping'].includes(job.status) ? 'Aktuell' : 'Zuletzt'}: ${currentActivity}`;
+  article.querySelector('[data-job-timing]').textContent = `Gestartet ${formatTime(job.startedAt || job.createdAt)} · letzte Aktivität ${formatTime(job.updatedAt || job.finishedAt || job.startedAt || job.createdAt)}`;
+
   const timeline = article.querySelector('[data-job-timeline]');
-  const timelineSignature = important.map((entry) => `${entry.kind}:${entry.summary}`).join('|');
+  const timelineEntries = important.length ? important : ['running', 'stopping'].includes(job.status)
+    ? [{ kind: '', summary: `Task angenommen · ${jobPhaseLabel(job.phase)}` }]
+    : [];
+  const timelineSignature = timelineEntries.map((entry) => `${entry.kind}:${entry.summary}`).join('|');
   if (timeline.dataset.signature !== timelineSignature) {
-    timeline.replaceChildren(...important.map((entry) => {
+    timeline.replaceChildren(...timelineEntries.map((entry) => {
       const row = document.createElement('div'); row.className = `activity-event ${entry.kind}`; row.textContent = entry.summary; return row;
     }));
     timeline.dataset.signature = timelineSignature;
   }
-  timeline.classList.toggle('hidden', important.length === 0);
+  timeline.classList.toggle('hidden', timelineEntries.length === 0);
 
   const rawEntries = jobLogEntries(job);
   const technical = article.querySelector('[data-job-technical]');
@@ -1433,13 +1465,14 @@ function runConversationElement(run) {
   const runProvider = run.provider || 'externer Lauf';
   const runIdentity = run.model ? `${runProvider} · ${run.model === 'default' ? 'Provider-Standard' : run.model}` : runProvider;
   const identity = document.createElement('span'); identity.textContent = `${formatTime(run.modifiedAt)} · ${runIdentity}`;
-  const stateClass = run.status === 'PASS' ? 'ok' : run.status === 'FAIL' ? 'fail' : run.status === 'external' ? 'info' : 'warn';
-  const state = document.createElement('span'); state.className = `status ${stateClass}`; state.textContent = run.status;
+  const presentation = runStatusPresentation(run.status);
+  const state = document.createElement('span'); state.className = `status ${presentation.className}`; state.textContent = presentation.label;
   meta.append(identity, state); article.append(meta);
   if (run.task) article.append(messageElement('user', 'Du', run.task, run.attachments || []));
-  article.append(messageElement('assistant', runIdentity || 'AI Project Control', run.response));
+  article.append(messageElement('assistant', runIdentity || 'AI Project Control', run.response || presentation.fallback));
   const summary = document.createElement('div'); summary.className = 'run-summary';
-  for (const value of [run.mode, run.tests, run.filesChanged, run.gate].filter(Boolean)) {
+  const statusHint = run.status === 'external' ? 'Kein aktiver Job zugeordnet' : null;
+  for (const value of [run.mode, run.tests, run.filesChanged, run.gate, statusHint].filter(Boolean)) {
     const chip = document.createElement('span'); chip.textContent = value; summary.append(chip);
   }
   if (summary.childElementCount) article.append(summary);
@@ -1496,15 +1529,14 @@ function renderConversation() {
   const anchor = historyScrollAnchor();
   const selection = captureHistorySelection();
   const shouldFollow = !hadContent || historyFollow;
-  const recordedPaths = new Set(runHistory.map((run) => String(run.path || '').toLowerCase()));
-  const jobs = visibleLiveJobs().filter((job) => !job.runDirectory || !recordedPaths.has(String(job.runDirectory).toLowerCase()));
+  const reconciled = reconcileConversationSources(runHistory, visibleLiveJobs());
   const entries = [
-    ...runHistory.map((run) => ({ type: 'run', time: run.modifiedAt, value: run })),
-    ...jobs.map((job) => ({ type: 'job', time: job.createdAt || job.startedAt, value: job })),
+    ...reconciled.runs.map((run) => ({ type: 'run', time: run.modifiedAt, value: run })),
+    ...reconciled.jobs.map((job) => ({ type: 'job', time: job.createdAt || job.startedAt, value: job })),
   ].sort((left, right) => String(left.time).localeCompare(String(right.time)));
   const nextVersion = entries.map((entry) => entry.type === 'run'
     ? `${entry.value.name}:${entry.value.modifiedAt}`
-    : `${entry.value.id}:${entry.value.kind}:${entry.value.status}:${entry.value.deliveryState || ''}:${String(entry.value.stdout || '').length}:${String(entry.value.stderr || '').length}`).join('|');
+    : `${entry.value.id}:${entry.value.kind}:${entry.value.status}:${entry.value.phase || ''}:${entry.value.updatedAt || ''}:${entry.value.deliveryState || ''}:${String(entry.value.stdout || '').length}:${String(entry.value.stderr || '').length}`).join('|');
   const hasNewContent = Boolean(historyLatestVersion && nextVersion && historyLatestVersion !== nextVersion);
   const desired = [];
   if (!entries.length) {

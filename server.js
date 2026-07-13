@@ -1041,7 +1041,7 @@ function snapshotJob(job) {
     selectedProvider, selectedModel,
     mode: job.mode, useSubscriptionTokens: job.useSubscriptionTokens,
     workingDirectory: job.workingDirectory, branch: job.branch || null, taskPreview: job.taskPreview,
-    createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
+    createdAt: job.createdAt, startedAt: job.startedAt, updatedAt: job.updatedAt || null, finishedAt: job.finishedAt,
     exitCode: job.exitCode, runDirectory: job.runDirectory, pid: job.pid,
     stdout: job.stdout, stderr: job.stderr, cancellable: cancellation.cancellable, cancellation,
     executionState, deliveryState,
@@ -1079,6 +1079,7 @@ function scheduleJobPersistence() {
 }
 
 function registerJob(job) {
+  job.updatedAt = job.updatedAt || job.createdAt || new Date().toISOString();
   jobs.set(job.id, job);
   pruneJobs();
   scheduleJobPersistence();
@@ -1092,6 +1093,7 @@ function recoverJobs(records, now = new Date().toISOString()) {
       ...stored,
       status: interrupted ? 'failed' : stored.status,
       phase: interrupted ? 'interrupted' : stored.phase,
+      updatedAt: interrupted ? now : stored.updatedAt || stored.finishedAt || stored.startedAt || stored.createdAt || null,
       finishedAt: interrupted ? now : stored.finishedAt,
       stderr: interrupted
         ? `${stored.stderr || ''}\nDashboard restarted before this job reached a terminal state.`.trim()
@@ -1118,6 +1120,7 @@ async function loadPersistedJobs() {
 }
 
 function broadcastJob(job) {
+  job.updatedAt = new Date().toISOString();
   const payload = `event: job\ndata: ${JSON.stringify(snapshotJob(job))}\n\n`;
   for (const [client, projectId] of liveClients) {
     if (projectId && job.projectId !== projectId) continue;
