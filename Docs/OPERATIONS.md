@@ -2,7 +2,7 @@
 
 ## Start And Stop
 
-Use `Open-Dashboard.ps1` to start the service and open the browser. Use `Stop-Dashboard.ps1` to stop it. The desktop shortcut should point to `Open-Dashboard.ps1` in the installed repository.
+Use `Open-Dashboard.ps1` to start the service and open the browser without interrupting a healthy existing instance. Use `Stop-Dashboard.ps1` to stop it. The desktop shortcut should point to `Restart-Dashboard.ps1` in the installed repository; it stops a running dashboard instance first, then starts the current repository version and opens it.
 
 For a fresh local installation, run `scripts/Install-Local.ps1`. It refuses to overwrite an existing target, initializes Git, prepares the runtime registry and creates the Obsidian project area.
 

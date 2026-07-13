@@ -2,6 +2,7 @@
 
 ## 2026-07-13
 
+- Added a dedicated `Restart-Dashboard.ps1` entry point for the desktop shortcut so every shortcut launch stops a running dashboard instance before starting and opening the current repository version.
 - Replaced loosely validated model strings with a versioned server-owned catalog, deterministic provider defaults and pre-execution rejection of unknown, unavailable or deprecated active models; Ollama chat capability now comes from `ollama show` metadata instead of model-name heuristics.
 - Added project-scoped `Ausgewogen`, `Schnell`, `Qualität` and `Coding` profiles while retaining exact provider/model controls through progressive disclosure and never inferring local-model capability from its name.
 - Passed the selected Ollama model through status checks and Hermes execution, required both Hermes and the installed chat model, and recorded the provider/model actually used independently of bounded raw logs in attempt events and run history.
