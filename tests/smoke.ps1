@@ -38,6 +38,9 @@ try {
     $config = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/config" -TimeoutSec 5
     if ($config.dataRoot -ne $dataRoot) { throw 'Runtime data did not use the isolated test directory.' }
     if ($config.defaultProviderOrder.Count -ne 3 -or $null -eq $config.providerModels.Codex -or $null -eq $config.providerModels.Claude -or $null -eq $config.providerModels.Ollama) { throw 'Dynamic provider model catalog is missing.' }
+    if ($config.providerModels.Claude.Count -lt 4) { throw 'Stable Claude CLI model aliases were not recognized.' }
+    $refreshedModels = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/config?force=1" -TimeoutSec 10
+    if ($null -eq $refreshedModels.providerModels.Codex -or $null -eq $refreshedModels.providerModels.Ollama) { throw 'Provider model catalog refresh failed.' }
 
     New-Item -ItemType Directory -Force -Path $testRepository | Out-Null
     & git.exe -C $testRepository init -b main | Out-Null
@@ -96,7 +99,9 @@ try {
     if ($appSource -notmatch 'abgeschlossen · prüfen' -or $appSource -notmatch 'acknowledgedActivityJobs') { throw 'Cross-project completion tracking is not actionable.' }
     if ($appSource -notmatch 'queueCommitDraftSave' -or $indexSource -notmatch 'Wird automatisch für diesen Branch gespeichert') { throw 'Branch-specific commit draft UX is missing.' }
     if ($indexSource -notmatch 'id="executionPanel"' -or $indexSource -notmatch 'id="providerRouteList"' -or $indexSource -notmatch 'data-provider-model="Codex"') { throw 'Project execution controls or provider model selectors are missing.' }
+    if ($indexSource -notmatch 'task-workspace-layout[\s\S]+id="executionPanel"[\s\S]+class="panel chat-panel"' -or $indexSource -notmatch 'id="primaryProviderSelect"' -or $indexSource -notmatch 'id="refreshModelsButton"') { throw 'Provider controls are not positioned beside the chat or lack simplified priority and model refresh controls.' }
     if ($appSource -notmatch 'executionPreferenceKey' -or $appSource -notmatch 'currentProviderOrder' -or $appSource -notmatch 'providerOrder,') { throw 'Provider order is not persisted per project or sent with tasks.' }
+    if ($appSource -notmatch '/api/config\?force=1' -or $appSource -notmatch 'makeProviderPrimary') { throw 'Model refresh or simplified primary-provider selection is not wired.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10

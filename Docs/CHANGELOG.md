@@ -2,6 +2,9 @@
 
 ## 2026-07-13
 
+- Moved project execution controls out of the global sidebar into the workspace directly left of the chat.
+- Replaced repeated provider move buttons with one explicit primary-provider choice and a visible numbered fallback chain.
+- Added an in-place model-catalog refresh so Codex cache entries, Claude CLI aliases and installed Ollama chat models are recognized without restarting the dashboard.
 - Added project-scoped provider ordering, enablement, execution mode and per-provider model selection beside the chat.
 - Discovered Codex models from its local cache and Ollama chat models from the current machine instead of hardcoding UI choices.
 - Passed the exact route and model map through task packages, server validation and quota handoffs without an additional LLM call.

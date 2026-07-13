@@ -6,6 +6,7 @@ const elements = {
   projectSelect: document.getElementById('projectSelect'), addProject: document.getElementById('addProjectButton'),
   providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'), workflowContext: document.getElementById('workflowContext'),
   executionPanel: document.getElementById('executionPanel'), providerRoute: document.getElementById('providerRouteList'), routeSummary: document.getElementById('routeSummary'),
+  primaryProvider: document.getElementById('primaryProviderSelect'), refreshModels: document.getElementById('refreshModelsButton'), modelCatalogState: document.getElementById('modelCatalogState'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
   attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
   attachmentPreview: document.getElementById('attachmentPreview'),
@@ -101,7 +102,9 @@ function defaultModel(provider) {
 function populateProviderModel(provider, selectedValue = null) {
   const select = providerModelSelect(provider);
   const catalog = config?.providerModels?.[provider] || [];
-  const requested = selectedValue || defaultModel(provider);
+  const requested = selectedValue === 'default' && !catalog.some((model) => model.value === 'default')
+    ? defaultModel(provider)
+    : selectedValue || defaultModel(provider);
   select.replaceChildren();
   for (const model of catalog) {
     const option = document.createElement('option'); option.value = model.value; option.textContent = model.label; select.append(option);
@@ -110,6 +113,21 @@ function populateProviderModel(provider, selectedValue = null) {
     const option = document.createElement('option'); option.value = requested; option.textContent = `${requested} (nicht erkannt)`; select.append(option);
   }
   select.value = requested;
+}
+
+function renderModelCatalogState(message = '') {
+  if (message) { elements.modelCatalogState.textContent = message; return; }
+  const codexCount = (config?.providerModels?.Codex || []).filter((model) => model.value !== 'default').length;
+  const ollamaCount = (config?.providerModels?.Ollama || []).length;
+  elements.modelCatalogState.textContent = `${codexCount} Codex · ${ollamaCount} Ollama erkannt`;
+}
+
+function makeProviderPrimary(provider) {
+  const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
+  if (!row) return;
+  row.querySelector('.provider-enabled input').checked = true;
+  elements.providerRoute.prepend(row);
+  elements.primaryProvider.value = provider;
 }
 
 function readExecutionPreferences() {
@@ -152,10 +170,9 @@ function renderExecutionControls(persist = true) {
     row.classList.toggle('route-disabled', !enabled || unavailableForTokens || unavailableForMode);
     row.querySelector('.provider-enabled input').disabled = unavailableForTokens || unavailableForMode;
     providerModelSelect(provider).disabled = !enabled || unavailableForTokens || unavailableForMode;
-    row.querySelector('[data-route-move="up"]').disabled = index === 0;
-    row.querySelector('[data-route-move="down"]').disabled = index === rows.length - 1;
   });
   const route = currentProviderOrder();
+  if (route.length && !route.includes(elements.primaryProvider.value)) elements.primaryProvider.value = route[0];
   const names = route.map((provider) => provider === 'Ollama' ? 'Hermes + Ollama' : provider === 'Claude' ? 'Claude Code' : provider);
   elements.routeSummary.innerHTML = route.length
     ? `<strong>${names.join(' &rarr; ')}</strong><br>${elements.mode.value === 'Write' ? 'Getrennter Task-Worktree; lokaler Schreibpfad gesperrt.' : 'Bei einem Kontingentlimit übernimmt der nächste Provider.'}`
@@ -172,6 +189,7 @@ function loadExecutionPreferences() {
   const requestedOrder = Array.isArray(value.order) ? value.order.filter((provider) => PROVIDERS.includes(provider)) : [];
   const order = [...requestedOrder, ...PROVIDERS.filter((provider) => !requestedOrder.includes(provider))];
   for (const provider of order) elements.providerRoute.append(elements.providerRoute.querySelector(`[data-provider="${provider}"]`));
+  elements.primaryProvider.value = order[0] || 'Codex';
   for (const provider of PROVIDERS) {
     const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
     row.querySelector('.provider-enabled input').checked = value.enabled?.[provider] !== false;
@@ -179,6 +197,7 @@ function loadExecutionPreferences() {
   }
   elements.mode.value = ['ReadOnly', 'Write'].includes(value.mode) ? value.mode : 'ReadOnly';
   elements.useSubscriptionTokens.checked = value.useSubscriptionTokens !== false;
+  renderModelCatalogState();
   renderExecutionControls(false);
 }
 
@@ -1059,15 +1078,21 @@ elements.backgroundActivity.addEventListener('click', async () => {
   if (projectId !== activeProject?.id) await activateProject(projectId);
   showView('tasks'); renderJobActivity();
 });
-elements.providerRoute.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-route-move]');
-  if (!button) return;
-  const row = button.closest('.provider-route-row');
-  if (button.dataset.routeMove === 'up' && row.previousElementSibling) elements.providerRoute.insertBefore(row, row.previousElementSibling);
-  if (button.dataset.routeMove === 'down' && row.nextElementSibling) elements.providerRoute.insertBefore(row.nextElementSibling, row);
-  renderExecutionControls();
-});
 elements.providerRoute.addEventListener('change', () => renderExecutionControls());
+elements.primaryProvider.addEventListener('change', () => { makeProviderPrimary(elements.primaryProvider.value); renderExecutionControls(); });
+elements.refreshModels.addEventListener('click', async () => {
+  const selected = selectedProviderModels();
+  elements.refreshModels.disabled = true;
+  renderModelCatalogState('wird aktualisiert…');
+  try {
+    const refreshed = await api('/api/config?force=1');
+    config = { ...config, ...refreshed };
+    for (const provider of PROVIDERS) populateProviderModel(provider, selected[provider]);
+    renderModelCatalogState();
+    renderExecutionControls();
+  } catch (error) { renderModelCatalogState(`Fehler: ${error.message}`); }
+  finally { elements.refreshModels.disabled = false; }
+});
 elements.mode.addEventListener('change', () => renderExecutionControls());
 elements.useSubscriptionTokens.addEventListener('change', () => renderExecutionControls());
 elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); });

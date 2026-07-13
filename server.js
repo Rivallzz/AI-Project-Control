@@ -1825,7 +1825,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, {
       runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT,
       defaultProjectParent: fs.existsSync('C:\\Repos') ? 'C:\\Repos' : path.join(HOME, 'Documents', 'Projects'),
-      providerModels: await getProviderModelCatalog(), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
+      providerModels: await getProviderModelCatalog(url.searchParams.get('force') === '1'), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
     });
     if (request.method === 'POST' && url.pathname === '/api/tasks') return sendJson(response, 202, await startTask(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/projects/provision') return sendJson(response, 202, await provisionProject(await readJsonBody(request)));

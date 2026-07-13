@@ -8,7 +8,7 @@ With subscription usage enabled, new projects initially route in this order:
 2. Claude Code through a Claude subscription.
 3. Hermes using local Ollama.
 
-The operator may enable or disable individual providers and change this order per project. A task uses the exact visible order. Each provider also receives the selected model: Codex uses either its configured default or a locally discovered Codex model, Claude uses its default or a CLI alias, and Hermes uses an installed Ollama chat model. Unavailable providers are skipped while preserving the remaining order. A non-quota provider failure still stops the workflow for inspection instead of silently switching engines.
+The operator may enable or disable individual providers and choose which active provider is used first per project. The remaining active providers form the visible fallback order, and a task uses that exact route. Each provider also receives the selected model: Codex uses either its configured default or a locally discovered Codex model, Claude uses its default or a CLI alias, and Hermes uses an installed Ollama chat model. The operator can refresh this local catalog without starting a provider or incurring usage. Unavailable providers are skipped while preserving the remaining order. A non-quota provider failure still stops the workflow for inspection instead of silently switching engines.
 
 When a recognized quota limit interrupts a task, the router records output, Git status and the working-tree diff, then gives the same worktree and a handoff package to the next provider. If cli-continues can identify the exact local session by provider, working directory and run time, a minimal session extract is attached. The router never selects an unrelated latest session.
 

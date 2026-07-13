@@ -15,7 +15,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Async operations lasting more than 300 ms show a blocking status dialog or an inline loading state.
 - The conversation uses one scroll region. User messages appear right, agent responses left, oldest first.
 - Running work appears as an in-conversation assistant response with a concise phase timeline; raw provider and tool output stays inside an optional technical disclosure.
-- Project execution controls live in the existing left sidebar beside the conversation. Provider order uses visible numbered rows plus keyboard-accessible move buttons; model and mode choices remain labelled and project-scoped.
+- Project execution controls live inside the workspace immediately left of the conversation, while the global sidebar remains reserved for workflow status. One labelled `Zuerst verwenden` control chooses the primary provider; numbered rows make the resulting fallback order visible without repeated move-button interactions. Model and mode choices remain labelled and project-scoped, and the detected model catalog can be refreshed in place.
 - Project switching keeps the previous screen visible beneath a clear loading scrim.
 - Buttons exist only for distinct commands. Conversation continuation uses the composer, not a separate follow-up action.
 - Image attachments support file selection and clipboard paste with the same validation limits.
@@ -31,7 +31,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Provider and component details compact below 1500 pixels; full details remain in System Inventory.
 - Message width is constrained for readable lines while the workspace itself uses available screen area.
 - Controls wrap before labels truncate.
-- Below desktop width, execution and workflow panels form a two-column band and collapse to one column on narrow screens.
+- Below desktop width, the workflow panel forms a compact band above the workspace; execution controls and chat collapse from two columns to one on narrow screens.
 
 ## Accessibility And Performance
 

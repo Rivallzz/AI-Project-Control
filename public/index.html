@@ -32,67 +32,6 @@
 
   <main class="layout">
     <aside class="sidebar">
-      <section id="executionPanel" class="panel execution-panel" aria-labelledby="executionHeading">
-        <div class="section-heading execution-heading">
-          <div><h2 id="executionHeading">Ausführung</h2><p>Für dieses Projekt gespeichert</p></div>
-        </div>
-
-        <div class="label-row">
-          <label for="modeSelect">Modus</label>
-          <details class="info-popover">
-            <summary aria-label="Information zum Modus">i</summary>
-            <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt einen getrennten Git-Worktree. Hermes ist für Schreibaufgaben noch nicht freigegeben.</div>
-          </details>
-        </div>
-        <select id="modeSelect" name="mode">
-          <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
-          <option value="Write">Änderungen erlauben</option>
-        </select>
-
-        <div class="route-heading">
-          <span>Provider-Reihenfolge</span>
-          <small>Oben beginnt</small>
-        </div>
-        <ol id="providerRouteList" class="provider-route" aria-label="Provider-Reihenfolge">
-          <li class="provider-route-row" data-provider="Codex">
-            <div class="provider-route-main">
-              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Codex</strong><small>ChatGPT-Kontingent</small></span></label>
-              <div class="route-actions">
-                <button class="route-move" type="button" data-route-move="up" title="Codex nach oben" aria-label="Codex nach oben">&#8593;</button>
-                <button class="route-move" type="button" data-route-move="down" title="Codex nach unten" aria-label="Codex nach unten">&#8595;</button>
-              </div>
-            </div>
-            <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell"></select></label>
-          </li>
-          <li class="provider-route-row" data-provider="Claude">
-            <div class="provider-route-main">
-              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Claude Code</strong><small>Claude-Kontingent</small></span></label>
-              <div class="route-actions">
-                <button class="route-move" type="button" data-route-move="up" title="Claude nach oben" aria-label="Claude nach oben">&#8593;</button>
-                <button class="route-move" type="button" data-route-move="down" title="Claude nach unten" aria-label="Claude nach unten">&#8595;</button>
-              </div>
-            </div>
-            <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Modell"></select></label>
-          </li>
-          <li class="provider-route-row" data-provider="Ollama">
-            <div class="provider-route-main">
-              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Hermes + Ollama</strong><small>Lokal, kein Abo</small></span></label>
-              <div class="route-actions">
-                <button class="route-move" type="button" data-route-move="up" title="Hermes nach oben" aria-label="Hermes nach oben">&#8593;</button>
-                <button class="route-move" type="button" data-route-move="down" title="Hermes nach unten" aria-label="Hermes nach unten">&#8595;</button>
-              </div>
-            </div>
-            <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell"></select></label>
-          </li>
-        </ol>
-
-        <label class="token-toggle compact" for="useSubscriptionTokens">
-          <input id="useSubscriptionTokens" type="checkbox" checked>
-          <span><strong>Abo-Kontingente zulassen</strong><small>Aus: nur Hermes mit lokalem Ollama.</small></span>
-        </label>
-        <p id="routeSummary" class="route-summary" aria-live="polite"></p>
-      </section>
-
       <section class="panel" aria-labelledby="systemHeading">
         <div class="section-heading workflow-heading">
           <div><h2 id="systemHeading">Workflowstatus</h2><p id="workflowContext">Aktueller Projektablauf</p></div>
@@ -135,6 +74,66 @@
         </div>
 
         <div id="tasksView" class="view" data-view-panel="tasks">
+          <div class="task-workspace-layout">
+          <section id="executionPanel" class="panel execution-panel" aria-labelledby="executionHeading">
+            <div class="section-heading execution-heading">
+              <div><h2 id="executionHeading">Ausführung</h2><p>Für dieses Projekt gespeichert</p></div>
+            </div>
+
+            <div class="label-row">
+              <label for="modeSelect">Modus</label>
+              <details class="info-popover">
+                <summary aria-label="Information zum Modus">i</summary>
+                <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt einen getrennten Git-Worktree. Hermes ist für Schreibaufgaben noch nicht freigegeben.</div>
+              </details>
+            </div>
+            <select id="modeSelect" name="mode">
+              <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
+              <option value="Write">Änderungen erlauben</option>
+            </select>
+
+            <div class="route-heading"><span>Provider</span><small>aktivieren und Modell wählen</small></div>
+            <label class="primary-provider-control" for="primaryProviderSelect">
+              <span>Zuerst verwenden</span>
+              <select id="primaryProviderSelect" aria-describedby="providerPriorityHint">
+                <option value="Codex">Codex</option>
+                <option value="Claude">Claude Code</option>
+                <option value="Ollama">Hermes + Ollama</option>
+              </select>
+            </label>
+            <p id="providerPriorityHint" class="control-hint">Bei einem Kontingentlimit folgen die weiteren aktiven Provider in der angezeigten Reihenfolge.</p>
+            <ol id="providerRouteList" class="provider-route" aria-label="Provider-Fallback-Reihenfolge">
+              <li class="provider-route-row" data-provider="Codex">
+                <div class="provider-route-main">
+                  <label class="provider-enabled"><input type="checkbox" checked><span><strong>Codex</strong><small>ChatGPT-Kontingent</small></span></label>
+                </div>
+                <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell"></select></label>
+              </li>
+              <li class="provider-route-row" data-provider="Claude">
+                <div class="provider-route-main">
+                  <label class="provider-enabled"><input type="checkbox" checked><span><strong>Claude Code</strong><small>Claude-Kontingent</small></span></label>
+                </div>
+                <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Modell"></select></label>
+              </li>
+              <li class="provider-route-row" data-provider="Ollama">
+                <div class="provider-route-main">
+                  <label class="provider-enabled"><input type="checkbox" checked><span><strong>Hermes + Ollama</strong><small>Lokal, kein Abo</small></span></label>
+                </div>
+                <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell"></select></label>
+              </li>
+            </ol>
+            <div class="model-catalog-actions">
+              <button id="refreshModelsButton" class="button secondary" type="button">Modelle aktualisieren</button>
+              <span id="modelCatalogState" class="control-hint" role="status"></span>
+            </div>
+
+            <label class="token-toggle compact" for="useSubscriptionTokens">
+              <input id="useSubscriptionTokens" type="checkbox" checked>
+              <span><strong>Abo-Kontingente zulassen</strong><small>Aus: nur Hermes mit lokalem Ollama.</small></span>
+            </label>
+            <p id="routeSummary" class="route-summary" aria-live="polite"></p>
+          </section>
+
           <section class="panel chat-panel" aria-labelledby="historyHeading">
             <div class="section-heading chat-heading">
               <div><h2 id="historyHeading">Arbeitsbereich</h2><p id="taskHeading">Projektgespräch</p></div>
@@ -170,6 +169,7 @@
               </form>
             </details>
           </section>
+          </div>
         </div>
 
         <div id="gitView" class="view hidden" data-view-panel="git">
