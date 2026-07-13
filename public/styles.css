@@ -610,7 +610,11 @@ td { overflow-wrap: anywhere; }
 .system-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .system-category, .system-detail { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .system-detail { margin-top: 5px; }
-.system-actions { margin-top: 8px; }
+.system-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.system-update { margin-top: 7px; padding-top: 6px; border-top: 1px solid #2d3232; color: var(--muted); font-size: 11px; }
+.system-update.current { color: var(--green); }
+.system-update.available { color: var(--amber); font-weight: 700; }
+.system-update.unknown { color: #b9b4a7; }
 .system-group-title { grid-column: 1 / -1; margin: 12px 0 0; padding-bottom: 6px; border-bottom: 1px solid #303536; color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .system-group-title:first-child { margin-top: 0; }
 .system-reason { margin-top: 6px; color: #c8cfcb; font-size: 12px; }

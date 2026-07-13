@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels } = require('../server');
+const { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels, extractVersion, parseWingetUpgradeOutput } = require('../server');
 
 assert.strictEqual(
   taskBranchSlug('Die durch den Chat erstellten Branches haben schlechte Titel. Commit-Nachrichten sollen pro Branch gespeichert werden.'),
@@ -21,5 +21,17 @@ assert.deepStrictEqual(normalizeProviderModels({ Codex: 'gpt-5.6-sol', Claude: '
   Codex: 'gpt-5.6-sol', Claude: 'opus', Ollama: 'polis-coder:latest',
 });
 assert.throws(() => normalizeProviderModels({ Codex: 'bad model' }), /Invalid model/);
+
+assert.strictEqual(extractVersion('codex-cli 0.114.0'), '0.114.0');
+assert.strictEqual(extractVersion('PowerShell 7.6.3'), '7.6.3');
+assert.strictEqual(extractVersion('No version here'), null);
+const wingetUpdates = parseWingetUpgradeOutput(`
+Name             ID                    Version  Verfügbar  Quelle
+----------------------------------------------------------------
+Git              Git.Git               2.50.0   2.51.0     winget
+OpenAI Codex     OpenAI.Codex          0.1.0    0.2.0      winget
+`, ['Git.Git']);
+assert.deepStrictEqual(wingetUpdates.get('Git.Git'), { currentVersion: '2.50.0', latestVersion: '2.51.0' });
+assert.strictEqual(wingetUpdates.has('OpenAI.Codex'), false);
 
 process.stdout.write('TASK_METADATA_TEST_OK\n');

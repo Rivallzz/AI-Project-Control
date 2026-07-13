@@ -30,7 +30,7 @@ Browser UI
 ## Ownership
 
 - `server.js`: HTTP API, project registry, task dispatch, worktree isolation and inventory detection.
-- `config/systems.json`: versioned system definitions, detection rules, capability mapping and reviewed installers.
+- `config/systems.json`: versioned system definitions, detection rules, capability mapping plus reviewed install and update routes.
 - `public/`: local browser interface.
 - `router/`: provider status, quota guards, routing and handoff packages.
 - `Docs/`: canonical product and operating documentation.
@@ -54,6 +54,8 @@ Write tasks receive a unique semantic `ai/*` branch in an automatic worktree bas
 ## Dynamic inventory
 
 The server reads system definitions from `config/systems.json` and probes the current computer at runtime. Project capabilities are inferred from repository signals such as `project.godot`, package manifests, asset directories, workflow files and media files. Project-dependent tools are then labelled with the projects that use them. Adding a catalog entry or capability does not require editing `server.js`.
+
+Update checks follow the same catalog boundary. Supported entries declare both an official `updateCheck` source and an allowlisted `update` command; neither half is accepted alone. Winget checks are batched, npm and Git checks target the exact catalog entry, and results are cached under `%LOCALAPPDATA%\AI Project Control\system-updates.json` for six hours. Project loading starts a background check against this cache. `Neu prüfen` bypasses it. Updates never run from a check: the owner must confirm the visible `Update` action, which then appears as a normal local setup job in the project conversation. Tools without a safe reviewed route remain detectable but cannot be updated from the dashboard.
 
 Catalog entries may also declare workflow role, activation and cost policy. These fields make the difference between software that is merely detected and an integration that has a bounded place in the workflow.
 

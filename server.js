@@ -15,6 +15,7 @@ const PUBLIC_ROOT = path.join(__dirname, 'public');
 const DATA_ROOT = process.env.AI_PROJECT_CONTROL_DATA || path.join(process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local'), 'AI Project Control');
 const PROJECTS_PATH = path.join(DATA_ROOT, 'projects.json');
 const SYSTEMS_PATH = path.join(DATA_ROOT, 'systems.json');
+const SYSTEM_UPDATE_CACHE_PATH = path.join(DATA_ROOT, 'system-updates.json');
 const GIT_DRAFTS_PATH = path.join(DATA_ROOT, 'git-drafts.json');
 const MEMORY_ROOT = path.join(DATA_ROOT, 'memory');
 const ROUTER_ROOT = path.join(__dirname, 'router');
@@ -30,6 +31,8 @@ const CC_SWITCH_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'CC-
 const COMFY_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Comfy Desktop', 'Comfy Desktop.exe');
 const COMFY_SETTINGS = path.join(process.env.APPDATA || '', 'Comfy Desktop', 'settings.json');
 const SYSTEM_CATALOG_PATH = path.join(__dirname, 'config', 'systems.json');
+const SYSTEM_CATALOG_SCHEMA_VERSION = 2;
+const SYSTEM_UPDATE_TTL_MS = Number(process.env.AI_PROJECT_CONTROL_UPDATE_TTL_MS || 6 * 60 * 60 * 1000);
 const CODEX_CONFIG_PATH = path.join(HOME, '.codex', 'config.toml');
 const CODEX_MODEL_CACHE_PATH = path.join(HOME, '.codex', 'models_cache.json');
 const PROVIDER_NAMES = ['Codex', 'Claude', 'Ollama'];
@@ -55,6 +58,8 @@ let statusCacheAt = 0;
 const componentCache = new Map();
 let systemCache = null;
 let systemCacheAt = 0;
+let systemUpdateCache = null;
+let systemUpdateRefresh = null;
 let providerModelCache = null;
 let providerModelCacheAt = 0;
 let gitDraftWriteChain = Promise.resolve();
@@ -178,7 +183,8 @@ async function serveTaskAttachment(url, response) {
 function execFileAsync(file, args, options = {}) {
   return new Promise((resolve) => {
     try {
-      execFile(file, args, { windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
+      const commandShell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(file);
+      execFile(file, args, { windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024, shell: commandShell, ...options }, (error, stdout, stderr) => {
         resolve({
           exitCode: error && Number.isInteger(error.code) ? error.code : error ? 1 : 0,
           stdout: String(stdout || ''),
@@ -627,6 +633,153 @@ async function commandSummary(command, args) {
   }
 }
 
+function extractVersion(value) {
+  const match = String(value || '').match(/\bv?(\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?)/);
+  return match ? match[1] : null;
+}
+
+function parseWingetUpgradeOutput(value, packageIds) {
+  const rows = new Map();
+  const expected = new Map(packageIds.map((id) => [String(id).toLowerCase(), id]));
+  for (const line of stripAnsi(value).split(/\r?\n/)) {
+    const columns = line.trim().split(/\s+/);
+    const packageIndex = columns.findIndex((column) => expected.has(column.toLowerCase()));
+    if (packageIndex < 0 || columns.length < packageIndex + 3) continue;
+    const id = expected.get(columns[packageIndex].toLowerCase());
+    rows.set(id, { currentVersion: columns[packageIndex + 1], latestVersion: columns[packageIndex + 2] });
+  }
+  return rows;
+}
+
+async function loadSystemUpdateCache() {
+  if (systemUpdateCache) return systemUpdateCache;
+  try {
+    const stored = await readJsonFile(SYSTEM_UPDATE_CACHE_PATH);
+    if (stored.schemaVersion === 1 && stored.entries && typeof stored.entries === 'object') {
+      systemUpdateCache = stored;
+      return systemUpdateCache;
+    }
+  } catch {
+    // A missing or outdated cache is rebuilt from official sources.
+  }
+  systemUpdateCache = { schemaVersion: 1, checkedAt: null, entries: {} };
+  return systemUpdateCache;
+}
+
+async function saveSystemUpdateCache(cache) {
+  await fsp.mkdir(DATA_ROOT, { recursive: true });
+  const temporary = `${SYSTEM_UPDATE_CACHE_PATH}.tmp`;
+  await fsp.writeFile(temporary, JSON.stringify(cache, null, 2), 'utf8');
+  await fsp.rename(temporary, SYSTEM_UPDATE_CACHE_PATH);
+}
+
+function updateResult(status, currentVersion, latestVersion, source, detail = null) {
+  return {
+    status, currentVersion: currentVersion || null, latestVersion: latestVersion || null,
+    source, detail, checkedAt: new Date().toISOString(),
+  };
+}
+
+function detectedVersion(detection) {
+  return detection.version || extractVersion(detection.text);
+}
+
+async function checkNpmUpdate(definition, detection) {
+  const packageName = definition.updateCheck.package;
+  const result = await execFileAsync('npm.cmd', ['view', packageName, 'version', '--json'], { timeout: 45000 });
+  const currentVersion = detectedVersion(detection);
+  if (result.exitCode !== 0) return updateResult('unknown', currentVersion, null, `npm · ${packageName}`, 'npm registry nicht erreichbar');
+  let latestVersion = null;
+  try {
+    const parsed = JSON.parse(result.stdout.trim());
+    latestVersion = Array.isArray(parsed) ? parsed.at(-1) : String(parsed || '');
+  } catch { latestVersion = result.stdout.trim().replace(/^"|"$/g, ''); }
+  if (!latestVersion) return updateResult('unknown', currentVersion, null, `npm · ${packageName}`, 'Keine Versionsangabe erhalten');
+  if (!currentVersion) return updateResult('unknown', null, latestVersion, `npm · ${packageName}`, 'Installierte Version konnte nicht gelesen werden');
+  return updateResult(currentVersion !== latestVersion ? 'available' : 'current', currentVersion, latestVersion, `npm · ${packageName}`);
+}
+
+async function checkGitRemoteUpdate(definition) {
+  const check = definition.updateCheck;
+  const repository = expandSystemPath(check.path);
+  const remote = check.remote || 'origin';
+  const local = await execFileAsync('git.exe', ['-C', repository, 'rev-parse', 'HEAD']);
+  const branch = await execFileAsync('git.exe', ['-C', repository, 'branch', '--show-current']);
+  const branchName = branch.stdout.trim();
+  if (local.exitCode !== 0 || branch.exitCode !== 0 || !branchName) {
+    return updateResult('unknown', null, null, `Git · ${remote}`, 'Lokaler Branch ist nicht eindeutig');
+  }
+  const remoteHead = await execFileAsync('git.exe', ['-C', repository, 'ls-remote', remote, `refs/heads/${branchName}`], { timeout: 45000 });
+  const remoteSha = remoteHead.stdout.trim().split(/\s+/)[0];
+  const localSha = local.stdout.trim();
+  if (remoteHead.exitCode !== 0 || !/^[a-f0-9]{40}$/i.test(remoteSha)) {
+    return updateResult('unknown', localSha.slice(0, 8), null, `Git · ${remote}/${branchName}`, 'Remote-Version nicht erreichbar');
+  }
+  return updateResult(localSha === remoteSha ? 'current' : 'available', localSha.slice(0, 8), remoteSha.slice(0, 8), `Git · ${remote}/${branchName}`);
+}
+
+async function performSystemUpdateRefresh(definitions, detections, force) {
+  const cache = await loadSystemUpdateCache();
+  const results = {};
+  const pending = [];
+  const now = Date.now();
+  for (let index = 0; index < definitions.length; index += 1) {
+    const definition = definitions[index];
+    if (!definition.updateCheck) continue;
+    const detection = detections[index];
+    if (!detection.ok) {
+      results[definition.id] = { status: 'not-installed', source: definition.updateCheck.type, checkedAt: null };
+      continue;
+    }
+    const cached = cache.entries[definition.id];
+    const fresh = cached?.checkedAt && now - Date.parse(cached.checkedAt) < SYSTEM_UPDATE_TTL_MS;
+    if (!force && fresh) results[definition.id] = cached;
+    else pending.push({ definition, detection });
+  }
+
+  if (process.env.AI_PROJECT_CONTROL_SKIP_UPDATE_CHECKS === '1') {
+    for (const { definition, detection } of pending) {
+      results[definition.id] = updateResult('skipped', detectedVersion(detection), null, definition.updateCheck.type, 'In dieser Umgebung deaktiviert');
+    }
+  } else {
+    const wingetEntries = pending.filter(({ definition }) => definition.updateCheck.type === 'winget');
+    if (wingetEntries.length) {
+      const packageIds = wingetEntries.map(({ definition }) => definition.updateCheck.id);
+      const winget = await execFileAsync('winget.exe', ['upgrade', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity'], { timeout: 120000 });
+      const availableRows = parseWingetUpgradeOutput(`${winget.stdout}\n${winget.stderr}`, packageIds);
+      for (const { definition, detection } of wingetEntries) {
+        const packageId = definition.updateCheck.id;
+        const versions = availableRows.get(packageId);
+        const currentVersion = versions?.currentVersion || detectedVersion(detection);
+        results[definition.id] = versions
+          ? updateResult('available', currentVersion, versions.latestVersion, `Winget · ${packageId}`)
+          : winget.exitCode === 0
+            ? updateResult('current', currentVersion, currentVersion, `Winget · ${packageId}`)
+            : updateResult('unknown', currentVersion, null, `Winget · ${packageId}`, 'Winget-Quelle nicht erreichbar');
+      }
+    }
+    await Promise.all(pending.filter(({ definition }) => definition.updateCheck.type !== 'winget').map(async ({ definition, detection }) => {
+      if (definition.updateCheck.type === 'npm') results[definition.id] = await checkNpmUpdate(definition, detection);
+      else if (definition.updateCheck.type === 'gitRemote') results[definition.id] = await checkGitRemoteUpdate(definition);
+      else results[definition.id] = updateResult('unknown', detectedVersion(detection), null, definition.updateCheck.type, 'Nicht unterstützte Updatequelle');
+    }));
+  }
+
+  if (pending.length) {
+    for (const { definition } of pending) cache.entries[definition.id] = results[definition.id];
+    cache.checkedAt = new Date().toISOString();
+    await saveSystemUpdateCache(cache);
+  }
+  return { entries: results, checkedAt: cache.checkedAt, refreshed: pending.length > 0 };
+}
+
+async function getSystemUpdateStatuses(definitions, detections, force = false) {
+  if (systemUpdateRefresh) return systemUpdateRefresh;
+  systemUpdateRefresh = performSystemUpdateRefresh(definitions, detections, force);
+  try { return await systemUpdateRefresh; }
+  finally { systemUpdateRefresh = null; }
+}
+
 async function mcpSummary() {
   let codexServers = 0;
   let claudeServers = 0;
@@ -714,10 +867,16 @@ async function findMatchingFiles(root, pattern, result = []) {
 
 async function loadSystemCatalog() {
   const catalog = await readJsonFile(SYSTEM_CATALOG_PATH);
-  if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.systems)) throw new Error('System catalog is invalid.');
+  if (catalog.schemaVersion !== SYSTEM_CATALOG_SCHEMA_VERSION || !Array.isArray(catalog.systems)) throw new Error('System catalog is invalid.');
   for (const definition of catalog.systems) {
     if (!definition.id || !definition.name || !definition.detect || !['required', 'recommended', 'project'].includes(definition.tier)) {
       throw new Error(`Invalid system definition: ${definition.id || definition.name || 'unknown'}`);
+    }
+    if ((definition.updateCheck && !definition.update) || (!definition.updateCheck && definition.update)) {
+      throw new Error(`Update check and update action must be configured together: ${definition.id}`);
+    }
+    if (definition.updateCheck && !['winget', 'npm', 'gitRemote'].includes(definition.updateCheck.type)) {
+      throw new Error(`Unsupported update source: ${definition.id}`);
     }
   }
   return catalog.systems;
@@ -751,6 +910,11 @@ async function detectSystem(definition) {
   }
   if (detection.type === 'path' || detection.type === 'pathOrCommand') {
     const found = (detection.paths || []).map(expandSystemPath).find((candidate) => fs.existsSync(candidate));
+    if (found && detection.type === 'pathOrCommand') {
+      const summary = await commandSummary(found, detection.args || []);
+      if (summary.ok) return { ...summary, path: found };
+      return { ok: true, text: found, path: found };
+    }
     if (found) return { ok: true, text: found, path: found };
     if (detection.type === 'pathOrCommand') return commandSummary(detection.command, detection.args || []);
     return { ok: false, text: 'Nicht gefunden' };
@@ -761,7 +925,7 @@ async function detectSystem(definition) {
     if (!summary.ok) return summary;
     const models = await execFileAsync('ollama.exe', ['list']);
     const names = models.stdout.split(/\r?\n/).slice(1).filter(Boolean).map((line) => line.trim().split(/\s{2,}/)[0]);
-    return { ok: true, text: names.length ? names.join(', ') : summary.text };
+    return { ok: true, text: names.length ? names.join(', ') : summary.text, version: extractVersion(summary.text) };
   }
   if (detection.type === 'comfyCloud') {
     const installationsPath = path.join(path.dirname(COMFY_SETTINGS), 'installations.json');
@@ -804,7 +968,7 @@ async function detectProjectCapabilities(project) {
   return [...capabilities];
 }
 
-function catalogSystemRow(definition, detection, usedByProjects, activeProjectId) {
+function catalogSystemRow(definition, detection, updateStatus, usedByProjects, activeProjectId) {
   return {
     id: `auto-${definition.id}`, name: definition.name, category: definition.category,
     ok: Boolean(detection.ok), status: detection.ok ? 'vorhanden' : 'fehlt', detail: detection.text,
@@ -812,6 +976,7 @@ function catalogSystemRow(definition, detection, usedByProjects, activeProjectId
     installKey: definition.install ? definition.id : null, reason: definition.reason || null,
     workflowRole: definition.workflowRole || null, activation: definition.activation || null,
     costPolicy: definition.costPolicy || null,
+    updateStatus: updateStatus ? { ...updateStatus, updateKey: updateStatus.status === 'available' ? definition.id : null } : null,
     capabilities: definition.capabilities || [], usedByProjects,
     relevantToCurrentProject: usedByProjects.some((item) => item.id === activeProjectId),
   };
@@ -824,12 +989,13 @@ async function getSystemInventory(project, force = false) {
     const projectCapabilities = new Map();
     await Promise.all(registry.projects.map(async (candidate) => projectCapabilities.set(candidate.id, await detectProjectCapabilities(candidate))));
     const detections = await Promise.all(definitions.map(detectSystem));
+    const updates = await getSystemUpdateStatuses(definitions, detections, force);
     systemCache = definitions.map((definition, index) => {
       const required = definition.capabilities || [];
       const usedByProjects = required.length ? registry.projects
         .filter((candidate) => required.some((capability) => projectCapabilities.get(candidate.id).includes(capability)))
         .map((candidate) => ({ id: candidate.id, name: candidate.name })) : [];
-      return catalogSystemRow(definition, detections[index], usedByProjects, project.id);
+      return catalogSystemRow(definition, detections[index], updates.entries[definition.id] || null, usedByProjects, project.id);
     });
     systemCacheAt = Date.now();
   }
@@ -848,11 +1014,17 @@ async function getSystemInventory(project, force = false) {
     projectSystem(`project-${project.id}-obsidian`, `${project.name} Obsidian`, 'Arbeitswissen', project.obsidianPath, fs.existsSync(project.obsidianPath), 'Notizen, Runs und Entwürfe für dieses Projekt.'),
     projectSystem(`project-${project.id}-agents`, `${project.name} AGENTS.md`, 'Projektregeln', path.join(project.repository, 'AGENTS.md'), fs.existsSync(path.join(project.repository, 'AGENTS.md')), 'Verbindliche Agentenregeln des Repositorys.'),
   ];
+  const updateCache = await loadSystemUpdateCache();
   return {
     global: [...systemCache.map((system) => ({ ...system, relevantToCurrentProject: system.usedByProjects.some((item) => item.id === project.id) })), ...registered.filter((system) => system.scope === 'global')],
     project: [...projectSystems, ...registered.filter((system) => system.scope === 'project')],
     projectCapabilities,
     catalogPath: SYSTEM_CATALOG_PATH,
+    updates: {
+      checkedAt: updateCache.checkedAt,
+      available: systemCache.filter((system) => system.updateStatus?.status === 'available').length,
+      unavailable: systemCache.filter((system) => system.updateStatus?.status === 'unknown').length,
+    },
   };
 }
 
@@ -1118,6 +1290,48 @@ async function installSystem(payload) {
       appendLog(job, 'stderr', `${error.message}\nInstallation wurde nicht als erfolgreich markiert.\n`);
     } finally {
       systemCache = null; systemCacheAt = 0; componentCache.clear();
+    }
+  })();
+  return snapshotJob(job);
+}
+
+async function updateSystem(payload) {
+  const { project } = await getProject(String(payload.projectId || ''));
+  const updateKey = String(payload.updateKey || '');
+  const definition = (await loadSystemCatalog()).find((candidate) => candidate.id === updateKey);
+  const updater = definition?.update;
+  if (!updater) throw new Error('This system has no approved automatic updater.');
+  const updateCache = await loadSystemUpdateCache();
+  if (updateCache.entries[updateKey]?.status !== 'available') throw new Error('No verified update is currently available for this system. Run a new check first.');
+  if (updater.preflight?.type === 'cleanGit') {
+    const repository = expandSystemPath(updater.preflight.path);
+    const status = await execFileAsync('git.exe', ['-C', repository, 'status', '--porcelain']);
+    if (status.exitCode !== 0) throw new Error('The Git installation to update could not be inspected.');
+    if (status.stdout.trim()) throw new Error('The Git installation contains local changes and cannot be updated automatically.');
+  }
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const job = {
+    id, kind: 'update', phase: 'queued', projectId: project.id, projectName: project.name,
+    status: 'running', provider: 'Local setup', mode: 'Update', workingDirectory: project.repository,
+    taskPreview: `${updater.name} aktualisieren`, createdAt: now, startedAt: now, finishedAt: null,
+    exitCode: null, runDirectory: null, pid: null, stdout: '', stderr: '', child: null,
+  };
+  jobs.set(id, job);
+  (async () => {
+    try {
+      const args = (updater.args || []).map(expandSystemPath);
+      await runStreamingCommand(job, updater.command, args, project.repository, `Update ${updater.name}`);
+      job.phase = 'complete'; job.status = 'completed'; job.exitCode = 0; job.finishedAt = new Date().toISOString();
+      delete updateCache.entries[updateKey];
+      updateCache.checkedAt = null;
+      await saveSystemUpdateCache(updateCache);
+      emitJob(job, 'complete', `${updater.name} wurde aktualisiert. Starte das Dashboard neu, falls die laufende Komponente selbst betroffen ist.`);
+    } catch (error) {
+      job.status = 'failed'; job.exitCode = 1; job.finishedAt = new Date().toISOString();
+      appendLog(job, 'stderr', `${error.message}\nUpdate wurde nicht als erfolgreich markiert.\n`);
+    } finally {
+      systemCache = null; systemCacheAt = 0; componentCache.clear(); providerModelCacheAt = 0;
     }
   })();
   return snapshotJob(job);
@@ -1786,6 +2000,7 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/systems') return sendJson(response, 201, await addSystem(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/systems/install') return sendJson(response, 202, await installSystem(await readJsonBody(request)));
+    if (request.method === 'POST' && url.pathname === '/api/systems/update') return sendJson(response, 202, await updateSystem(await readJsonBody(request)));
     const systemMatch = url.pathname.match(/^\/api\/systems\/([a-f0-9-]+)$/);
     if (request.method === 'DELETE' && systemMatch) return sendJson(response, 200, await removeSystem(systemMatch[1]));
     if (request.method === 'GET' && url.pathname === '/api/memory') {
@@ -1856,4 +2071,4 @@ if (require.main === module) {
   process.on('SIGTERM', shutdown);
 }
 
-module.exports = { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels };
+module.exports = { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels, extractVersion, parseWingetUpgradeOutput };

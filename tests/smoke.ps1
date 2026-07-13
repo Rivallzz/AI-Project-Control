@@ -23,6 +23,7 @@ try {
     $env:AI_PROJECT_CONTROL_RUN_ROOT = (Join-Path $dataRoot 'runs')
     $env:AI_PROJECT_CONTROL_WORKTREE_ROOT = (Join-Path $dataRoot 'worktrees')
     $env:AI_PROJECT_CONTROL_OBSIDIAN_VAULT = (Join-Path $dataRoot 'vault')
+    $env:AI_PROJECT_CONTROL_SKIP_UPDATE_CHECKS = '1'
     $process = Start-Process node.exe -ArgumentList (Join-Path $root 'server.js') -WorkingDirectory $root -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         Start-Sleep -Milliseconds 200
@@ -109,7 +110,9 @@ try {
     if ($serverSource -notmatch '/api/git/image' -or $serverSource -notmatch '/api/git/cleanup-merged') { throw 'Git image preview or merged-worktree cleanup endpoints are missing.' }
     if ($serverSource -match 'SYSTEM_METADATA|INSTALL_CATALOG') { throw 'System definitions are still hardcoded in server.js.' }
     $catalog = Get-Content -Raw -LiteralPath (Join-Path $root 'config\systems.json') | ConvertFrom-Json
-    if ($catalog.schemaVersion -ne 1 -or $catalog.systems.Count -lt 10) { throw 'Versioned system catalog is invalid.' }
+    if ($catalog.schemaVersion -ne 2 -or $catalog.systems.Count -lt 10) { throw 'Versioned system catalog is invalid.' }
+    $updateSystems = $catalog.systems | Where-Object { $_.PSObject.Properties.Name -contains 'updateCheck' -and $_.PSObject.Properties.Name -contains 'update' }
+    if ($updateSystems.Count -lt 10 -or $null -eq $nodeSystem.updateStatus) { throw 'Catalog-driven update checks are missing.' }
     $serenaSystem = $catalog.systems | Where-Object { $_.id -eq 'serena' }
     $continuesSystem = $catalog.systems | Where-Object { $_.id -eq 'cli-continues' }
     if ($null -eq $serenaSystem -or -not $serenaSystem.workflowRole -or -not $serenaSystem.activation) { throw 'Serena integration metadata is missing.' }
@@ -212,6 +215,14 @@ try {
     catch {
         if ($_.Exception.Message -eq 'Unknown installer was accepted.') { throw }
     }
+    $invalidUpdateBody = @{ projectId = $project.id; updateKey = 'not-approved' } | ConvertTo-Json
+    try {
+        Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems/update" -ContentType 'application/json' -Body $invalidUpdateBody -TimeoutSec 10 | Out-Null
+        throw 'Unknown updater was accepted.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Unknown updater was accepted.') { throw }
+    }
 
     Set-Content -LiteralPath $testTask -Value "# Goal`n`nPrüfe UTF-8: äöü ß → Dry-run routing validation." -Encoding utf8
     $router = Join-Path $root 'router\Invoke-ProjectAiTask.ps1'
@@ -232,6 +243,7 @@ try {
     if ($routerSource -match "'--ephemeral'" -or $routerSource -match "'--no-session-persistence'") { throw 'Provider sessions are still disabled, so cli-continues cannot hand work off.' }
     if ($routerSource -notmatch 'Serena') { throw 'Router does not describe the Serena symbol-navigation boundary.' }
     if ($appSource -notmatch 'system\.workflowRole' -or $appSource -notmatch 'Hermes \+ Ollama') { throw 'System integration metadata or Hermes orchestration label is missing from the UI.' }
+    if ($appSource -notmatch 'data-update-system' -or $appSource -notmatch '/api/systems/update' -or $appSource -notmatch 'Prüft…') { throw 'System update controls or refresh feedback are missing from the UI.' }
     $routerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs') -LocalOnly -DryRun
     if ($LASTEXITCODE -ne 0 -or ($routerOutput -join "`n") -notmatch 'ollama') { throw 'Local-only provider routing dry-run failed.' }
     $orderedRouterOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -ProviderOrder 'Ollama,Claude,Codex' -OllamaModel 'polis-coder' -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs-ordered') -DryRun

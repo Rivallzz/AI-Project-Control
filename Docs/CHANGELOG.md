@@ -7,6 +7,8 @@
 - Passed the exact route and model map through task packages, server validation and quota handoffs without an additional LLM call.
 - Kept Hermes/Ollama unavailable for write mode while preserving it as the configurable read-only local fallback.
 - Made Codex quota status compatible with telemetry records that omit the secondary reset window.
+- Added cached, catalog-driven update checks on project load and forced refresh through `Neu prüfen`.
+- Added confirmed in-dashboard updates through reviewed Winget, npm and clean fast-forward Git routes without automatic background changes or LLM usage.
 
 ## 2026-07-12
 

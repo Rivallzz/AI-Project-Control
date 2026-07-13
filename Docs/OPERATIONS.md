@@ -32,7 +32,11 @@ Push the target branch separately after review. When `develop` exists, only that
 
 ## System inventory
 
-`config/systems.json` is the reviewed catalog. `Neu prüfen` probes the current machine again. Project-dependent tools are assigned from repository capabilities and show `Verwendet von: <Projekt>`. A present tool may remain visible without assignment so the machine inventory stays complete.
+`config/systems.json` is the reviewed catalog. Loading a project checks catalogued official update sources in the background and reuses the local six-hour cache. `Neu prüfen` probes the current machine and update sources again. This performs no installation and consumes no LLM or subscription tokens.
+
+When a newer supported version exists, its system card shows the installed and available versions plus `Update`. Confirming that button starts the exact allowlisted Winget, npm or fast-forward Git command as a visible local setup job in the project conversation. It never updates silently. Git-based tools must be clean and use `pull --ff-only`; otherwise the action stops. Restart the dashboard after updating Node.js or another component used by the running process. A card without an update state has no reviewed automatic route and must be maintained through its official manual process.
+
+Project-dependent tools are assigned from repository capabilities and show `Verwendet von: <Projekt>`. A present tool may remain visible without assignment so the machine inventory stays complete.
 
 ## Recovery
 

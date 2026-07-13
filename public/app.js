@@ -518,6 +518,16 @@ function renderSystemRows(container, systems, grouped = false) {
     const category = document.createElement('div'); category.className = 'system-category'; category.textContent = system.category;
     const detail = document.createElement('div'); detail.className = 'system-detail'; detail.textContent = system.detail || system.path || '—';
     item.append(head, category, detail);
+    if (system.updateStatus && system.updateStatus.status !== 'not-installed') {
+      const update = document.createElement('div'); update.className = `system-update ${system.updateStatus.status}`;
+      const current = system.updateStatus.currentVersion ? `Version ${system.updateStatus.currentVersion}` : 'Version unbekannt';
+      if (system.updateStatus.status === 'available') update.textContent = `${current} · ${system.updateStatus.latestVersion} verfügbar`;
+      else if (system.updateStatus.status === 'current') update.textContent = system.updateStatus.currentVersion ? `${current} · aktuell` : 'Kein Update verfügbar';
+      else if (system.updateStatus.status === 'skipped') update.textContent = `${current} · Prüfung ausgesetzt`;
+      else update.textContent = `${current} · Prüfung nicht verfügbar`;
+      update.title = [system.updateStatus.source, system.updateStatus.detail].filter(Boolean).join(' · ');
+      item.append(update);
+    }
     if (system.usedByProjects?.length) {
       const usage = document.createElement('div'); usage.className = 'system-usage';
       usage.textContent = `Verwendet von: ${system.usedByProjects.map((project) => project.name).join(', ')}`; item.append(usage);
@@ -535,11 +545,17 @@ function renderSystemRows(container, systems, grouped = false) {
       }
       item.append(integration);
     }
-    if ((!system.ok && system.installKey) || !system.autoDetected) {
+    if ((!system.ok && system.installKey) || system.updateStatus?.updateKey || !system.autoDetected) {
       const actions = document.createElement('div'); actions.className = 'system-actions';
       if (!system.ok && system.installKey) {
         const install = document.createElement('button'); install.type = 'button'; install.className = 'button secondary table-button';
         install.dataset.installSystem = system.installKey; install.dataset.installName = system.name; install.textContent = 'Installieren'; actions.append(install);
+      }
+      if (system.updateStatus?.updateKey) {
+        const update = document.createElement('button'); update.type = 'button'; update.className = 'button secondary table-button';
+        update.dataset.updateSystem = system.updateStatus.updateKey; update.dataset.updateName = system.name;
+        update.dataset.currentVersion = system.updateStatus.currentVersion || ''; update.dataset.latestVersion = system.updateStatus.latestVersion || '';
+        update.dataset.updateSource = system.updateStatus.source || 'offizielle Quelle'; update.textContent = 'Update'; actions.append(update);
       }
       if (!system.autoDetected) {
         const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'button danger table-button';
@@ -552,18 +568,28 @@ function renderSystemRows(container, systems, grouped = false) {
   }
 }
 
-async function loadSystems(force = false) {
+async function loadSystems(force = false, quiet = false) {
   if (!activeProject) return;
+  const projectId = activeProject.id;
+  const previousLabel = elements.systemsRefresh.textContent;
+  if (force) { elements.systemsRefresh.disabled = true; elements.systemsRefresh.textContent = 'Prüft…'; }
   try {
-    const inventory = await api(`/api/systems?${projectQuery()}${force ? '&force=1' : ''}`);
+    const inventory = await api(`/api/systems?projectId=${encodeURIComponent(projectId)}${force ? '&force=1' : ''}`);
+    if (activeProject?.id !== projectId) return;
     renderSystemRows(elements.projectSystems, inventory.project);
     renderSystemRows(elements.globalSystems, inventory.global, true);
     const requiredMissing = inventory.global.filter((system) => system.tier === 'required' && !system.ok).length;
     const recommendedMissing = inventory.global.filter((system) => system.tier === 'recommended' && !system.ok).length;
-    elements.systemSetupSummary.innerHTML = requiredMissing
+    const updateNote = inventory.updates.available
+      ? ` <strong>${inventory.updates.available === 1 ? '1 Update' : `${inventory.updates.available} Updates`} verfügbar.</strong>`
+      : inventory.updates.unavailable
+        ? ` ${inventory.updates.unavailable} Updatequelle(n) waren nicht erreichbar.`
+        : inventory.updates.checkedAt ? ' Alle unterstützten Updatequellen sind geprüft.' : '';
+    elements.systemSetupSummary.innerHTML = (requiredMissing
       ? `<strong>${requiredMissing} notwendige Komponente(n) fehlen.</strong> Fehlende freigegebene Werkzeuge können direkt installiert werden.`
-      : `<strong>Basis vollständig.</strong> ${recommendedMissing ? `${recommendedMissing} empfohlene Erweiterung(en) sind noch nicht eingerichtet.` : 'Der empfohlene lokale Workflow ist vollständig.'}`;
-  } catch (error) { elements.systemMessage.textContent = error.message; }
+      : `<strong>Basis vollständig.</strong> ${recommendedMissing ? `${recommendedMissing} empfohlene Erweiterung(en) sind noch nicht eingerichtet.` : 'Der empfohlene lokale Workflow ist vollständig.'}`) + updateNote;
+  } catch (error) { if (!quiet) elements.systemMessage.textContent = error.message; }
+  finally { if (force) { elements.systemsRefresh.disabled = false; elements.systemsRefresh.textContent = previousLabel; } }
 }
 
 function renderGitState(data) {
@@ -698,7 +724,8 @@ async function activateProject(projectId) {
     if (visibleView === 'portfolio') await loadPortfolio();
     else if (visibleView === 'knowledge') await loadActiveKnowledge();
     else if (visibleView === 'git') await loadGitState();
-    else if (visibleView === 'systems') await loadSystems(true);
+    else if (visibleView === 'systems') await loadSystems();
+    else void loadSystems(false, true);
   } finally { setBusy(false); }
 }
 
@@ -1041,7 +1068,7 @@ async function initialize() {
     [config, registry] = await Promise.all([api('/api/config'), api('/api/projects')]);
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
     elements.provisionParent.value = config.defaultProjectParent;
-    loadExecutionPreferences(); renderProjectSelector(); connectJobEvents(); await refreshAll(true);
+    loadExecutionPreferences(); renderProjectSelector(); connectJobEvents(); await refreshAll(true); void loadSystems(false, true);
   } catch (error) { elements.connection.className = 'connection error'; elements.connection.textContent = error.message; }
 }
 
@@ -1305,6 +1332,18 @@ document.getElementById('systemsView').addEventListener('click', async (event) =
       await api('/api/systems/install', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, installKey: install.dataset.installSystem }) });
       showView('tasks'); await refreshJobs();
     } catch (error) { elements.systemMessage.textContent = error.message; install.disabled = false; }
+    return;
+  }
+  const update = event.target.closest('button[data-update-system]');
+  if (update) {
+    const versionText = update.dataset.currentVersion && update.dataset.latestVersion
+      ? ` von ${update.dataset.currentVersion} auf ${update.dataset.latestVersion}` : '';
+    if (!window.confirm(`${update.dataset.updateName}${versionText} über ${update.dataset.updateSource} aktualisieren? Das Update läuft sichtbar im Projektgespräch und kann einen Neustart erfordern.`)) return;
+    update.disabled = true; elements.systemMessage.textContent = `${update.dataset.updateName} wird aktualisiert. Der Fortschritt erscheint direkt im Projektgespräch.`;
+    try {
+      await api('/api/systems/update', { method: 'POST', body: JSON.stringify({ projectId: activeProject.id, updateKey: update.dataset.updateSystem }) });
+      showView('tasks'); await refreshJobs();
+    } catch (error) { elements.systemMessage.textContent = error.message; update.disabled = false; }
     return;
   }
   const remove = event.target.closest('button[data-remove-system]'); if (!remove) return;

@@ -1,5 +1,9 @@
 # Decision Log
 
+## 2026-07-13 - Explicit catalogued updates
+
+Version checks may run read-only on project load and through `Neu prüfen`, but software updates require an owner-confirmed button. A system receives that button only when `config/systems.json` defines both a reviewed official source and an allowlisted update command. Unknown, dirty or detached installations fail closed and remain manual.
+
 ## 2026-07-12 - Independent control-plane repository
 
 AI Project Control is an independent project that manages Polis and future projects. It is not owned by the Polis repository.
