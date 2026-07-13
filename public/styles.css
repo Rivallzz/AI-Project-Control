@@ -664,10 +664,13 @@ td { overflow-wrap: anywhere; }
 .git-image-preview { margin: 0 0 12px; padding: 12px; border: 1px solid #303536; border-radius: 5px; background: #111415; text-align: center; }
 .git-image-preview img { display: block; width: auto; max-width: 100%; max-height: 58vh; margin: 0 auto; object-fit: contain; background: repeating-conic-gradient(#25292a 0 25%, #1d2021 0 50%) 50% / 18px 18px; }
 .git-image-preview figcaption { margin-top: 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: minmax(260px, 1fr) repeat(5, auto); align-items: end; gap: 9px; }
-.git-commit-control label { margin-top: 0; }
-.git-commit-control small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
-.git-actions .form-message { grid-column: 1 / -1; }
+.git-actions { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.git-actions > label { margin-top: 0; }
+.git-action-row { display: grid; grid-template-columns: minmax(260px, 1fr) repeat(5, auto); align-items: stretch; gap: 9px; }
+.git-action-row input { min-width: 0; }
+.git-action-row .button { height: 44px; }
+.git-actions > small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.git-actions .form-message { display: block; margin-top: 9px; }
 
 .conversation-history-wrap { position: relative; flex: 1; min-height: 260px; overflow: hidden; }
 .conversation-history { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 34px; padding: 28px 24px 38px; scrollbar-gutter: stable; }
@@ -894,9 +897,9 @@ td { overflow-wrap: anywhere; }
   .git-panel > .section-heading { flex-direction: column; }
   .git-context-bar { grid-template-columns: 1fr; gap: 10px; }
   .git-file-list { max-height: 300px; }
-  .git-actions { grid-template-columns: 1fr 1fr; }
+  .git-action-row { grid-template-columns: 1fr 1fr; }
   .delivery-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .git-commit-control, .git-actions .form-message { grid-column: 1 / -1; }
+  .git-action-row input { grid-column: 1 / -1; }
   .chat-panel { min-height: 680px; }
   .conversation-history { max-height: none; }
   .system-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -947,9 +950,10 @@ td { overflow-wrap: anywhere; }
   .portfolio-project-heading { align-items: flex-start; }
   .portfolio-facts { grid-template-columns: 1fr; gap: 2px; }
   .portfolio-facts dd { margin-bottom: 8px; }
-  .git-actions { grid-template-columns: 1fr; }
+  .git-action-row { grid-template-columns: 1fr; }
   .delivery-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .git-actions .button { width: 100%; }
+  .git-action-row input { grid-column: auto; }
+  .git-action-row .button { width: 100%; }
   .message { max-width: 92%; }
   .message-attachments { grid-template-columns: minmax(120px, 1fr); }
   .project-row { grid-template-columns: 1fr; }

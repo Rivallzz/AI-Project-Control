@@ -207,12 +207,16 @@
               </section>
             </div>
             <div class="git-actions">
-              <div class="git-commit-control"><label for="gitCommitMessage">Commit-Nachricht</label><input id="gitCommitMessage" maxlength="200" placeholder="Wird aus dem Arbeitsauftrag vorgeschlagen"><small>Wird automatisch für diesen Branch gespeichert.</small></div>
-              <button id="gitCommitButton" class="button secondary" type="button">Nur committen</button>
-              <button id="gitCommitPushButton" class="button secondary" type="button">Committen & Branch pushen</button>
-              <button id="gitIntegrateButton" class="button primary hidden" type="button">In Integrationsbranch übernehmen</button>
-              <button id="gitCleanupMergedButton" class="button secondary hidden" type="button">Abgeschlossene Aufgaben aufräumen</button>
-              <button id="gitPushButton" class="button secondary hidden" type="button">Ausstehende Commits pushen</button>
+              <label for="gitCommitMessage">Commit-Nachricht</label>
+              <div class="git-action-row">
+                <input id="gitCommitMessage" maxlength="200" placeholder="Wird aus dem Arbeitsauftrag vorgeschlagen">
+                <button id="gitCommitButton" class="button secondary" type="button">Nur committen</button>
+                <button id="gitCommitPushButton" class="button secondary" type="button">Committen & Branch pushen</button>
+                <button id="gitIntegrateButton" class="button primary hidden" type="button">In Integrationsbranch übernehmen</button>
+                <button id="gitCleanupMergedButton" class="button secondary hidden" type="button">Abgeschlossene Aufgaben aufräumen</button>
+                <button id="gitPushButton" class="button secondary hidden" type="button">Ausstehende Commits pushen</button>
+              </div>
+              <small>Wird automatisch für diesen Branch gespeichert.</small>
               <span id="gitMessage" class="form-message" role="status"></span>
             </div>
           </section>
