@@ -6,6 +6,8 @@ Graphify is the semantic discovery layer. New projects receive `graphify-out/gra
 
 The dashboard presents Graphify and Obsidian together. One search query filters relationships and working notes, while source badges preserve the authority boundary. Graph zoom is local UI state and does not alter the index.
 
+Graphify runtime health and project-index health are reported separately. The runtime resolver probes `AI_PROJECT_CONTROL_GRAPHIFY_PYTHON`, then the catalogued local Python 3.12 installation and finally `python.exe` from `PATH`, selecting the first interpreter for which `python -m graphify --version` succeeds. A readable index therefore remains available when its rebuild runtime is unavailable; the workflow shows a warning instead of claiming that the index is missing. Portfolio freshness is derived from the index commit itself and remains `unbekannt` when either the indexed commit or repository HEAD cannot be verified.
+
 ## Obsidian
 
 Each project receives a working area under `Project-Knowledge/10 Projects/<Project>`. It contains dashboards, working notes, research, reviews, prompts, lessons and AI-run links. Official project documentation stays in Git.

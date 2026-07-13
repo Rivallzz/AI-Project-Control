@@ -788,7 +788,6 @@ td { overflow-wrap: anywhere; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border); padding: 12px 16px; display: grid; grid-template-columns: minmax(300px, 0.8fr) minmax(0, 1.2fr); gap: 12px; }
   .sidebar .panel { margin: 0; }
   .component-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-  .component-list .row-detail { display: none; }
   .component-row { border-top: 0; border-left: 1px solid #303536; padding: 0 0 0 9px; }
   .component-row:first-child { border-left: 0; padding-left: 0; }
   .workflow-scope-note { display: none; }

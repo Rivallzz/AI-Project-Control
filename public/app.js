@@ -2,6 +2,7 @@
 
 import { api, createRequestState } from './modules/request-state.js';
 import { createProjectUiState, jobBelongsInConversation } from './modules/project-ui-state.js';
+import { graphifyComponentView } from './modules/component-status.js';
 import {
   MODEL_CATALOG_VERSION, PROVIDERS, availableModels, defaultModelId, modelCatalog, modelDecisionText,
   modelProfile, modelProfiles, primaryFirst, reconcileModelSelection, selectedModel, taskStartState,
@@ -443,11 +444,11 @@ function renderProviders(status) {
   elements.providerList.append(providerRow('Hermes + Ollama', ollama, ollama.available ? `${ollama.model} · Read-only` : ollama.reason || 'Nicht verfügbar'));
 }
 
-function componentRow(name, ok, detail, warning = false) {
+function componentRow(name, ok, detail, warning = false, statusLabel = '') {
   const row = document.createElement('div'); row.className = 'component-row';
   const line = document.createElement('div'); line.className = 'row-line';
   const label = document.createElement('span'); label.className = 'row-name'; label.textContent = name;
-  const state = document.createElement('span'); state.className = `status ${warning ? 'warn' : ok ? 'ok' : 'fail'}`; state.textContent = warning ? 'achtung' : ok ? 'ok' : 'fehlt';
+  const state = document.createElement('span'); state.className = `status ${warning ? 'warn' : ok ? 'ok' : 'fail'}`; state.textContent = statusLabel || (warning ? 'achtung' : ok ? 'ok' : 'fehlt');
   line.append(label, state);
   const description = document.createElement('div'); description.className = 'row-detail'; description.textContent = detail;
   row.append(line, description); return row;
@@ -464,9 +465,10 @@ function renderComponents(data) {
   const modeLabel = mode === 'Write' ? 'Änderungen erlaubt' : 'Nur lesen';
   elements.workflowContext.textContent = `${activeProject?.name || 'Projekt'} · ${modeLabel}${running ? ' · läuft' : ' · bereit'}`;
 
+  const graphifyView = graphifyComponentView(data.graphify);
   const rows = [
     componentRow('Repository-Basis', data.repository.ok, `Haupt-Checkout · ${data.repository.branch} · ${data.repository.clean ? 'sauber' : 'Änderungen vorhanden'}`, data.repository.ok && !data.repository.clean),
-    componentRow('Graphify', data.graphify.ok, data.graphify.text),
+    componentRow('Graphify', graphifyView.ok, graphifyView.detail, graphifyView.warning, graphifyView.label),
     componentRow('Obsidian', data.obsidian.ok, data.obsidian.path),
     componentRow('Provider Router', data.router.ok, data.router.path),
   ];

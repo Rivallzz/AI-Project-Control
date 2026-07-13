@@ -2,6 +2,7 @@
 
 ## 2026-07-13
 
+- Corrected the Graphify workflow status when Hermes' virtual-environment Python shadows the Python 3.12 installation: runtime and index health are now separate, the resolver probes each interpreter for the module, stale or unverifiable indexes remain identifiable and diagnostic details stay visible on narrow layouts.
 - Replaced loosely validated model strings with a versioned server-owned catalog, deterministic provider defaults and pre-execution rejection of unknown, unavailable or deprecated active models; Ollama chat capability now comes from `ollama show` metadata instead of model-name heuristics.
 - Added project-scoped `Ausgewogen`, `Schnell`, `Qualität` and `Coding` profiles while retaining exact provider/model controls through progressive disclosure and never inferring local-model capability from its name.
 - Passed the selected Ollama model through status checks and Hermes execution, required both Hermes and the installed chat model, and recorded the provider/model actually used independently of bounded raw logs in attempt events and run history.
