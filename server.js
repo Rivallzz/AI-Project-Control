@@ -30,6 +30,11 @@ const CC_SWITCH_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'CC-
 const COMFY_EXE = path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Comfy Desktop', 'Comfy Desktop.exe');
 const COMFY_SETTINGS = path.join(process.env.APPDATA || '', 'Comfy Desktop', 'settings.json');
 const SYSTEM_CATALOG_PATH = path.join(__dirname, 'config', 'systems.json');
+const CODEX_CONFIG_PATH = path.join(HOME, '.codex', 'config.toml');
+const CODEX_MODEL_CACHE_PATH = path.join(HOME, '.codex', 'models_cache.json');
+const PROVIDER_NAMES = ['Codex', 'Claude', 'Ollama'];
+const DEFAULT_PROVIDER_ORDER = ['Codex', 'Claude', 'Ollama'];
+const SAFE_MODEL_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/;
 const MAX_BODY_BYTES = 24 * 1024 * 1024;
 const MAX_JOB_LOG_CHARS = 2 * 1024 * 1024;
 const MAX_KNOWLEDGE_FILE_BYTES = 512 * 1024;
@@ -50,6 +55,8 @@ let statusCacheAt = 0;
 const componentCache = new Map();
 let systemCache = null;
 let systemCacheAt = 0;
+let providerModelCache = null;
+let providerModelCacheAt = 0;
 let gitDraftWriteChain = Promise.resolve();
 
 function defaultRegistry() {
@@ -170,14 +177,82 @@ async function serveTaskAttachment(url, response) {
 
 function execFileAsync(file, args, options = {}) {
   return new Promise((resolve) => {
-    execFile(file, args, { windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
-      resolve({
-        exitCode: error && Number.isInteger(error.code) ? error.code : error ? 1 : 0,
-        stdout: String(stdout || ''),
-        stderr: String(stderr || ''),
+    try {
+      execFile(file, args, { windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
+        resolve({
+          exitCode: error && Number.isInteger(error.code) ? error.code : error ? 1 : 0,
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+        });
       });
-    });
+    } catch (error) {
+      resolve({ exitCode: 1, stdout: '', stderr: String(error?.message || error) });
+    }
   });
+}
+
+async function getProviderModelCatalog(force = false) {
+  if (!force && providerModelCache && Date.now() - providerModelCacheAt < 60000) return providerModelCache;
+
+  let configuredCodexModel = null;
+  if (fs.existsSync(CODEX_CONFIG_PATH)) {
+    const source = await fsp.readFile(CODEX_CONFIG_PATH, 'utf8');
+    configuredCodexModel = source.match(/^model\s*=\s*["']([^"']+)["']/m)?.[1] || null;
+  }
+
+  let codexModels = [];
+  if (fs.existsSync(CODEX_MODEL_CACHE_PATH)) {
+    try {
+      const cache = await readJsonFile(CODEX_MODEL_CACHE_PATH);
+      codexModels = (Array.isArray(cache.models) ? cache.models : [])
+        .filter((model) => model.visibility === 'list' && SAFE_MODEL_NAME.test(String(model.slug || '')))
+        .map((model) => ({ value: model.slug, label: model.display_name || model.slug }));
+    } catch { codexModels = []; }
+  }
+  if (configuredCodexModel && SAFE_MODEL_NAME.test(configuredCodexModel) && !codexModels.some((model) => model.value === configuredCodexModel)) {
+    codexModels.unshift({ value: configuredCodexModel, label: configuredCodexModel });
+  }
+
+  const ollamaResult = await execFileAsync('ollama.exe', ['list']);
+  const ollamaModels = ollamaResult.exitCode === 0
+    ? ollamaResult.stdout.split(/\r?\n/).slice(1).map((line) => line.trim().split(/\s{2,}/)[0]).filter((name) => SAFE_MODEL_NAME.test(name) && !/embed/i.test(name))
+    : [];
+
+  providerModelCache = {
+    Codex: [{ value: 'default', label: configuredCodexModel ? `Standard (${configuredCodexModel})` : 'Codex-Standard' }, ...codexModels],
+    Claude: [
+      { value: 'default', label: 'Claude-Standard' },
+      { value: 'sonnet', label: 'Sonnet' },
+      { value: 'opus', label: 'Opus' },
+      { value: 'haiku', label: 'Haiku' },
+    ],
+    Ollama: ollamaModels.map((model) => ({ value: model, label: model })),
+  };
+  providerModelCacheAt = Date.now();
+  return providerModelCache;
+}
+
+function normalizeProviderOrder(value, legacyProvider = 'Auto') {
+  const source = Array.isArray(value) ? value : legacyProvider === 'Auto' ? DEFAULT_PROVIDER_ORDER : [legacyProvider];
+  const order = [];
+  for (const item of source) {
+    const provider = String(item || '');
+    if (!PROVIDER_NAMES.includes(provider)) throw new Error(`Unknown provider in routing order: ${provider || '(empty)'}.`);
+    if (!order.includes(provider)) order.push(provider);
+  }
+  if (!order.length) throw new Error('Select at least one provider.');
+  return order;
+}
+
+function normalizeProviderModels(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const models = {};
+  for (const provider of PROVIDER_NAMES) {
+    const model = String(source[provider] || 'default');
+    if (!SAFE_MODEL_NAME.test(model)) throw new Error(`Invalid model selection for ${provider}.`);
+    models[provider] = model;
+  }
+  return models;
 }
 
 function parseJsonOutput(text) {
@@ -785,7 +860,8 @@ function snapshotJob(job) {
   return {
     id: job.id, kind: job.kind || 'task', phase: job.phase || null,
     projectId: job.projectId, projectName: job.projectName,
-    status: job.status, provider: job.provider, mode: job.mode, useSubscriptionTokens: job.useSubscriptionTokens,
+    status: job.status, provider: job.provider, providerOrder: job.providerOrder || null, models: job.models || null,
+    mode: job.mode, useSubscriptionTokens: job.useSubscriptionTokens,
     workingDirectory: job.workingDirectory, branch: job.branch || null, taskPreview: job.taskPreview,
     createdAt: job.createdAt, startedAt: job.startedAt, finishedAt: job.finishedAt,
     exitCode: job.exitCode, runDirectory: job.runDirectory, pid: job.pid,
@@ -892,13 +968,20 @@ async function finalizeTaskGitMetadata(project, job, originalBranch, task) {
 async function startTask(payload) {
   const { project } = await getProject(String(payload.projectId || ''));
   const task = String(payload.task || '').trim();
-  const provider = String(payload.provider || 'Auto');
+  const legacyProvider = String(payload.provider || 'Auto');
   const mode = String(payload.mode || 'ReadOnly');
   const useSubscriptionTokens = payload.useSubscriptionTokens !== false;
+  let providerOrder = normalizeProviderOrder(payload.providerOrder, legacyProvider);
+  const models = normalizeProviderModels(payload.models);
   if (!task || task.length > 200000) throw new Error('Task text must contain between 1 and 200,000 characters.');
-  if (!['Auto', 'Codex', 'Claude', 'Ollama'].includes(provider)) throw new Error('Unknown provider selection.');
+  if (!['Auto', 'Codex', 'Claude', 'Ollama'].includes(legacyProvider)) throw new Error('Unknown provider selection.');
   if (!['ReadOnly', 'Write'].includes(mode)) throw new Error('Unknown execution mode.');
-  if (provider === 'Ollama' && mode === 'Write') throw new Error('Hermes lokal ist derzeit nur für isolierte Read-only-Experimente freigegeben. Verwende Codex oder Claude für Schreibaufgaben.');
+  if (!useSubscriptionTokens) providerOrder = ['Ollama'];
+  if (mode === 'Write') {
+    providerOrder = providerOrder.filter((provider) => provider !== 'Ollama');
+    if (!providerOrder.length) throw new Error('Hermes lokal ist derzeit nicht für Schreibaufgaben freigegeben. Aktiviere Codex oder Claude.');
+  }
+  const provider = providerOrder.length === 1 ? providerOrder[0] : 'Auto';
 
   const registeredProject = await registerProjectFromChat(task);
   if (registeredProject) {
@@ -945,18 +1028,20 @@ async function startTask(payload) {
   const promotionRule = worktree.integrationBranch === 'main'
     ? 'task branch -> main (only because no separate integration branch is available)'
     : `task branch -> ${worktree.integrationBranch} -> main; never task branch -> main`;
-  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider request: ${provider}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nIntegration branch: ${worktree.integrationBranch}\nPromotion rule: ${promotionRule}\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
+  const modelSummary = providerOrder.map((name) => `${name}=${models[name]}`).join(', ');
+  const taskPackage = `# Dashboard Task\n\nCreated: ${new Date().toISOString()}\nProject-ID: ${project.id}\nProject: ${project.name}\nRepository: ${project.repository}\nProvider order: ${providerOrder.join(' -> ')}\nProvider models: ${modelSummary}\nUse subscription tokens: ${useSubscriptionTokens}\nMode: ${mode}\nWorking directory: ${workingDirectory}\nTask branch: ${worktree.branch || 'none (read-only)'}\nIntegration branch: ${worktree.integrationBranch}\nPromotion rule: ${promotionRule}\nGraphify: ${project.graphPath}\nObsidian: ${project.obsidianPath}\n${attachmentSection}\n## Execution strategy\n\n${strategy}\n\n## Reviewed project memory\n\n${memoryText}\n\n## Registered systems\n\n${systemText}\n\n## Goal\n\n${task}\n`;
   await fsp.writeFile(taskPath, taskPackage, 'utf8');
 
   const args = [
     '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', TASK_SCRIPT,
     '-TaskFile', taskPath, '-WorkingDirectory', workingDirectory,
-    '-ProjectName', project.name, '-Provider', provider, '-Mode', mode, '-RunRoot', RUN_ROOT,
+    '-ProjectName', project.name, '-Provider', provider, '-ProviderOrder', providerOrder.join(','), '-Mode', mode,
+    '-CodexModel', models.Codex, '-ClaudeModel', models.Claude, '-OllamaModel', models.Ollama, '-RunRoot', RUN_ROOT,
   ];
   if (!useSubscriptionTokens) args.push('-LocalOnly');
   const child = spawn('pwsh.exe', args, { cwd: workingDirectory, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
   const job = {
-    id, kind: 'task', phase: 'routing', projectId: project.id, projectName: project.name, status: 'running', provider, mode, useSubscriptionTokens,
+    id, kind: 'task', phase: 'routing', projectId: project.id, projectName: project.name, status: 'running', provider, providerOrder, models, mode, useSubscriptionTokens,
     workingDirectory, branch: worktree.branch, taskPreview: task.slice(0, 160), taskPath,
     createdAt: new Date().toISOString(), startedAt: new Date().toISOString(), finishedAt: null,
     exitCode: null, runDirectory: null, pid: child.pid, stdout: '', stderr: '', child,
@@ -1737,7 +1822,11 @@ const server = http.createServer(async (request, response) => {
       const { project } = await getProject(projectId); return sendJson(response, 200, await listRuns(project.id));
     }
     if (request.method === 'GET' && url.pathname === '/api/task-attachment') return serveTaskAttachment(url, response);
-    if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, { runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT, defaultProjectParent: fs.existsSync('C:\\Repos') ? 'C:\\Repos' : path.join(HOME, 'Documents', 'Projects') });
+    if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, {
+      runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT,
+      defaultProjectParent: fs.existsSync('C:\\Repos') ? 'C:\\Repos' : path.join(HOME, 'Documents', 'Projects'),
+      providerModels: await getProviderModelCatalog(), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,
+    });
     if (request.method === 'POST' && url.pathname === '/api/tasks') return sendJson(response, 202, await startTask(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/projects/provision') return sendJson(response, 202, await provisionProject(await readJsonBody(request)));
     const stopMatch = url.pathname.match(/^\/api\/jobs\/([a-f0-9-]+)\/stop$/);
@@ -1767,4 +1856,4 @@ if (require.main === module) {
   process.on('SIGTERM', shutdown);
 }
 
-module.exports = { defaultCommitMessage, taskBranchSlug };
+module.exports = { defaultCommitMessage, taskBranchSlug, normalizeProviderOrder, normalizeProviderModels };

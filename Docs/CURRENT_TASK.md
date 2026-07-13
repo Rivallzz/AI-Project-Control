@@ -15,3 +15,5 @@ Git review now separates uncommitted status from ancestry, previews changed imag
 The project workspace now uses one chat-centred timeline. Active provider phases, focused tool events and stop control appear directly in the current assistant response; verbose technical output remains available through progressive disclosure. The separate live-feed column no longer competes with the conversation.
 
 Write tasks now use semantic outcome-oriented branch titles instead of truncating conversational prompts. Each task branch carries a locally persisted commit-message draft that is initialized deterministically, refined from the successful provider response, restored when switching worktrees and cleared after commit or cleanup.
+
+The workspace now stores a separate execution profile for each project. The owner can reorder and enable Codex, Claude Code and Hermes/Ollama, select one detected model per provider and choose read-only or write mode from the left panel beside the chat. The selected route and models are validated, written into the task package and honored by quota handoff. Codex status parsing tolerates telemetry that omits the secondary reset window.

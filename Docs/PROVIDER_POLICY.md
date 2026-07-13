@@ -2,15 +2,17 @@
 
 ## Routing
 
-With subscription usage enabled, `Auto` routes in this order:
+With subscription usage enabled, new projects initially route in this order:
 
 1. Codex through ChatGPT authentication.
 2. Claude Code through a Claude subscription.
 3. Hermes using local Ollama.
 
+The operator may enable or disable individual providers and change this order per project. A task uses the exact visible order. Each provider also receives the selected model: Codex uses either its configured default or a locally discovered Codex model, Claude uses its default or a CLI alias, and Hermes uses an installed Ollama chat model. Unavailable providers are skipped while preserving the remaining order. A non-quota provider failure still stops the workflow for inspection instead of silently switching engines.
+
 When a recognized quota limit interrupts a task, the router records output, Git status and the working-tree diff, then gives the same worktree and a handoff package to the next provider. If cli-continues can identify the exact local session by provider, working directory and run time, a minimal session extract is attached. The router never selects an unrelated latest session.
 
-With subscription usage disabled, only Hermes with local Ollama is allowed. Selecting Codex or Claude while that switch is off is rejected.
+With subscription usage disabled, only Hermes with local Ollama is allowed. The visible route collapses to the local provider and no subscription provider starts.
 
 Read-only questions use a lightweight advisory context policy: `AGENTS.md` remains mandatory, Graphify narrows discovery, and only the minimum relevant original files are read. Full documentation scans and test suites are reserved for explicit audits or write tasks.
 

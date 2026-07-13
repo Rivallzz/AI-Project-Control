@@ -5,10 +5,11 @@ const elements = {
   backgroundActivity: document.getElementById('backgroundActivity'),
   projectSelect: document.getElementById('projectSelect'), addProject: document.getElementById('addProjectButton'),
   providerList: document.getElementById('providerList'), componentList: document.getElementById('componentList'), workflowContext: document.getElementById('workflowContext'),
+  executionPanel: document.getElementById('executionPanel'), providerRoute: document.getElementById('providerRouteList'), routeSummary: document.getElementById('routeSummary'),
   taskHeading: document.getElementById('taskHeading'), form: document.getElementById('taskForm'), task: document.getElementById('taskText'),
   attachmentInput: document.getElementById('attachmentInput'), attachmentButton: document.getElementById('attachmentButton'),
   attachmentPreview: document.getElementById('attachmentPreview'),
-  provider: document.getElementById('providerSelect'), mode: document.getElementById('modeSelect'),
+  mode: document.getElementById('modeSelect'),
   useSubscriptionTokens: document.getElementById('useSubscriptionTokens'),
   start: document.getElementById('startButton'), formMessage: document.getElementById('formMessage'),
   knowledgeProjectName: document.getElementById('knowledgeProjectName'), knowledgeSearch: document.getElementById('knowledgeSearch'),
@@ -69,12 +70,116 @@ const submittedTaskText = new Map();
 const submittedTaskAttachments = new Map();
 const terminalHistoryRefreshes = new Set();
 const acknowledgedActivityJobs = new Set(JSON.parse(sessionStorage.getItem('acknowledgedActivityJobs') || '[]'));
+const PROVIDERS = ['Codex', 'Claude', 'Ollama'];
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Request failed: ${response.status}`);
   return data;
+}
+
+function executionPreferenceKey() {
+  return `ai-project-control:execution:${activeProject?.id || 'default'}`;
+}
+
+function providerRows() {
+  return [...elements.providerRoute.querySelectorAll('.provider-route-row')];
+}
+
+function providerModelSelect(provider) {
+  return elements.providerRoute.querySelector(`[data-provider-model="${provider}"]`);
+}
+
+function defaultModel(provider) {
+  const catalog = config?.providerModels?.[provider] || [];
+  if (provider === 'Ollama' && catalog.some((model) => model.value === 'polis-coder:latest')) return 'polis-coder:latest';
+  if (provider === 'Ollama' && catalog.some((model) => model.value === 'polis-coder')) return 'polis-coder';
+  return catalog[0]?.value || 'default';
+}
+
+function populateProviderModel(provider, selectedValue = null) {
+  const select = providerModelSelect(provider);
+  const catalog = config?.providerModels?.[provider] || [];
+  const requested = selectedValue || defaultModel(provider);
+  select.replaceChildren();
+  for (const model of catalog) {
+    const option = document.createElement('option'); option.value = model.value; option.textContent = model.label; select.append(option);
+  }
+  if (requested && !catalog.some((model) => model.value === requested)) {
+    const option = document.createElement('option'); option.value = requested; option.textContent = `${requested} (nicht erkannt)`; select.append(option);
+  }
+  select.value = requested;
+}
+
+function readExecutionPreferences() {
+  try { return JSON.parse(localStorage.getItem(executionPreferenceKey()) || '{}'); }
+  catch { return {}; }
+}
+
+function currentProviderOrder() {
+  const enabled = providerRows().filter((row) => row.querySelector('.provider-enabled input').checked).map((row) => row.dataset.provider);
+  if (elements.mode.value === 'Write' && !elements.useSubscriptionTokens.checked) return [];
+  if (elements.mode.value === 'Write') return enabled.filter((provider) => provider !== 'Ollama');
+  if (!elements.useSubscriptionTokens.checked) return enabled.includes('Ollama') ? ['Ollama'] : [];
+  return enabled;
+}
+
+function selectedProviderModels() {
+  return Object.fromEntries(PROVIDERS.map((provider) => [provider, providerModelSelect(provider).value || defaultModel(provider)]));
+}
+
+function saveExecutionPreferences() {
+  if (!activeProject) return;
+  const value = {
+    order: providerRows().map((row) => row.dataset.provider),
+    enabled: Object.fromEntries(providerRows().map((row) => [row.dataset.provider, row.querySelector('.provider-enabled input').checked])),
+    models: selectedProviderModels(), mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
+  };
+  localStorage.setItem(executionPreferenceKey(), JSON.stringify(value));
+}
+
+function renderExecutionControls(persist = true) {
+  if (!elements.useSubscriptionTokens.checked) {
+    elements.providerRoute.querySelector('[data-provider="Ollama"] .provider-enabled input').checked = true;
+  }
+  const rows = providerRows();
+  rows.forEach((row, index) => {
+    const provider = row.dataset.provider;
+    const enabled = row.querySelector('.provider-enabled input').checked;
+    const unavailableForTokens = !elements.useSubscriptionTokens.checked && provider !== 'Ollama';
+    const unavailableForMode = elements.mode.value === 'Write' && provider === 'Ollama';
+    row.classList.toggle('route-disabled', !enabled || unavailableForTokens || unavailableForMode);
+    row.querySelector('.provider-enabled input').disabled = unavailableForTokens || unavailableForMode;
+    providerModelSelect(provider).disabled = !enabled || unavailableForTokens || unavailableForMode;
+    row.querySelector('[data-route-move="up"]').disabled = index === 0;
+    row.querySelector('[data-route-move="down"]').disabled = index === rows.length - 1;
+  });
+  const route = currentProviderOrder();
+  const names = route.map((provider) => provider === 'Ollama' ? 'Hermes + Ollama' : provider === 'Claude' ? 'Claude Code' : provider);
+  elements.routeSummary.innerHTML = route.length
+    ? `<strong>${names.join(' &rarr; ')}</strong><br>${elements.mode.value === 'Write' ? 'Getrennter Task-Worktree; lokaler Schreibpfad gesperrt.' : 'Bei einem Kontingentlimit übernimmt der nächste Provider.'}`
+    : elements.mode.value === 'Write' && !elements.useSubscriptionTokens.checked
+      ? '<strong>Schreibmodus benötigt Codex oder Claude.</strong> Aktiviere Abo-Kontingente oder wechsle zu „Nur lesen“.'
+      : '<strong>Kein Provider aktiv.</strong> Aktiviere mindestens Codex oder Claude.';
+  elements.start.disabled = !route.length;
+  if (persist) saveExecutionPreferences();
+  if (componentStatus) renderComponents(componentStatus);
+}
+
+function loadExecutionPreferences() {
+  const value = readExecutionPreferences();
+  const requestedOrder = Array.isArray(value.order) ? value.order.filter((provider) => PROVIDERS.includes(provider)) : [];
+  const order = [...requestedOrder, ...PROVIDERS.filter((provider) => !requestedOrder.includes(provider))];
+  for (const provider of order) elements.providerRoute.append(elements.providerRoute.querySelector(`[data-provider="${provider}"]`));
+  for (const provider of PROVIDERS) {
+    const row = elements.providerRoute.querySelector(`[data-provider="${provider}"]`);
+    row.querySelector('.provider-enabled input').checked = value.enabled?.[provider] !== false;
+    populateProviderModel(provider, value.models?.[provider]);
+  }
+  elements.mode.value = ['ReadOnly', 'Write'].includes(value.mode) ? value.mode : 'ReadOnly';
+  elements.useSubscriptionTokens.checked = value.useSubscriptionTokens !== false;
+  renderExecutionControls(false);
 }
 
 function projectQuery() {
@@ -114,8 +219,9 @@ function renderProviders(status) {
   elements.providerList.replaceChildren();
   const codex = status.codex;
   const creditNote = codex.credits?.has_credits ? ` · Zusatz-Credits ${Number(codex.credits.balance).toFixed(2)} (gesperrt)` : ' · keine abrechenbaren API-Credits verwendet';
+  const secondaryNote = Number.isFinite(codex.secondary_used_percent) ? ` · Woche ${codex.secondary_used_percent}%` : ' · Wochenfenster nicht gemeldet';
   const codexDetail = codex.quota_known
-    ? `${codex.primary_used_percent}% im 5h-Fenster · Reset ${codex.primary_resets_local} · Woche ${codex.secondary_used_percent}%${creditNote}`
+    ? `${codex.primary_used_percent}% im 5h-Fenster · Reset ${codex.primary_resets_local || 'nicht gemeldet'}${secondaryNote}${creditNote}`
     : codex.reason || 'Kontingent unbekannt';
   elements.providerList.append(providerRow('Codex', codex, codexDetail, codex.primary_used_percent ?? null));
   const claude = status.claude;
@@ -140,7 +246,8 @@ function renderComponents(data) {
   componentStatus = data;
   elements.componentList.replaceChildren();
   const running = Array.from(liveJobs.values()).find((job) => job.projectId === activeProject?.id && job.kind === 'task' && job.status === 'running');
-  const provider = running?.provider || elements.provider.value;
+  const providerOrder = running?.providerOrder || currentProviderOrder();
+  const provider = running?.provider || (providerOrder.length === 1 ? providerOrder[0] : 'Auto');
   const mode = running?.mode || elements.mode.value;
   const useSubscription = running ? running.useSubscriptionTokens !== false : elements.useSubscriptionTokens.checked;
   const modeLabel = mode === 'Write' ? 'Änderungen erlaubt' : 'Nur lesen';
@@ -161,8 +268,10 @@ function renderComponents(data) {
   } else if (provider === 'Claude') {
     execution = { name: 'Ausführung · Claude', ok: data.claude.ok, detail: data.claude.text };
   } else {
-    const localFallback = mode === 'ReadOnly' ? ' → Hermes lokal' : '';
-    execution = { name: 'Ausführung · Auto', ok: data.codex.ok || data.claude.ok, detail: `Codex → Claude${localFallback}` };
+    const names = providerOrder.map((name) => name === 'Ollama' ? 'Hermes lokal' : name);
+    const cloudReady = providerOrder.some((name) => name === 'Codex' && data.codex.ok) || providerOrder.some((name) => name === 'Claude' && data.claude.ok);
+    const localReady = providerOrder.some((name) => name === 'Ollama' && data.hermes.ok && data.ollama.ok);
+    execution = { name: 'Ausführung · Route', ok: cloudReady || localReady, detail: names.join(' → ') };
   }
   rows.push(componentRow(execution.name, execution.ok, execution.detail));
 
@@ -337,6 +446,7 @@ function jobConversationElement(job) {
 function showView(name) {
   document.querySelectorAll('[data-view-panel]').forEach((panel) => panel.classList.toggle('hidden', panel.dataset.viewPanel !== name));
   document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('active', button.dataset.view === name));
+  elements.executionPanel.classList.toggle('hidden', name !== 'tasks');
   if (name === 'portfolio') loadPortfolio();
   if (name === 'knowledge') loadActiveKnowledge();
   if (name === 'git') loadGitState();
@@ -578,6 +688,7 @@ async function activateProject(projectId) {
     await api(`/api/projects/${encodeURIComponent(projectId)}/select`, { method: 'POST', body: '{}' });
     registry = await api('/api/projects');
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId);
+    loadExecutionPreferences();
     graphData = null; selectedGraphNodeId = null; graphZoom = 1; graphPanX = 0; graphPanY = 0; gitData = null; selectedGitFile = null; visibleGitDraftKey = null; visibleGitDraftValue = null; elements.gitCommitMessage.value = ''; runHistory = []; historyFollow = true; historyLatestVersion = null; elements.gitTarget.replaceChildren();
     elements.gitFileList.replaceChildren(); elements.gitDiffFileName.textContent = 'Projekt wird gewechselt'; elements.gitDiff.textContent = 'Der Git-Zustand des neuen Projekts wird geladen.';
     elements.gitImagePreview.classList.add('hidden'); elements.gitImagePreviewImage.removeAttribute('src');
@@ -930,7 +1041,7 @@ async function initialize() {
     [config, registry] = await Promise.all([api('/api/config'), api('/api/projects')]);
     activeProject = registry.projects.find((project) => project.id === registry.activeProjectId) || registry.projects[0];
     elements.provisionParent.value = config.defaultProjectParent;
-    renderProjectSelector(); connectJobEvents(); await refreshAll(true);
+    loadExecutionPreferences(); renderProjectSelector(); connectJobEvents(); await refreshAll(true);
   } catch (error) { elements.connection.className = 'connection error'; elements.connection.textContent = error.message; }
 }
 
@@ -948,9 +1059,17 @@ elements.backgroundActivity.addEventListener('click', async () => {
   if (projectId !== activeProject?.id) await activateProject(projectId);
   showView('tasks'); renderJobActivity();
 });
-elements.provider.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
-elements.mode.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
-elements.useSubscriptionTokens.addEventListener('change', () => { if (componentStatus) renderComponents(componentStatus); });
+elements.providerRoute.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-route-move]');
+  if (!button) return;
+  const row = button.closest('.provider-route-row');
+  if (button.dataset.routeMove === 'up' && row.previousElementSibling) elements.providerRoute.insertBefore(row, row.previousElementSibling);
+  if (button.dataset.routeMove === 'down' && row.nextElementSibling) elements.providerRoute.insertBefore(row.nextElementSibling, row);
+  renderExecutionControls();
+});
+elements.providerRoute.addEventListener('change', () => renderExecutionControls());
+elements.mode.addEventListener('change', () => renderExecutionControls());
+elements.useSubscriptionTokens.addEventListener('change', () => renderExecutionControls());
 elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); });
 
 elements.attachmentButton.addEventListener('click', () => elements.attachmentInput.click());
@@ -1072,9 +1191,12 @@ elements.noteList.addEventListener('click', (event) => {
 elements.form.addEventListener('submit', async (event) => {
   event.preventDefault(); elements.start.disabled = true; elements.formMessage.textContent = 'Task wird gestartet…';
   const taskText = elements.task.value;
+  const providerOrder = currentProviderOrder();
+  if (!providerOrder.length) { elements.formMessage.textContent = 'Aktiviere mindestens einen für diesen Modus verfügbaren Provider.'; renderExecutionControls(false); return; }
   try {
     const job = await api('/api/tasks', { method: 'POST', body: JSON.stringify({
-      projectId: activeProject.id, task: taskText, provider: elements.provider.value,
+      projectId: activeProject.id, task: taskText, provider: providerOrder.length === 1 ? providerOrder[0] : 'Auto', providerOrder,
+      models: selectedProviderModels(),
       mode: elements.mode.value, useSubscriptionTokens: elements.useSubscriptionTokens.checked,
       attachments: selectedAttachments.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })),
     }) });
@@ -1083,7 +1205,7 @@ elements.form.addEventListener('submit', async (event) => {
     liveJobs.set(job.id, job); renderConversation();
     elements.formMessage.textContent = 'Aufgabe läuft. Fortschritt erscheint direkt im Gespräch.'; elements.task.value = ''; elements.task.style.height = ''; clearAttachments(); await refreshJobs();
   } catch (error) { elements.formMessage.textContent = error.message; }
-  finally { elements.start.disabled = false; }
+  finally { renderExecutionControls(false); }
 });
 
 document.getElementById('portfolioView').addEventListener('click', async (event) => {

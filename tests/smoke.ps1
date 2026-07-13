@@ -37,6 +37,7 @@ try {
     if ($projects.projects.Count -lt 1) { throw 'No default project was returned.' }
     $config = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/config" -TimeoutSec 5
     if ($config.dataRoot -ne $dataRoot) { throw 'Runtime data did not use the isolated test directory.' }
+    if ($config.defaultProviderOrder.Count -ne 3 -or $null -eq $config.providerModels.Codex -or $null -eq $config.providerModels.Claude -or $null -eq $config.providerModels.Ollama) { throw 'Dynamic provider model catalog is missing.' }
 
     New-Item -ItemType Directory -Force -Path $testRepository | Out-Null
     & git.exe -C $testRepository init -b main | Out-Null
@@ -94,6 +95,8 @@ try {
     if ($indexSource -match 'live-feed-panel' -or $appSource -notmatch 'technical-activity' -or $appSource -notmatch 'function renderMessageText') { throw 'Chat-centric activity details or readable response formatting are missing.' }
     if ($appSource -notmatch 'abgeschlossen · prüfen' -or $appSource -notmatch 'acknowledgedActivityJobs') { throw 'Cross-project completion tracking is not actionable.' }
     if ($appSource -notmatch 'queueCommitDraftSave' -or $indexSource -notmatch 'Wird automatisch für diesen Branch gespeichert') { throw 'Branch-specific commit draft UX is missing.' }
+    if ($indexSource -notmatch 'id="executionPanel"' -or $indexSource -notmatch 'id="providerRouteList"' -or $indexSource -notmatch 'data-provider-model="Codex"') { throw 'Project execution controls or provider model selectors are missing.' }
+    if ($appSource -notmatch 'executionPreferenceKey' -or $appSource -notmatch 'currentProviderOrder' -or $appSource -notmatch 'providerOrder,') { throw 'Provider order is not persisted per project or sent with tasks.' }
 
     $systemBody = @{ name = 'Example Tool'; type = 'Test'; path = $testRepository; scope = 'project'; projectId = $project.id } | ConvertTo-Json
     $system = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/systems" -ContentType 'application/json' -Body $systemBody -TimeoutSec 10
@@ -214,6 +217,7 @@ try {
     $router = Join-Path $root 'router\Invoke-ProjectAiTask.ps1'
     $routerSource = Get-Content -Raw -LiteralPath $router
     if ($routerSource -notmatch 'Suggested branch name:' -or $routerSource -notmatch 'Suggested commit message:') { throw 'Write-task delivery metadata is not requested from providers.' }
+    if ($routerSource -notmatch '\$ProviderOrder' -or $routerSource -notmatch '\$CodexModel' -or $routerSource -notmatch '''-m'', \$CodexModel') { throw 'Router does not accept ordered providers and per-provider models.' }
     if ($routerSource -notmatch 'StandardInputEncoding.*\$utf8') { throw 'Router does not explicitly enforce UTF-8 stdin when the runtime supports it.' }
     if ($routerSource -notmatch '\[Console\]::OutputEncoding\s*=\s*\$consoleUtf8') { throw 'Router does not explicitly enforce UTF-8 console output.' }
     if ($routerSource -notmatch 'Read-only context policy') { throw 'Router does not define the lightweight advisory context policy.' }
@@ -230,6 +234,8 @@ try {
     if ($appSource -notmatch 'system\.workflowRole' -or $appSource -notmatch 'Hermes \+ Ollama') { throw 'System integration metadata or Hermes orchestration label is missing from the UI.' }
     $routerOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs') -LocalOnly -DryRun
     if ($LASTEXITCODE -ne 0 -or ($routerOutput -join "`n") -notmatch 'ollama') { throw 'Local-only provider routing dry-run failed.' }
+    $orderedRouterOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $router -TaskFile $testTask -WorkingDirectory $testRepository -ProjectName 'ExampleProject' -Provider Auto -ProviderOrder 'Ollama,Claude,Codex' -OllamaModel 'polis-coder' -Mode ReadOnly -RunRoot (Join-Path $dataRoot 'router-runs-ordered') -DryRun
+    if ($LASTEXITCODE -ne 0 -or ($orderedRouterOutput -join "`n") -notmatch '"selected_order"' -or ($orderedRouterOutput -join "`n") -notmatch 'ollama') { throw 'Custom provider order dry-run failed.' }
 
     Set-Content -LiteralPath (Join-Path $testRepository 'dirty.txt') -Value 'dirty' -Encoding utf8
     $previousErrorAction = $ErrorActionPreference

@@ -14,6 +14,13 @@ function Test-ObjectProperty {
     return $null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]
 }
 
+function Get-ObjectPropertyValue {
+    param([object]$Object, [string]$Name)
+
+    if (-not (Test-ObjectProperty -Object $Object -Name $Name)) { return $null }
+    return $Object.PSObject.Properties[$Name].Value
+}
+
 function Convert-ResetTime {
     param([object]$Epoch)
 
@@ -124,31 +131,35 @@ function Get-CodexStatus {
     }
 
     $now = [DateTimeOffset]::Now
-    $primaryReset = Convert-ResetTime $latest.Limits.primary.resets_at
-    $secondaryReset = Convert-ResetTime $latest.Limits.secondary.resets_at
-    $primaryUsed = [double]$latest.Limits.primary.used_percent
-    $secondaryUsed = [double]$latest.Limits.secondary.used_percent
+    $primary = Get-ObjectPropertyValue -Object $latest.Limits -Name 'primary'
+    $secondary = Get-ObjectPropertyValue -Object $latest.Limits -Name 'secondary'
+    $primaryReset = Convert-ResetTime (Get-ObjectPropertyValue -Object $primary -Name 'resets_at')
+    $secondaryReset = Convert-ResetTime (Get-ObjectPropertyValue -Object $secondary -Name 'resets_at')
+    $primaryUsedValue = Get-ObjectPropertyValue -Object $primary -Name 'used_percent'
+    $secondaryUsedValue = Get-ObjectPropertyValue -Object $secondary -Name 'used_percent'
+    $primaryUsed = if ($null -ne $primaryUsedValue) { [double]$primaryUsedValue } else { 0.0 }
+    $secondaryUsed = if ($null -ne $secondaryUsedValue) { [double]$secondaryUsedValue } else { $null }
 
     if ($null -ne $primaryReset -and $now -ge $primaryReset) {
         $primaryUsed = 0
     }
-    if ($null -ne $secondaryReset -and $now -ge $secondaryReset) {
+    if ($null -ne $secondaryUsed -and $null -ne $secondaryReset -and $now -ge $secondaryReset) {
         $secondaryUsed = 0
     }
 
-    $available = $chatGptAuth -and $primaryUsed -lt 100 -and $secondaryUsed -lt 100
+    $available = $chatGptAuth -and $primaryUsed -lt 100 -and ($null -eq $secondaryUsed -or $secondaryUsed -lt 100)
     return [pscustomobject]@{
         available = $available
         authenticated_with_chatgpt = $chatGptAuth
         quota_known = $true
         primary_used_percent = $primaryUsed
-        primary_window_minutes = [int]$latest.Limits.primary.window_minutes
+        primary_window_minutes = Get-ObjectPropertyValue -Object $primary -Name 'window_minutes'
         primary_resets_local = if ($null -ne $primaryReset) { $primaryReset.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz') } else { $null }
         secondary_used_percent = $secondaryUsed
-        secondary_window_minutes = [int]$latest.Limits.secondary.window_minutes
+        secondary_window_minutes = Get-ObjectPropertyValue -Object $secondary -Name 'window_minutes'
         secondary_resets_local = if ($null -ne $secondaryReset) { $secondaryReset.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz') } else { $null }
-        rate_limit_reached_type = $latest.Limits.rate_limit_reached_type
-        credits = $latest.Limits.credits
+        rate_limit_reached_type = Get-ObjectPropertyValue -Object $latest.Limits -Name 'rate_limit_reached_type'
+        credits = Get-ObjectPropertyValue -Object $latest.Limits -Name 'credits'
         observed_at = $latest.Timestamp.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss zzz')
         source = $latest.Source
     }

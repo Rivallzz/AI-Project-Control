@@ -5,10 +5,12 @@ param(
     [string]$WorkingDirectory = (Get-Location).Path,
     [ValidateSet('Auto', 'Codex', 'Claude', 'Ollama')]
     [string]$Provider = 'Auto',
+    [string]$ProviderOrder = '',
     [ValidateSet('ReadOnly', 'Write')]
     [string]$Mode = 'ReadOnly',
     [string]$ProjectName = 'Project',
-    [string]$ClaudeModel = 'sonnet',
+    [string]$CodexModel = 'default',
+    [string]$ClaudeModel = 'default',
     [string]$OllamaModel = 'polis-coder',
     [string]$RunRoot = (Join-Path $env:USERPROFILE 'Documents\AI-Runs'),
     [switch]$LocalOnly,
@@ -239,20 +241,25 @@ $prompt | Set-Content -LiteralPath $executionPromptPath -Encoding utf8
 $sandbox = if ($Mode -eq 'Write') { 'workspace-write' } else { 'read-only' }
 $claudePermission = if ($Mode -eq 'Write') { 'acceptEdits' } else { 'plan' }
 
+$knownProviders = @('Codex', 'Claude', 'Ollama')
+$requestedProviders = if ($ProviderOrder.Trim()) {
+    @($ProviderOrder.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+elseif ($Provider -ne 'Auto') { @($Provider) }
+else { @('Codex', 'Claude', 'Ollama') }
+
+if ($requestedProviders.Count -eq 0) { throw 'Provider order is empty.' }
+if (@($requestedProviders | Select-Object -Unique).Count -ne $requestedProviders.Count) { throw 'Provider order contains duplicates.' }
+foreach ($requestedProvider in $requestedProviders) {
+    if ($requestedProvider -notin $knownProviders) { throw "Unknown provider in routing order: $requestedProvider" }
+}
+
+if ($LocalOnly) { $requestedProviders = @('Ollama') }
 $candidates = @(
-    if ($LocalOnly) {
-        if ($Provider -in @('Codex', 'Claude')) {
-            throw 'Codex or Claude was selected while subscription-token usage is disabled.'
-        }
-        if ($status.ollama.available) { 'ollama' }
-    }
-    elseif ($Provider -ne 'Auto') {
-        $Provider.ToLowerInvariant()
-    }
-    else {
-        if ($status.codex.available) { 'codex' }
-        if ($status.claude.available) { 'claude' }
-        if ($status.ollama.available) { 'ollama' }
+    foreach ($requestedProvider in $requestedProviders) {
+        $providerKey = $requestedProvider.ToLowerInvariant()
+        $providerStatus = $status.PSObject.Properties[$providerKey].Value
+        if ($providerStatus.available) { $providerKey }
     }
 )
 
@@ -321,6 +328,7 @@ Provider handoff:
         }
         $command = (Get-Command codex).Source
         $arguments = @('exec', '--json', '--color', 'never', '-C', $workingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-')
+        if ($CodexModel -and $CodexModel -ne 'default') { $arguments = @('exec', '--json', '--color', 'never', '-m', $CodexModel, '-C', $workingPath, '-s', $sandbox, '-c', 'approval_policy="never"', '-') }
         $processInput = $attemptPrompt
     }
     elseif ($candidate -eq 'claude') {
@@ -328,7 +336,8 @@ Provider handoff:
             throw 'Anthropic API configuration is present. Subscription-only routing refuses to risk API billing.'
         }
         $command = (Get-Command claude).Source
-        $arguments = @('-p', '--output-format', 'json', '--model', $ClaudeModel, '--effort', 'high', '--permission-mode', $claudePermission)
+        $arguments = @('-p', '--output-format', 'json', '--effort', 'high', '--permission-mode', $claudePermission)
+        if ($ClaudeModel -and $ClaudeModel -ne 'default') { $arguments += @('--model', $ClaudeModel) }
         $processInput = $attemptPrompt
     }
     else {

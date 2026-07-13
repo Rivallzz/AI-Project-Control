@@ -20,6 +20,8 @@ Projekt "C:\Repos\Example" hinzufügen
 
 Read-only mode uses the registered repository. Write mode automatically creates an isolated worktree and task branch from the project's integration branch (`develop` when available). Run artifacts remain under `Documents\AI-Runs` for review and provider handoff.
 
+The `Ausführung` panel beside the chat stores its settings separately for each project. Use the arrow controls to place Codex or Claude first, uncheck providers that should not run and choose a model in each row. `Abo-Kontingente zulassen` off forces Hermes/Ollama regardless of cloud ordering. Write mode excludes Hermes because its local write-safety gate is still closed. A quota failure hands the same task and worktree to the next enabled provider; other failures stop for review.
+
 ## Review And Publish
 
 Open `Prüfen & Git`. The left-aligned `Arbeitsstand` selector defaults to the latest changed task worktree. Click a file name to inspect only that file; its checkbox independently controls whether it belongs to the next commit. Commit the intended files locally. When the task branch is clean, based directly on the target branch and not yet integrated, `In <branch> übernehmen` performs a conflict-free fast-forward into its clean checkout. The target is `develop` when available and otherwise `main`; the confirmation calls out a direct `main` update. After that succeeds, the dashboard removes the task worktree and safely deletes the integrated local branch; when the branch was pushed to `origin`, it deletes that remote branch too. If the branch was already merged by another path, `Aufgabenbranch aufräumen` performs only this cleanup. If either side diverged or contains local changes, the dashboard stops without modifying the target checkout.

@@ -32,6 +32,67 @@
 
   <main class="layout">
     <aside class="sidebar">
+      <section id="executionPanel" class="panel execution-panel" aria-labelledby="executionHeading">
+        <div class="section-heading execution-heading">
+          <div><h2 id="executionHeading">Ausführung</h2><p>Für dieses Projekt gespeichert</p></div>
+        </div>
+
+        <div class="label-row">
+          <label for="modeSelect">Modus</label>
+          <details class="info-popover">
+            <summary aria-label="Information zum Modus">i</summary>
+            <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt einen getrennten Git-Worktree. Hermes ist für Schreibaufgaben noch nicht freigegeben.</div>
+          </details>
+        </div>
+        <select id="modeSelect" name="mode">
+          <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
+          <option value="Write">Änderungen erlauben</option>
+        </select>
+
+        <div class="route-heading">
+          <span>Provider-Reihenfolge</span>
+          <small>Oben beginnt</small>
+        </div>
+        <ol id="providerRouteList" class="provider-route" aria-label="Provider-Reihenfolge">
+          <li class="provider-route-row" data-provider="Codex">
+            <div class="provider-route-main">
+              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Codex</strong><small>ChatGPT-Kontingent</small></span></label>
+              <div class="route-actions">
+                <button class="route-move" type="button" data-route-move="up" title="Codex nach oben" aria-label="Codex nach oben">&#8593;</button>
+                <button class="route-move" type="button" data-route-move="down" title="Codex nach unten" aria-label="Codex nach unten">&#8595;</button>
+              </div>
+            </div>
+            <label class="model-control"><span>Modell</span><select data-provider-model="Codex" aria-label="Codex-Modell"></select></label>
+          </li>
+          <li class="provider-route-row" data-provider="Claude">
+            <div class="provider-route-main">
+              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Claude Code</strong><small>Claude-Kontingent</small></span></label>
+              <div class="route-actions">
+                <button class="route-move" type="button" data-route-move="up" title="Claude nach oben" aria-label="Claude nach oben">&#8593;</button>
+                <button class="route-move" type="button" data-route-move="down" title="Claude nach unten" aria-label="Claude nach unten">&#8595;</button>
+              </div>
+            </div>
+            <label class="model-control"><span>Modell</span><select data-provider-model="Claude" aria-label="Claude-Modell"></select></label>
+          </li>
+          <li class="provider-route-row" data-provider="Ollama">
+            <div class="provider-route-main">
+              <label class="provider-enabled"><input type="checkbox" checked><span><strong>Hermes + Ollama</strong><small>Lokal, kein Abo</small></span></label>
+              <div class="route-actions">
+                <button class="route-move" type="button" data-route-move="up" title="Hermes nach oben" aria-label="Hermes nach oben">&#8593;</button>
+                <button class="route-move" type="button" data-route-move="down" title="Hermes nach unten" aria-label="Hermes nach unten">&#8595;</button>
+              </div>
+            </div>
+            <label class="model-control"><span>Modell</span><select data-provider-model="Ollama" aria-label="Lokales Ollama-Modell"></select></label>
+          </li>
+        </ol>
+
+        <label class="token-toggle compact" for="useSubscriptionTokens">
+          <input id="useSubscriptionTokens" type="checkbox" checked>
+          <span><strong>Abo-Kontingente zulassen</strong><small>Aus: nur Hermes mit lokalem Ollama.</small></span>
+        </label>
+        <p id="routeSummary" class="route-summary" aria-live="polite"></p>
+      </section>
+
       <section class="panel" aria-labelledby="systemHeading">
         <div class="section-heading workflow-heading">
           <div><h2 id="systemHeading">Workflowstatus</h2><p id="workflowContext">Aktueller Projektablauf</p></div>
@@ -88,35 +149,6 @@
               <textarea id="taskText" name="task" rows="3" maxlength="200000" required placeholder="Nachricht oder Aufgabe für das ausgewählte Projekt"></textarea>
 
               <div id="attachmentPreview" class="attachment-preview hidden" aria-live="polite"></div>
-
-              <div class="composer-options">
-                <div>
-                  <label for="providerSelect">Provider</label>
-                  <select id="providerSelect" name="provider">
-                    <option value="Auto">Auto: Codex → Claude → Hermes + Ollama (experimentell)</option>
-                    <option value="Codex">Codex</option>
-                    <option value="Claude">Claude Code</option>
-                    <option value="Ollama">Hermes lokal (Read-only, experimentell)</option>
-                  </select>
-                </div>
-                <div>
-                  <div class="label-row">
-                    <label for="modeSelect">Modus</label>
-                    <details class="info-popover">
-                      <summary aria-label="Information zum Modus">i</summary>
-                      <div><strong>Nur lesen</strong> analysiert das Projekt. <strong>Änderungen erlauben</strong> erstellt automatisch einen getrennten Git-Worktree und lässt das Haupt-Repository unberührt.</div>
-                    </details>
-                  </div>
-                  <select id="modeSelect" name="mode">
-                    <option value="ReadOnly">Frage / Analyse (nur lesen)</option>
-                    <option value="Write">Änderungen erlauben</option>
-                  </select>
-                </div>
-                <label class="token-toggle" for="useSubscriptionTokens">
-                  <input id="useSubscriptionTokens" type="checkbox" checked>
-                  <span><strong>Codex-/Claude-Kontingent verwenden</strong><small>Aus: nur Hermes mit lokalem Ollama, keine Abo-Tokens.</small></span>
-                </label>
-              </div>
 
               <div class="form-actions">
                 <input id="attachmentInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-07-13
+
+- Added project-scoped provider ordering, enablement, execution mode and per-provider model selection beside the chat.
+- Discovered Codex models from its local cache and Ollama chat models from the current machine instead of hardcoding UI choices.
+- Passed the exact route and model map through task packages, server validation and quota handoffs without an additional LLM call.
+- Kept Hermes/Ollama unavailable for write mode while preserving it as the configurable read-only local fallback.
+- Made Codex quota status compatible with telemetry records that omit the secondary reset window.
+
 ## 2026-07-12
 
 - Extracted AI Project Control from the Polis-specific runtime.
