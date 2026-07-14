@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-07-14
+
+- Added a read-only current Workflow view with an authoritative status source, plain-language derivation, seven execution and Git gates, and capability-gated CLI/provider/MCP tool participation; the adaptive layout expands to one seven-stage row on the owner's 2550-pixel display.
+- Extended MCP responsive QA to the owner's 2550×1440 primary display, confirming a balanced four-card row, complete expanded policy content, 44-pixel targets, no horizontal overflow and no browser errors.
+- Audited all 26 catalog systems plus enabled Codex plugins and skill surfaces; kept deterministic tools on CLI/runtime boundaries, identified CC Switch and unused Comfy Cloud as optional removal candidates, and rejected duplicate classic MCP wrappers.
+- Added a project-scoped official OpenAI Developer Docs MCP with a five-tool read-only allow-list, no credential or paid API path, documented rollback and successful protocol/tool/search validation.
+- Extended the safe Codex TOML inventory parser to retain multiline tool allow-lists, including comments, so the dashboard exposes the effective MCP policy.
+- Corrected Codex CLI detection to use the installed npm command shim instead of the blocked Windows App Execution Alias, removing the false `fehlt`/install prompt.
+- Replaced the primary Systems surface with a read-only MCP Server inventory for Codex and Claude Code, including safe configuration redaction, local/remote and project scope, explicit integration contracts and responsive cards; retained installation and update controls under secondary diagnostics.
+- Contained the Graphify node list in a keyboard-focusable responsive scroll region matched to the graph height, while keeping its heading and selection guidance visible.
+
 ## 2026-07-13
 
 - Aligned the Git review commit field and action buttons on one shared control row, with dynamic two-column and single-column wrapping for narrower viewports.

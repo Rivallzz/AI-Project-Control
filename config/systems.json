@@ -192,7 +192,7 @@
       "category": "KI-Agent",
       "tier": "recommended",
       "reason": "Primärer Coding-Agent mit bestehendem ChatGPT-Kontingent.",
-      "detect": { "type": "command", "command": "codex.exe", "args": ["--version"] },
+      "detect": { "type": "command", "command": "codex.cmd", "args": ["--version"] },
       "package": "codex"
     },
     {

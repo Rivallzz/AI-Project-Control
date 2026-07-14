@@ -23,6 +23,8 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Compact help indicators align to the right edge of their label row. Their visible glyph stays subordinate to the field label while the interactive target remains at least 44 by 44 pixels.
 - Image attachments support file selection and clipboard paste with the same validation limits.
 - Install actions use a server-side allowlist and require explicit confirmation.
+- The MCP surface leads with a read-only server summary and responsive configuration cards. `Konfiguriert` is visually and textually distinct from a verified live connection; role, activation, cost, variable names, tool filters and timeouts stay behind one keyboard-accessible disclosure per server. Local installation and update controls remain secondary under `Lokale Laufzeiten & Diagnose`.
+- The Workflow surface uses one linear seven-stage list rather than a decorative process graph. Its summary states the authoritative source and route; every stage includes a text status, plain-language reason and tool tags. A separate explanation block answers why the workflow is shown, while tool cards distinguish active/ready, on-demand and unused/unavailable states through text as well as color.
 - Portfolio gives every registered project one compact operational row, while the global dropdown remains the canonical active-project switcher.
 - Knowledge search updates Graphify and Obsidian together; source badges keep discovery, working context and authority distinct.
 - Graph canvas, node list and direct relationship buttons share one selection state. List and relationship selection centers the node; graph selection reveals the matching list item; direct relationships use text as well as color.
@@ -37,6 +39,8 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - Provider and component details compact below 1500 pixels; full details remain in System Inventory.
 - Message width is constrained for readable lines while the workspace itself uses available screen area.
 - Controls wrap before labels truncate.
+- MCP metrics use four columns on desktop and two columns below 850 pixels; server cards reflow from an adaptive grid to one column without horizontal overflow.
+- Workflow facts, stages and tool cards use adaptive grids. On the 2550-pixel primary display all seven stages form one row; narrower widths wrap whole cards, and mobile uses one-column facts without truncating reasons or tool names.
 - Below desktop width, the workflow panel forms a compact band above the workspace; execution controls and chat collapse from two columns to one on narrow screens.
 - In the two-column workspace, execution and chat share one viewport-aware visible height. The chat keeps the remaining width as the primary surface; overflowing execution controls scroll inside their panel without moving the conversation.
 - From 2000 pixels upward, the workspace may expand to 2140 pixels and the execution column grows fluidly from 380 to 440 pixels. Below 850 pixels, both panels stack and return to the normal page scroll instead of creating an extra nested execution scroll.
@@ -49,7 +53,7 @@ AI Project Control is a quiet local operations tool, not a marketing dashboard. 
 - `prefers-reduced-motion` disables nonessential transitions and spinner motion.
 - No cloud fonts, decorative images, large UI frameworks or client-side telemetry.
 - Background refresh is automatic and cached; manual refresh controls are reserved for explicit diagnostic views.
-- Knowledge uses the page as its only scroll container. Note lists and note content do not introduce nested scrollbars.
+- Knowledge keeps notes in the page scroll. The Graphify node list is the single bounded exception: it matches the responsive graph height, exposes a keyboard-focusable vertical scroll region and keeps its heading and selection hint visible while hundreds of nodes remain contained.
 
 ## Avoid
 

@@ -12,10 +12,11 @@ AI Project Control is a local, multi-project workspace for running controlled ta
 - Automatic isolated Git worktrees with semantic task branches, based on the project's integration branch (`develop` when present).
 - Disposable, content-verified checkouts for every read-only provider attempt.
 - Live provider, handoff and tool progress directly inside the project conversation, with technical output available on demand.
+- A read-only current-workflow view that explains the active route, seven execution and Git gates, and why each installed tool is active, ready, on demand or unused.
 - Unified Graphify relationship explorer and automatically loaded Obsidian working notes.
 - Worktree-aware per-file Git review with branch-specific persisted commit suggestions and a guarded task-branch → integration-branch → `main` promotion path.
 - Automatic local project provisioning with Git, documentation, Graphify and Obsidian.
-- Machine and project integration inventory, including Hermes, ECC and MCP.
+- A read-only MCP Server view for Codex and Claude Code configuration, with local/remote, scope, activation, cost and health boundaries; machine diagnostics remain available separately.
 - Symbol-level code navigation through Serena and compact quota handoffs through cli-continues.
 - Dynamic machine inventory, project capability mapping and reviewed installers for missing local foundations.
 - Source-bound, fingerprinted update checks with explicit one-use owner authorization and no silent maintenance.

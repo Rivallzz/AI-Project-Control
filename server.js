@@ -12,6 +12,8 @@ const { writeJsonAtomic } = require('./lib/runtime/atomic-json');
 const { safeId, projectDisplayName, yamlScalar } = require('./lib/projects/metadata');
 const { PROVIDER_NAMES, buildModelCatalog, ollamaModelIdsFromList, validateModelSelections } = require('./lib/providers/model-catalog');
 const { createGraphifyRuntimeResolver } = require('./lib/integrations/graphify-runtime');
+const { getMcpInventory } = require('./lib/integrations/mcp-inventory');
+const { buildCurrentWorkflow } = require('./lib/workflow/current-workflow');
 const {
   normalizeCatalog,
   getCatalogBinding,
@@ -750,29 +752,17 @@ async function getSystemUpdateStatuses(catalog, detections, force = false) {
   finally { systemUpdateRefresh = null; }
 }
 
-async function mcpSummary() {
-  let codexServers = 0;
-  let claudeServers = 0;
-  const codexConfig = path.join(HOME, '.codex', 'config.toml');
-  const claudeConfig = path.join(HOME, '.claude.json');
-  if (fs.existsSync(codexConfig)) {
-    const text = await fsp.readFile(codexConfig, 'utf8');
-    codexServers = new Set([...text.matchAll(/^\[mcp_servers\.([^.\]]+)\]$/gm)].map((match) => match[1])).size;
-  }
-  if (fs.existsSync(claudeConfig)) {
-    try {
-      const config = JSON.parse(await fsp.readFile(claudeConfig, 'utf8'));
-      const roots = [config.mcpServers, ...Object.values(config.projects || {}).map((project) => project?.mcpServers)];
-      claudeServers = new Set(roots.flatMap((servers) => servers && typeof servers === 'object' ? Object.keys(servers) : [])).size;
-    } catch { claudeServers = 0; }
-  }
-  const total = codexServers + claudeServers;
+async function mcpSummary(projectRepository = null) {
+  const inventory = await getMcpInventory({ home: HOME, projectRepository });
+  const codexServers = inventory.summary.clients.codex;
+  const claudeServers = inventory.summary.clients.claude;
+  const total = inventory.summary.configured;
   return {
     ok: total > 0,
     codexServers,
     claudeServers,
     total,
-    text: total ? `${total} Konfiguration(en) erkannt · MCP selbst ist kostenlos; angebundene Dienste können separat kosten` : 'Keine aktiven MCP-Server erkannt',
+    text: total ? `${total} Konfiguration(en) erkannt · Laufzeiten werden nicht automatisch gestartet` : 'Keine MCP-Server konfiguriert',
   };
 }
 
@@ -789,8 +779,8 @@ async function graphSummary(graphPath) {
 async function getComponents(project, force = false) {
   const cached = componentCache.get(project.id);
   if (!force && cached && Date.now() - cached.at < 15000) return cached.value;
-  const [codex, claude, hermes, ollama, graphifyRuntime, graph, branch, gitStatus, eccCommit, mcp] = await Promise.all([
-    commandSummary('codex.exe', ['--version']),
+  const [codex, claude, hermes, ollama, graphifyRuntime, graph, branch, gitStatus, eccCommit, mcp, cliContinues] = await Promise.all([
+    commandSummary('codex.cmd', ['--version']),
     commandSummary('claude.exe', ['--version']),
     commandSummary('hermes.exe', ['--version']),
     commandSummary('ollama.exe', ['--version']),
@@ -799,7 +789,8 @@ async function getComponents(project, force = false) {
     commandSummary('git.exe', ['-C', project.repository, 'branch', '--show-current']),
     commandSummary('git.exe', ['-C', project.repository, 'status', '--short']),
     commandSummary('git.exe', ['-C', ECC_ROOT, 'rev-parse', '--short', 'HEAD']),
-    mcpSummary(),
+    mcpSummary(project.repository),
+    commandSummary('continues.cmd', ['--version']),
   ]);
   const value = {
     codex, claude, hermes, ollama,
@@ -817,7 +808,7 @@ async function getComponents(project, force = false) {
       path: project.repository,
     },
     ecc: { ok: eccCommit.ok, commit: eccCommit.text, path: ECC_ROOT },
-    mcp,
+    mcp, cliContinues,
     obsidian: { ok: fs.existsSync(project.obsidianPath), path: project.obsidianPath },
     router: { ok: fs.existsSync(STATUS_SCRIPT) && fs.existsSync(TASK_SCRIPT), path: ROUTER_ROOT },
   };
@@ -2018,6 +2009,51 @@ async function getGitState(project, requestedWorktree = null) {
   };
 }
 
+function workflowRequest(searchParams) {
+  const mode = searchParams.get('mode') === 'Write' ? 'Write' : 'ReadOnly';
+  const providerOrder = [];
+  for (const value of String(searchParams.get('providerOrder') || '').split(',')) {
+    const provider = PROVIDER_NAMES.find((candidate) => candidate.toLowerCase() === value.trim().toLowerCase());
+    if (provider && !providerOrder.includes(provider)) providerOrder.push(provider);
+  }
+  return {
+    mode,
+    providerOrder,
+    useSubscriptionTokens: searchParams.get('useSubscriptionTokens') !== '0',
+    codeTask: searchParams.get('codeTask') === '1',
+    force: searchParams.get('force') === '1',
+  };
+}
+
+async function getCurrentWorkflow(project, requested) {
+  const projectJobs = Array.from(jobs.values())
+    .filter((job) => job.projectId === project.id)
+    .map(snapshotJob);
+  const [components, mcpInventory] = await Promise.all([
+    getComponents(project, requested.force === true),
+    getMcpInventory({ home: HOME, projectRepository: project.repository }),
+  ]);
+  const runningJob = projectJobs
+    .filter((job) => (job.kind || 'task') === 'task' && ['running', 'stopping'].includes(job.status))
+    .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')))[0] || null;
+  let workflowJobs = runningJob ? [runningJob] : [];
+  let git = null;
+  if (!runningJob) {
+    const terminalWrites = projectJobs
+      .filter((job) => (job.kind || 'task') === 'task' && job.mode === 'Write' && ['completed', 'failed', 'blocked', 'stopped'].includes(job.status) && job.workingDirectory)
+      .sort((left, right) => String(right.updatedAt || right.finishedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.finishedAt || left.createdAt || '')));
+    for (const candidate of terminalWrites) {
+      try {
+        const candidateGit = await getGitState(project, candidate.workingDirectory);
+        workflowJobs = [candidate];
+        if (candidate.status === 'completed') git = candidateGit;
+        break;
+      } catch { /* A removed worktree no longer owns the current workflow. */ }
+    }
+  }
+  return buildCurrentWorkflow({ project, requested, jobs: workflowJobs, components, mcpInventory, git });
+}
+
 async function removeIntegratedTaskWorktree(project, state) {
   const remoteBranch = await execFileAsync('git.exe', ['-C', project.repository, 'ls-remote', '--heads', 'origin', `refs/heads/${state.branch}`]);
   const remoteSha = remoteBranch.exitCode === 0 ? remoteBranch.stdout.trim().split(/\s+/, 1)[0] || null : null;
@@ -2205,6 +2241,14 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/systems') {
       const { project } = await getProject(projectId); return sendJson(response, 200, await getSystemInventory(project, url.searchParams.get('force') === '1'));
     }
+    if (request.method === 'GET' && url.pathname === '/api/mcp') {
+      const { project } = await getProject(projectId);
+      return sendJson(response, 200, await getMcpInventory({ home: HOME, projectRepository: project.repository }));
+    }
+    if (request.method === 'GET' && url.pathname === '/api/workflow') {
+      const { project } = await getProject(projectId);
+      return sendJson(response, 200, await getCurrentWorkflow(project, workflowRequest(url.searchParams)));
+    }
     if (request.method === 'POST' && url.pathname === '/api/systems') return sendJson(response, 201, await addSystem(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/systems/install') return sendJson(response, 202, await installSystem(await readJsonBody(request)));
     if (request.method === 'POST' && url.pathname === '/api/systems/update') return sendJson(response, 202, await updateSystem(await readJsonBody(request)));
@@ -2245,7 +2289,7 @@ const server = http.createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/task-attachment') return await serveTaskAttachment(url, response);
     if (request.method === 'GET' && url.pathname === '/api/config') return sendJson(response, 200, {
-      apiContractVersion: 2,
+      apiContractVersion: 3,
       runRoot: RUN_ROOT, worktreeRoot: WORKTREE_ROOT, routerRoot: ROUTER_ROOT, dataRoot: DATA_ROOT, obsidianVault: OBSIDIAN_VAULT,
       defaultProjectParent: PROJECTS_ROOT,
       modelCatalog: await getProviderModelCatalog(url.searchParams.get('force') === '1'), defaultProviderOrder: DEFAULT_PROVIDER_ORDER,

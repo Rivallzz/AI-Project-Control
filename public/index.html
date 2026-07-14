@@ -46,9 +46,10 @@
       <nav class="view-tabs" role="tablist" aria-label="Dashboard-Bereiche">
         <button id="portfolioTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="portfolioView" tabindex="-1" data-view="portfolio">Portfolio</button>
         <button id="tasksTab" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="tasksView" data-view="tasks">Arbeitsbereich</button>
+        <button id="workflowTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="workflowView" tabindex="-1" data-view="workflow">Workflow</button>
         <button id="gitTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="gitView" tabindex="-1" data-view="git">Prüfen & Git</button>
         <button id="knowledgeTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="knowledgeView" tabindex="-1" data-view="knowledge">Wissen</button>
-        <button id="systemsTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="systemsView" tabindex="-1" data-view="systems">Systeme</button>
+        <button id="systemsTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="systemsView" tabindex="-1" data-view="systems">MCP-Server</button>
       </nav>
 
       <div class="content">
@@ -180,6 +181,21 @@
           </div>
         </div>
 
+        <div id="workflowView" class="view hidden" role="tabpanel" aria-labelledby="workflowTab" data-view-panel="workflow">
+          <section class="panel workflow-panel" aria-labelledby="workflowHeading">
+            <div class="section-heading workflow-view-heading">
+              <div>
+                <h2 id="workflowHeading">Aktueller Workflow</h2>
+                <p>Ablauf, Herleitung und beteiligte Werkzeuge des ausgewählten Projekts</p>
+              </div>
+              <button id="workflowRefreshButton" class="button secondary" type="button">Neu ableiten</button>
+            </div>
+            <div id="workflowOverview" class="workflow-overview" role="region" aria-label="Abgeleiteter aktueller Workflow" aria-live="polite" aria-busy="false">
+              <p class="empty">Der aktuelle Workflow wird geladen.</p>
+            </div>
+          </section>
+        </div>
+
         <div id="gitView" class="view hidden" role="tabpanel" aria-labelledby="gitTab" data-view-panel="git">
           <section class="panel git-panel" aria-labelledby="gitHeading">
             <div class="section-heading">
@@ -243,7 +259,7 @@
                   <section class="graph-node-browser" aria-labelledby="graphNodeListHeading">
                     <h4 id="graphNodeListHeading">Knotenliste</h4>
                     <p id="graphNodeListHint" class="graph-node-hint">Auswahl zentriert den Knoten und zeigt direkte Verbindungen.</p>
-                    <div id="graphNodeList" class="graph-node-list" aria-label="Graphify-Knoten"></div>
+                    <div id="graphNodeList" class="graph-node-list" role="region" aria-labelledby="graphNodeListHeading" aria-describedby="graphNodeListHint" tabindex="0"></div>
                   </section>
                   <aside id="graphDetails" class="knowledge-details" aria-live="polite"><p class="empty">Wähle einen Knoten im Graphen oder in der Liste.</p></aside>
                 </div>
@@ -261,33 +277,42 @@
         </div>
 
         <div id="systemsView" class="view hidden" role="tabpanel" aria-labelledby="systemsTab" data-view-panel="systems">
-          <section class="panel" aria-labelledby="systemsHeading">
+          <section class="panel mcp-panel" aria-labelledby="systemsHeading">
             <div class="section-heading">
-              <div><h2 id="systemsHeading">Systeminventar</h2><p>Basis, empfohlener Workflow und projektspezifische Werkzeuge</p></div>
-              <button id="systemsRefreshButton" class="button secondary" type="button">Neu prüfen</button>
+              <div><h2 id="systemsHeading">MCP-Server</h2><p>Konfigurationen für Codex und Claude Code – ohne automatischen Serverstart</p></div>
+              <button id="systemsRefreshButton" class="button secondary" type="button">Neu einlesen</button>
             </div>
-            <div id="systemSetupSummary" class="setup-summary" aria-live="polite"></div>
-            <h3 class="subheading">Für dieses Projekt</h3>
-            <div id="projectSystems" class="system-grid"></div>
-            <h3 class="subheading">Auf diesem PC</h3>
-            <div id="globalSystems" class="system-grid"></div>
+            <div id="mcpSummary" class="mcp-summary" aria-live="polite"></div>
+            <p class="mcp-safety-note"><strong>Nur lesend:</strong> Diese Ansicht erkennt Konfigurationen. Sie startet keine MCP-Server und zeigt keine Zugangsdaten an.</p>
+            <div id="mcpServerList" class="mcp-server-list" aria-live="polite"><div class="empty">MCP-Konfigurationen werden eingelesen…</div></div>
           </section>
 
-          <details class="panel system-registration">
-            <summary><span><strong id="registerSystemHeading">System registrieren</strong><small>Lokales Werkzeug oder Erweiterung ergänzen</small></span></summary>
-            <form id="systemForm" class="system-form">
-              <div class="form-grid">
-                <div><label for="systemName">Name</label><input id="systemName" required maxlength="100"></div>
-                <div><label for="systemType">Typ</label><input id="systemType" required placeholder="z. B. Bildgenerierung"></div>
-              </div>
-              <label for="systemPath">Lokaler Pfad</label>
-              <input id="systemPath" required spellcheck="false">
-              <div class="form-grid">
-                <div><label for="systemScope">Gültigkeit</label><select id="systemScope"><option value="global">Alle Projekte</option><option value="project">Aktuelles Projekt</option></select></div>
-                <div><label for="systemNote">Notiz</label><input id="systemNote" maxlength="500"></div>
-              </div>
-              <div class="form-actions"><button class="button primary" type="submit">System registrieren</button><span id="systemMessage" class="form-message" role="status"></span></div>
-            </form>
+          <details class="panel system-diagnostics">
+            <summary><span><strong>Lokale Laufzeiten &amp; Diagnose</strong><small>Installationen, Updates und projektspezifische Werkzeuge</small></span></summary>
+            <div class="system-diagnostics-body">
+              <div id="systemSetupSummary" class="setup-summary" aria-live="polite"></div>
+              <h3 class="subheading">Für dieses Projekt</h3>
+              <div id="projectSystems" class="system-grid"></div>
+              <h3 class="subheading">Auf diesem PC</h3>
+              <div id="globalSystems" class="system-grid"></div>
+
+              <details class="system-registration">
+                <summary><span><strong id="registerSystemHeading">System registrieren</strong><small>Lokales Werkzeug oder Erweiterung ergänzen</small></span></summary>
+                <form id="systemForm" class="system-form">
+                  <div class="form-grid">
+                    <div><label for="systemName">Name</label><input id="systemName" required maxlength="100"></div>
+                    <div><label for="systemType">Typ</label><input id="systemType" required placeholder="z. B. Bildgenerierung"></div>
+                  </div>
+                  <label for="systemPath">Lokaler Pfad</label>
+                  <input id="systemPath" required spellcheck="false">
+                  <div class="form-grid">
+                    <div><label for="systemScope">Gültigkeit</label><select id="systemScope"><option value="global">Alle Projekte</option><option value="project">Aktuelles Projekt</option></select></div>
+                    <div><label for="systemNote">Notiz</label><input id="systemNote" maxlength="500"></div>
+                  </div>
+                  <div class="form-actions"><button class="button primary" type="submit">System registrieren</button><span id="systemMessage" class="form-message" role="status"></span></div>
+                </form>
+              </details>
+            </div>
           </details>
         </div>
 

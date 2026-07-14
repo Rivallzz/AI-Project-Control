@@ -56,12 +56,42 @@ test('the isolated harness chooses a non-default port and health reports it', as
 test('the config endpoint exposes the versioned model catalog including partial availability', async () => {
   const response = await requestJson(server.baseUrl, '/api/config');
   assert.equal(response.status, 200);
-  assert.equal(response.body.apiContractVersion, 2);
+  assert.equal(response.body.apiContractVersion, 3);
   assert.equal(response.body.modelCatalog.version, 1);
   assert.deepEqual(Object.keys(response.body.modelCatalog.providers), ['Codex', 'Claude', 'Ollama']);
   assert.equal(response.body.modelCatalog.providers.Codex.models.some((model) => model.id === 'default'), true);
   assert.equal(response.body.modelCatalog.providers.Claude.models.some((model) => model.id === 'sonnet'), true);
   assert.equal(response.body.modelCatalog.providers.Ollama.status, 'error');
+});
+
+test('the MCP endpoint exposes read-only configuration state without credential values', async () => {
+  const codexRoot = path.join(root, 'home', '.codex');
+  await fs.mkdir(codexRoot, { recursive: true });
+  await fs.writeFile(path.join(codexRoot, 'config.toml'), `
+    [mcp_servers.remote]
+    url = 'https://account:password@example.test/mcp?token=must-not-leak'
+    bearer_token_env_var = 'REMOTE_TOKEN'
+  `, 'utf8');
+
+  const response = await requestJson(server.baseUrl, `/api/mcp?projectId=${encodeURIComponent(graphProject.id)}`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.policy.mode, 'read-only');
+  assert.equal(response.body.summary.configured, 1);
+  assert.equal(response.body.servers[0].health.state, 'not-checked');
+  assert.equal(response.body.servers[0].target, 'https://example.test/mcp?…');
+  assert.deepEqual(response.body.servers[0].environmentRefs, ['REMOTE_TOKEN']);
+  assert.doesNotMatch(JSON.stringify(response.body), /password|must-not-leak/);
+});
+
+test('the workflow endpoint explains stages and tools without exposing MCP credentials or targets', async () => {
+  const response = await requestJson(server.baseUrl, `/api/workflow?projectId=${encodeURIComponent(graphProject.id)}&mode=ReadOnly&providerOrder=Codex,Claude&useSubscriptionTokens=1&codeTask=0`);
+  assert.equal(response.status, 200);
+  assert.equal(response.body.policy.mode, 'read-only');
+  assert.equal(response.body.summary.mode, 'ReadOnly');
+  assert.deepEqual(response.body.stages.map((entry) => entry.title), ['Projektkontext', 'Provider-Route', 'Agent', 'Review', 'Commit', 'Integration', 'Push']);
+  assert.equal(response.body.stages.find((entry) => entry.id === 'push').state, 'not-required');
+  assert.equal(response.body.tools.some((entry) => entry.name === 'Graphify'), true);
+  assert.doesNotMatch(JSON.stringify(response.body), /password|must-not-leak|example\.test|REMOTE_TOKEN/);
 });
 
 test('a readable project index stays available when the global Graphify CLI is unavailable', async () => {

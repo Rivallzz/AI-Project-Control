@@ -19,6 +19,14 @@ Browser UI
      -> Graphify index reader
      -> Serena MCP for on-demand symbol-level code navigation
      -> Obsidian project-area reader
+     -> read-only MCP inventory API
+        -> Codex global and project TOML configuration
+        -> Claude global and project JSON configuration
+        -> redacted normalized server contracts without process startup
+     -> read-only current-workflow projection
+        -> current form route or authoritative running job
+        -> explicit reasons for context, route, agent and Git gates
+        -> capability-gated CLI, provider and MCP tool roles
      -> Git review API
         -> compact status plus on-demand per-file diff
         -> explicitly confirmed commit
@@ -35,8 +43,10 @@ Browser UI
 - `server.js`: HTTP API orchestration, project registry, task dispatch and Git workflow.
 - `lib/http`, `lib/projects` and `lib/runtime`: request boundaries, project metadata and serialized atomic state writes.
 - `lib/systems`: catalog validation, source-specific checks, authorization, maintenance serialization and cancellation policy.
+- `lib/integrations/mcp-inventory.js`: read-only Codex/Claude MCP configuration parsing, redaction and normalized integration contracts.
+- `lib/workflow/current-workflow.js`: pure, read-only projection of the current workflow, its reasons, delivery gates and capability-gated tool participation.
 - `config/systems.json`: versioned sources, package identities, system detection and capability mapping.
-- `public/app.js`: browser orchestration; `public/modules/` owns project-scoped request and conversation state.
+- `public/app.js`: browser orchestration; `public/modules/` owns project-scoped request, conversation state and the current-workflow renderer.
 - `router/`: provider status, quota guards, routing and handoff packages.
 - `Docs/`: canonical product and operating documentation.
 - `%LOCALAPPDATA%\AI Project Control`: mutable machine state and logs.
@@ -68,6 +78,12 @@ Update checks follow the same catalog boundary. Each updateable system reference
 
 Catalog entries may also declare workflow role, activation and cost policy. These fields make the difference between software that is merely detected and an integration that has a bounded place in the workflow.
 
+## MCP inventory boundary
+
+`GET /api/mcp` reads the selected project's effective local MCP configuration surface without launching a configured command or contacting a remote endpoint. It combines the global Codex `~/.codex/config.toml`, project `.codex/config.toml`, global Claude `~/.claude.json`, the selected Claude project entry and project `.mcp.json`. Other Claude project registrations are excluded from the selected-project response.
+
+Rows state client, scope, STDIO/HTTP transport, safe start target, activation, cost boundary, explicit tool filters and configured timeouts. URL credentials, query values, environment values and header values never enter the response; only environment or header names may be shown. A detected row therefore says `konfiguriert`, not `verbunden`: live health belongs to the owning MCP client and is not inferred by starting arbitrary commands from the dashboard.
+
 ## Git boundary
 
 The Git view is a review and publication surface, not an editor. It discovers every worktree registered with the selected project directly from Git, defaults to the latest changed task worktree and allows the owner to switch explicitly between task worktrees and the integration checkout. Status is compact and a read-only diff is loaded only for the file the owner opens. Checkboxes are reserved for commit selection. Commit and push commands run in the selected worktree, never silently in another checkout.
@@ -85,3 +101,9 @@ The Portfolio view derives one compact row for every registered project and high
 The compact global activity control prioritizes running work in other projects and then recent completed, blocked or failed work that still needs acknowledgement. Opening it switches to the relevant project conversation. Active provider phases, the latest meaningful activity, start/update timestamps and a short event timeline render as the current assistant response; full technical output is progressively disclosed inside that response instead of occupying a second feed column. While a run directory exists but has no terminal routing result, its owning live or recovered job remains authoritative. An orphaned incomplete directory is labelled `unvollständig` and never presented as active work. Conversation scrolling follows new output only while the operator remains near the bottom; manual upward scrolling suspends following until the operator explicitly returns to the newest content.
 
 Jobs persist outside the repository with bounded logs. A dashboard restart reloads terminal jobs and converts interrupted `running` or `stopping` records into explicit failed/interrupted history. Execution state and delivery state remain separate so a successful analysis is not mislabeled as an unpublished code change.
+
+## Current workflow projection
+
+`GET /api/workflow` combines the selected project, the visible execution settings, bounded job snapshots, component health, the redacted MCP inventory and—only for a completed write task—the relevant Git state. A running task is authoritative and overrides form changes made after it started. Without a running or still-open write task, the projection explains the current workspace configuration instead of assigning unrelated repository changes to a new workflow.
+
+The projection is deliberately deterministic and read-only. It contains safe names and reasons, but no task body, raw logs, local paths, MCP start targets, arguments, environment values or credentials. It does not start an MCP server or provider and cannot cross the independent commit, integration or push owner gates. The browser renders the seven linear stages as text-rich cards so the same meaning remains accessible without relying on color or a graph layout.

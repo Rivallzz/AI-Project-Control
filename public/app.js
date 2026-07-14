@@ -9,6 +9,7 @@ import {
   modelProfile, modelProfiles, primaryFirst, reconcileModelSelection, selectedModel, taskStartState,
 } from './modules/model-selection.js';
 import { centeredGraphPan, linkedGraphNodeIds } from './modules/graph-selection.js';
+import { renderWorkflow, workflowCodeSignal } from './modules/workflow-view.js';
 
 const elements = {
   connection: document.getElementById('connectionState'),
@@ -32,7 +33,9 @@ const elements = {
   noteTitle: document.getElementById('noteTitle'), noteContent: document.getElementById('noteContent'),
   history: document.getElementById('conversationHistory'), historyJumpLatest: document.getElementById('historyJumpLatest'),
   memoryForm: document.getElementById('memoryForm'), memoryText: document.getElementById('memoryText'), memoryMessage: document.getElementById('memoryMessage'),
-  systemsRefresh: document.getElementById('systemsRefreshButton'), systemSetupSummary: document.getElementById('systemSetupSummary'), projectSystems: document.getElementById('projectSystems'),
+  workflowRefresh: document.getElementById('workflowRefreshButton'), workflowOverview: document.getElementById('workflowOverview'),
+  systemsRefresh: document.getElementById('systemsRefreshButton'), mcpSummary: document.getElementById('mcpSummary'), mcpServerList: document.getElementById('mcpServerList'),
+  systemSetupSummary: document.getElementById('systemSetupSummary'), projectSystems: document.getElementById('projectSystems'),
   globalSystems: document.getElementById('globalSystems'), systemForm: document.getElementById('systemForm'),
   systemName: document.getElementById('systemName'), systemType: document.getElementById('systemType'), systemPath: document.getElementById('systemPath'),
   systemScope: document.getElementById('systemScope'), systemNote: document.getElementById('systemNote'), systemMessage: document.getElementById('systemMessage'),
@@ -73,6 +76,8 @@ const projectUiState = createProjectUiState();
 let liveJobs = new Map();
 let jobEventSource = null;
 let jobRenderPending = false;
+let workflowRefreshTimer = null;
+let workflowLastRequestedAt = 0;
 let componentStatus = null;
 let providerStatus = null;
 let modelCatalogReady = false;
@@ -90,7 +95,7 @@ const submittedTaskAttachments = new Map();
 const terminalHistoryRefreshes = new Set();
 const acknowledgedActivityJobs = new Set(JSON.parse(sessionStorage.getItem('acknowledgedActivityJobs') || '[]'));
 const JOB_KINDS = new Set(['task', 'dashboard-command', 'install', 'update', 'provision']);
-const API_CONTRACT_VERSION = 2;
+const API_CONTRACT_VERSION = 3;
 
 const requestState = createRequestState(() => activeProject?.id || null);
 const beginRequest = (...args) => requestState.begin(...args);
@@ -546,6 +551,7 @@ function connectJobEvents() {
       const job = JSON.parse(event.data);
       liveJobs.set(job.id, job);
       scheduleLiveJobRender();
+      scheduleWorkflowRefresh();
       const jobProjectId = projectUiState.jobOrigin(job.id) || job.projectId;
       if (jobProjectId === activeProject?.id && ['completed', 'failed', 'blocked', 'stopped'].includes(job.status) && !terminalHistoryRefreshes.has(job.id)) {
         terminalHistoryRefreshes.add(job.id);
@@ -789,10 +795,57 @@ function showView(name) {
   });
   elements.executionPanel.classList.toggle('hidden', name !== 'tasks');
   if (name === 'portfolio') loadPortfolio();
+  if (name === 'workflow') loadWorkflow();
   if (name === 'knowledge') loadActiveKnowledge();
   if (name === 'git') loadGitState();
   if (name === 'tasks') { refreshHistory(); refreshJobs(); }
   if (name === 'systems') loadSystems();
+}
+
+function visibleViewName() {
+  return document.querySelector('[data-view-panel]:not(.hidden)')?.dataset.viewPanel || 'tasks';
+}
+
+async function loadWorkflow(force = false, quiet = false) {
+  if (!activeProject) return;
+  const projectId = activeProject.id;
+  const token = beginRequest('workflow', projectId);
+  workflowLastRequestedAt = Date.now();
+  elements.workflowRefresh.disabled = true;
+  elements.workflowRefresh.setAttribute('aria-busy', 'true');
+  if (!quiet) {
+    elements.workflowOverview.setAttribute('aria-busy', 'true');
+    const loading = document.createElement('p'); loading.className = 'empty'; loading.textContent = 'Workflow wird aus Projekt-, Job-, Tool- und Git-Zustand abgeleitet…';
+    elements.workflowOverview.replaceChildren(loading);
+  }
+  const query = new URLSearchParams({
+    projectId,
+    mode: elements.mode.value,
+    providerOrder: currentProviderOrder().join(','),
+    useSubscriptionTokens: elements.useSubscriptionTokens.checked ? '1' : '0',
+    codeTask: workflowCodeSignal(elements.task.value) ? '1' : '0',
+    force: force ? '1' : '0',
+  });
+  try {
+    const data = await api(`/api/workflow?${query}`);
+    if (requestIsCurrent(token)) renderWorkflow(elements.workflowOverview, data);
+  } catch (error) {
+    if (requestIsCurrent(token)) {
+      const message = document.createElement('p'); message.className = 'workflow-error'; message.textContent = `Workflow konnte nicht abgeleitet werden: ${error.message}`;
+      elements.workflowOverview.replaceChildren(message); elements.workflowOverview.setAttribute('aria-busy', 'false');
+    }
+  } finally {
+    if (requestIsCurrent(token)) { elements.workflowRefresh.disabled = false; elements.workflowRefresh.removeAttribute('aria-busy'); }
+  }
+}
+
+function scheduleWorkflowRefresh(delay = 350) {
+  if (visibleViewName() !== 'workflow' || workflowRefreshTimer) return;
+  const minimumDelay = Math.max(0, 2000 - (Date.now() - workflowLastRequestedAt));
+  workflowRefreshTimer = setTimeout(() => {
+    workflowRefreshTimer = null;
+    if (visibleViewName() === 'workflow') void loadWorkflow(false, true);
+  }, Math.max(delay, minimumDelay));
 }
 
 function renderProjectSelector() {
@@ -894,6 +947,87 @@ async function loadPortfolio() {
   }
 }
 
+function mcpMetric(label, value, detail) {
+  const item = document.createElement('article'); item.className = 'mcp-metric';
+  const name = document.createElement('span'); name.textContent = label;
+  const number = document.createElement('strong'); number.textContent = String(value);
+  const explanation = document.createElement('small'); explanation.textContent = detail;
+  item.append(name, number, explanation);
+  return item;
+}
+
+function appendMcpFact(list, label, value) {
+  if (!value) return;
+  const term = document.createElement('dt'); term.textContent = label;
+  const description = document.createElement('dd'); description.textContent = value;
+  list.append(term, description);
+}
+
+function renderMcpInventory(inventory) {
+  const summary = inventory.summary || {};
+  elements.mcpSummary.replaceChildren(
+    mcpMetric('Aktiv konfiguriert', summary.active || 0, `${summary.configured || 0} Einträge erkannt`),
+    mcpMetric('Lokal', summary.local || 0, 'STDIO auf diesem PC'),
+    mcpMetric('Remote', summary.remote || 0, 'HTTP · Kosten prüfen'),
+    mcpMetric('Projektbezogen', summary.project || 0, activeProject?.name || 'Aktuelles Projekt'),
+  );
+  elements.mcpServerList.replaceChildren();
+  for (const server of inventory.servers || []) {
+    const item = document.createElement('article'); item.className = 'mcp-server-card';
+    const head = document.createElement('div'); head.className = 'mcp-server-head';
+    const heading = document.createElement('div');
+    const name = document.createElement('h3'); name.textContent = server.name;
+    const badges = document.createElement('div'); badges.className = 'mcp-badges';
+    for (const text of [server.client, server.scope === 'project' ? 'Projekt' : 'Global', server.transport === 'stdio' ? 'STDIO' : server.transport.toUpperCase()]) {
+      const badge = document.createElement('span'); badge.textContent = text; badges.append(badge);
+    }
+    heading.append(name, badges);
+    const state = document.createElement('span');
+    state.className = `status ${server.health.state === 'not-checked' ? 'info' : server.health.state === 'inactive' ? 'warn' : 'fail'}`;
+    state.textContent = server.status;
+    head.append(heading, state);
+
+    const target = document.createElement('div'); target.className = 'mcp-target';
+    const targetLabel = document.createElement('span'); targetLabel.textContent = server.transport === 'http' ? 'Adresse' : 'Startbefehl';
+    const targetValue = document.createElement('code'); targetValue.textContent = server.target;
+    target.append(targetLabel, targetValue);
+
+    const contract = document.createElement('details'); contract.className = 'mcp-contract';
+    const contractSummary = document.createElement('summary'); contractSummary.textContent = 'Integrationsvertrag anzeigen';
+    const facts = document.createElement('dl'); facts.className = 'mcp-facts';
+    appendMcpFact(facts, 'Zustand', server.health.detail);
+    appendMcpFact(facts, 'Rolle', server.role);
+    appendMcpFact(facts, 'Aktivierung', server.activation);
+    appendMcpFact(facts, 'Kosten', server.costPolicy);
+    appendMcpFact(facts, 'Konfigurationsvariablen', server.environmentRefs?.length
+      ? `Nur Namen sichtbar, keine Werte: ${server.environmentRefs.join(', ')}` : 'Keine Referenz auf Umgebungsvariablen oder Header erkannt.');
+    const toolPolicy = [
+      server.toolPolicy?.enabled?.length ? `erlaubt: ${server.toolPolicy.enabled.join(', ')}` : '',
+      server.toolPolicy?.disabled?.length ? `gesperrt: ${server.toolPolicy.disabled.join(', ')}` : '',
+      server.toolPolicy?.approvalMode ? `Freigabe: ${server.toolPolicy.approvalMode}` : '',
+    ].filter(Boolean).join(' · ');
+    appendMcpFact(facts, 'Werkzeugfilter', toolPolicy || 'Kein expliziter Werkzeugfilter konfiguriert.');
+    const timeouts = [
+      server.timeouts?.startupSeconds != null ? `Start ${server.timeouts.startupSeconds}s` : '',
+      server.timeouts?.toolSeconds != null ? `Werkzeug ${server.timeouts.toolSeconds}s` : '',
+    ].filter(Boolean).join(' · ');
+    appendMcpFact(facts, 'Zeitlimits', timeouts);
+    appendMcpFact(facts, 'Quelle', server.source);
+    contract.append(contractSummary, facts);
+    item.append(head, target, contract);
+    elements.mcpServerList.append(item);
+  }
+  for (const error of inventory.errors || []) {
+    const message = document.createElement('div'); message.className = 'mcp-config-error'; message.setAttribute('role', 'status');
+    message.textContent = `${error.client} · ${error.source}: ${error.message}`; elements.mcpServerList.append(message);
+  }
+  if (!elements.mcpServerList.children.length) {
+    const empty = document.createElement('div'); empty.className = 'empty mcp-empty';
+    empty.innerHTML = '<strong>Keine MCP-Server konfiguriert.</strong><span>Geprüft werden die globalen Codex-/Claude-Konfigurationen und die Konfiguration des ausgewählten Projekts.</span>';
+    elements.mcpServerList.append(empty);
+  }
+}
+
 function renderSystemRows(container, systems, grouped = false) {
   container.replaceChildren();
   const tierOrder = ['required', 'recommended', 'project'];
@@ -969,9 +1103,18 @@ async function loadSystems(force = false, quiet = false) {
   const projectId = activeProject.id;
   const token = beginRequest('systems', projectId);
   const previousLabel = elements.systemsRefresh.textContent;
-  if (force) { elements.systemsRefresh.disabled = true; elements.systemsRefresh.textContent = 'Prüft…'; }
-  try {
-    const inventory = await api(`/api/systems?projectId=${encodeURIComponent(projectId)}${force ? '&force=1' : ''}`);
+  elements.systemsRefresh.disabled = true; elements.systemsRefresh.setAttribute('aria-busy', 'true');
+  if (force) elements.systemsRefresh.textContent = 'Liest neu…';
+  elements.mcpServerList.innerHTML = '<div class="empty">MCP-Konfigurationen werden eingelesen…</div>';
+  const mcpTask = api(`/api/mcp?projectId=${encodeURIComponent(projectId)}`).then((inventory) => {
+    if (requestIsCurrent(token)) renderMcpInventory(inventory);
+  }).catch((error) => {
+    if (!requestIsCurrent(token)) return;
+    elements.mcpSummary.replaceChildren(); elements.mcpServerList.replaceChildren();
+    const message = document.createElement('div'); message.className = 'mcp-config-error'; message.textContent = `MCP-Konfigurationen konnten nicht gelesen werden: ${error.message}`;
+    elements.mcpServerList.append(message);
+  });
+  const diagnosticsTask = api(`/api/systems?projectId=${encodeURIComponent(projectId)}${force ? '&force=1' : ''}`).then((inventory) => {
     if (!requestIsCurrent(token)) return;
     renderSystemRows(elements.projectSystems, inventory.project);
     renderSystemRows(elements.globalSystems, inventory.global, true);
@@ -985,8 +1128,11 @@ async function loadSystems(force = false, quiet = false) {
     elements.systemSetupSummary.innerHTML = (requiredMissing
       ? `<strong>${requiredMissing} notwendige Komponente(n) fehlen.</strong> Fehlende freigegebene Werkzeuge können direkt installiert werden.`
       : `<strong>Basis vollständig.</strong> ${recommendedMissing ? `${recommendedMissing} empfohlene Erweiterung(en) sind noch nicht eingerichtet.` : 'Der empfohlene lokale Workflow ist vollständig.'}`) + updateNote;
-  } catch (error) { if (!quiet && requestIsCurrent(token)) elements.systemMessage.textContent = error.message; }
-  finally { if (force && requestIsCurrent(token)) { elements.systemsRefresh.disabled = false; elements.systemsRefresh.textContent = previousLabel; } }
+  }).catch((error) => { if (!quiet && requestIsCurrent(token)) elements.systemMessage.textContent = error.message; });
+  await Promise.allSettled([mcpTask, diagnosticsTask]);
+  if (requestIsCurrent(token)) {
+    elements.systemsRefresh.disabled = false; elements.systemsRefresh.removeAttribute('aria-busy'); elements.systemsRefresh.textContent = previousLabel;
+  }
 }
 
 function renderGitDelivery(data) {
@@ -1141,7 +1287,7 @@ async function loadGitFileDiff(filePath) {
 
 async function activateProject(projectId) {
   const target = registry.projects.find((project) => project.id === projectId);
-  const visibleView = document.querySelector('[data-view-panel]:not(.hidden)')?.dataset.viewPanel || 'tasks';
+  const visibleView = visibleViewName();
   storeComposerDraft();
   invalidateProjectRequests();
   activeModelCatalogToken = null; modelCatalogLoading = false; providerStatus = null; providerStatusErrorMessage = ''; elements.refreshModels.removeAttribute('aria-busy');
@@ -1159,6 +1305,7 @@ async function activateProject(projectId) {
     renderProjectSelector(); restoreComposerDraft(activeProject.id); resetKnowledge(); renderConversation();
     await refreshAll(true);
     if (visibleView === 'portfolio') await loadPortfolio();
+    else if (visibleView === 'workflow') await loadWorkflow(true);
     else if (visibleView === 'knowledge') await loadActiveKnowledge();
     else if (visibleView === 'git') await loadGitState();
     else if (visibleView === 'systems') await loadSystems();
@@ -1725,6 +1872,7 @@ document.querySelector('.view-tabs').addEventListener('keydown', (event) => {
 });
 
 elements.systemsRefresh.addEventListener('click', () => loadSystems(true));
+elements.workflowRefresh.addEventListener('click', () => loadWorkflow(true));
 elements.addProject.addEventListener('click', () => { showView('projects'); elements.provisionName.focus(); });
 elements.projectSelect.addEventListener('change', () => activateProject(elements.projectSelect.value));
 elements.backgroundActivity.addEventListener('click', async () => {
@@ -1736,7 +1884,7 @@ elements.backgroundActivity.addEventListener('click', async () => {
 });
 elements.providerPreset.addEventListener('change', (event) => {
   const radio = event.target.closest('input[name="providerPreset"]');
-  if (radio) applyProviderPreset(radio.value, true, radio.value === 'custom');
+  if (radio) { applyProviderPreset(radio.value, true, radio.value === 'custom'); scheduleWorkflowRefresh(); }
 });
 elements.modelProfile.addEventListener('change', () => {
   applyModelProfile(elements.modelProfile.value);
@@ -1751,9 +1899,10 @@ elements.providerRoute.addEventListener('change', (event) => {
     if (modelSelect.dataset.providerModel === 'Ollama' && providerStatus) providerStatus = { ...providerStatus, ollama: null };
   }
   renderExecutionControls();
+  scheduleWorkflowRefresh();
   if (modelSelect?.dataset.providerModel === 'Ollama') void refreshStatusSafely(true);
 });
-elements.primaryProvider.addEventListener('change', () => { makeProviderPrimary(elements.primaryProvider.value); renderExecutionControls(); });
+elements.primaryProvider.addEventListener('change', () => { makeProviderPrimary(elements.primaryProvider.value); renderExecutionControls(); scheduleWorkflowRefresh(); });
 elements.refreshModels.addEventListener('click', async () => {
   const projectId = activeProject?.id;
   if (!projectId) return;
@@ -1790,9 +1939,9 @@ elements.refreshModels.addEventListener('click', async () => {
     }
   }
 });
-elements.mode.addEventListener('change', () => renderExecutionControls());
-elements.useSubscriptionTokens.addEventListener('change', () => renderExecutionControls());
-elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); });
+elements.mode.addEventListener('change', () => { renderExecutionControls(); scheduleWorkflowRefresh(); });
+elements.useSubscriptionTokens.addEventListener('change', () => { renderExecutionControls(); scheduleWorkflowRefresh(); });
+elements.task.addEventListener('input', () => { if (componentStatus) renderComponents(componentStatus); scheduleWorkflowRefresh(500); });
 
 elements.attachmentButton.addEventListener('click', () => elements.attachmentInput.click());
 elements.attachmentInput.addEventListener('change', async () => {
